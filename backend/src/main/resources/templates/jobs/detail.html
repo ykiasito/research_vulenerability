@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <meta th:if="${job.status == 'PENDING' || job.status == 'PROCESSING'}" http-equiv="refresh" content="5"/>
+    <title>ジョブ詳細 - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1 th:text="'ジョブ #' + ${job.id} + '（' + ${job.csvFilename} + '）'"></h1>
+<p>ステータス: <strong th:text="${job.status}"></strong>
+    <span th:if="${job.status == 'PENDING' || job.status == 'PROCESSING'}">（5秒ごとに自動更新します）</span>
+</p>
+
+<p th:if="${job.versionPlausibilityWarning}" style="background-color: #fff3cd; border: 1px solid #ffe08a; padding: 0.6em 1em; color: #7a5c00;">
+    ⚠ このCSVのバージョン値の多くが、実際に公開されているリリースとして確認できませんでした。
+    アップロードされたCSVのバージョン情報が実際の製品バージョンと一致していない可能性があります。結果は参考情報とし、必要に応じてご自身でも確認してください。
+</p>
+
+<p style="font-size: 0.9em; color: #555;">
+    <strong>調査確度</strong>の目安:
+    <span style="color: #0a7d2c;">🟢 高</span> = レジストリでバージョンまで確認済み /
+    <span style="color: #b8860b;">🟡 中</span> = 製品名(CPE)は一致したがバージョンや複数情報源の食い違いは未検証 /
+    <span style="color: #b00020;">🔴 低</span> = 弱い手がかりのみ、誤認識の可能性あり /
+    <span style="color: #999;">⚪ 未特定</span> = 特定できず。結果を鵜呑みにせず、特に🔴🟡は必要に応じてご自身でも確認してください。
+</p>
+
+<table border="1" cellpadding="4">
+    <thead>
+    <tr>
+        <th>調査確度</th>
+        <th>製品名</th>
+        <th>バージョン</th>
+        <th>ベンダー</th>
+        <th>状態</th>
+        <th>エコシステム</th>
+        <th>パッケージ名</th>
+        <th>CPE</th>
+        <th>信頼度</th>
+        <th>影響</th>
+        <th>脆弱性</th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr th:each="item : ${items}"
+        th:with="identified=${identifiedByItemId.get(item.id)},
+                  vulns=${vulnerabilitiesByItemId.get(item.id)},
+                  maxFixedVersion=${maxFixedVersionByItemId.get(item.id)},
+                  level=${identified == null
+                      ? (item.hintIdentifier != null ? 'hint' : 'none')
+                      : ((identified.versionConfirmed != null and identified.versionConfirmed)
+                          ? 'high'
+                          : (identified.cpe != null ? 'medium' : 'low'))}">
+        <td>
+            <span th:switch="${level}">
+                <span th:case="'high'" style="color: #0a7d2c;" title="レジストリでバージョンまで確認済み">🟢 高</span>
+                <span th:case="'medium'" style="color: #b8860b;" title="CPE(製品名)は一致したがバージョン等は未検証">🟡 中</span>
+                <span th:case="'low'" style="color: #b00020;" title="弱い手がかりのみ、誤認識の可能性あり">🔴 低</span>
+                <span th:case="'hint'" style="color: #7a5c00;" title="AIによる推測のヒントのみ、要確認">🟡 ヒントのみ</span>
+                <span th:case="*" style="color: #999;" title="特定できませんでした">⚪ 未特定</span>
+            </span>
+        </td>
+        <td>
+            <span th:text="${item.displayProductName}"></span>
+            <div th:if="${item.rawProductName != null and !item.rawProductName.equals(item.productName)}"
+                 style="font-size: 0.85em; color: #666;"
+                 th:text="'識別名: ' + ${item.productName}"></div>
+        </td>
+        <td th:text="${item.version}"></td>
+        <td th:text="${item.vendor}"></td>
+        <td>
+            <span th:text="${item.status}"></span>
+            <div th:if="${item.identificationHint != null}" style="font-size: 0.85em; color: #7a5c00;"
+                 th:text="'ヒント: ' + ${item.identificationHint}"></div>
+        </td>
+        <td th:text="${identified != null ? identified.ecosystem : (item.hintPlatform != null ? item.hintPlatform + '？' : '-')}"></td>
+        <td th:text="${identified != null ? identified.packageName : (item.hintIdentifier != null ? item.hintIdentifier + '？' : '-')}"></td>
+        <td th:text="${identified != null ? identified.cpe : '-'}"></td>
+        <td>
+            <span th:text="${identified != null ? identified.confidence : '-'}"></span>
+            <div th:if="${identified != null and identified.versionConfirmed != null and !identified.versionConfirmed}"
+                 style="font-size: 0.85em; color: #b00020;">
+                ⚠ このバージョンはレジストリで確認できませんでした
+            </div>
+            <div th:if="${identified != null and identified.versionConfirmed == null and identified.cpe != null}"
+                 style="font-size: 0.85em; color: #888;">
+                バージョンは未検証（製品名のみ照合）
+            </div>
+        </td>
+        <td>
+            <span th:if="${vulns != null and !vulns.isEmpty()}" style="color: #b00020; font-weight: bold;" title="既知の脆弱性が見つかりました">🔴 影響あり</span>
+            <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'SOURCES_FAILED'}" style="color: #b8860b; font-weight: bold;" title="脆弱性情報源への問い合わせがすべて失敗し、実際には未確認です">⚠ 要再確認（調査失敗）</span>
+            <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'IDENTIFICATION_TOO_WEAK'}" style="color: #7a5c00; font-weight: bold;" title="識別信頼度が低いため、AIによる脆弱性調査は実施していません">🟡 未検証（識別信頼度低）</span>
+            <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == null}" style="color: #0a7d2c; font-weight: bold;" title="既知の脆弱性は見つかりませんでした">🟢 影響なし</span>
+            <span th:if="${(vulns == null or vulns.isEmpty()) and item.status != 'IDENTIFIED' and item.hintIdentifier != null}" style="color: #0a7d2c;" title="AIヒントによる簡易調査のみ">🟢 影響なし（簡易調査）</span>
+            <span th:if="${(vulns == null or vulns.isEmpty()) and item.status != 'IDENTIFIED' and item.hintIdentifier == null}" style="color: #999;" title="製品を特定できなかったため判定できません">⚪ 判定不可</span>
+        </td>
+        <td>
+            <span th:if="${vulns == null or vulns.isEmpty()}">
+                <span th:if="${item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'SOURCES_FAILED'}" style="color: #b8860b; font-weight: bold;">脆弱性情報源への問い合わせがすべて失敗したため、未確認です（実際には調査できていません。再調査が必要です）</span>
+                <span th:if="${item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'IDENTIFICATION_TOO_WEAK'}" style="color: #7a5c00; font-weight: bold;">未検証（識別信頼度が低いため脆弱性調査は実施していません。製品の識別自体が弱い推測のため、AIによる検証パスをスキップしています）</span>
+                <span th:if="${item.status == 'IDENTIFIED' and item.researchIncompleteReason == null}">脆弱性なし</span>
+                <span th:if="${item.status != 'IDENTIFIED' and item.hintIdentifier != null}">脆弱性なし（識別子による簡易調査）</span>
+                <span th:if="${item.status != 'IDENTIFIED' and item.hintIdentifier == null}">-</span>
+            </span>
+            <div th:unless="${vulns == null or vulns.isEmpty()}">
+                <div th:if="${maxFixedVersion != null}" style="color: #0a7d2c; font-weight: bold; margin-bottom: 0.3em;"
+                     th:text="'推奨アップデート版: ' + ${maxFixedVersion} + '以上'"></div>
+                <ul style="margin: 0; padding-left: 1.2em;">
+                    <li th:each="vuln : ${vulns}">
+                        <a th:if="${vuln.url != null}" th:href="${vuln.url}" th:text="${vuln.cveOrGhsaId}" target="_blank" rel="noopener"></a>
+                        <span th:unless="${vuln.url != null}" th:text="${vuln.cveOrGhsaId}"></span>
+                        <span th:if="${vuln.severity != null}" th:text="'（' + ${vuln.severity} + '）'"></span>
+                        <span th:text="'[' + ${vuln.discoveredViaTier} + ']'" style="color: gray;"></span>
+                        <div th:if="${vuln.bundledComponentName != null}" style="font-size: 0.85em; color: #7a5c00;"
+                             th:text="'⚠ 同梱コンポーネント `' + ${vuln.bundledComponentName} + ' ' + ${vuln.bundledComponentVersion} + '` に既知の脆弱性情報があります。詳細は個別にご確認ください'"></div>
+                        <!-- CSAFベンダーアドバイザリー注記（docs/spec/csaf-vendor-advisory-plan.md §8-2/§8-3）。
+                             known_not_affected は必ずこのCVE個別の注記としてのみ表示し、他の行やアイテム全体の
+                             「影響なし」判定として解釈されないよう文言を該当CVEに限定する（§8-2(a)の制約）。 -->
+                        <div th:if="${vuln.csafAdvisoryId != null}" style="font-size: 0.85em;">
+                            <span th:if="${vuln.csafStatus == 'known_not_affected'}" style="color: #0a7d2c;"
+                                  th:text="'✓ ベンダーアドバイザリー ' + ${vuln.csafAdvisoryId} + ': このCVEの影響を受けないと表明しています（このCVEに限った表明です）'"></span>
+                            <span th:if="${vuln.csafStatus == 'fixed'}" style="color: #7a5c00;"
+                                  th:text="'⚠ ベンダーアドバイザリー ' + ${vuln.csafAdvisoryId} + ': 修正済みと表明しています'"></span>
+                            <span th:if="${vuln.csafStatus == 'known_affected'}" style="color: #b00020;"
+                                  th:text="'⚠ ベンダーアドバイザリー ' + ${vuln.csafAdvisoryId} + ': 影響を受けると表明しています'"></span>
+                            <span th:if="${vuln.csafStatus == 'under_investigation'}" style="color: #7a5c00;"
+                                  th:text="'⚠ ベンダーアドバイザリー ' + ${vuln.csafAdvisoryId} + ': 現在調査中と表明しています'"></span>
+                            <span th:if="${vuln.csafFixedVersion != null}" style="color: #555;"
+                                  th:text="'（ベンダー修正版参考情報: ' + ${vuln.csafFixedVersion} + '）'"></span>
+                        </div>
+                    </li>
+                </ul>
+            </div>
+        </td>
+    </tr>
+    </tbody>
+</table>
+
+<p>
+    <a th:unless="${job.status == 'PENDING' || job.status == 'PROCESSING'}"
+       th:href="@{/jobs/{id}/export.csv(id=${job.id})}">CSVエクスポート</a>
+    <a th:href="@{/jobs}">ジョブ一覧に戻る</a>
+</p>
+</body>
+</html>

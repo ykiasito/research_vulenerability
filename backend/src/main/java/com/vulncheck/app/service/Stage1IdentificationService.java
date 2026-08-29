@@ -1,0 +1,1807 @@
+package com.vulncheck.app.service;
+
+import com.vulncheck.app.entity.CpeDictionaryEntry;
+import com.vulncheck.app.entity.EcosystemRegistry;
+import com.vulncheck.app.entity.IdentifiedProduct;
+import com.vulncheck.app.entity.ResearchJobItem;
+import com.vulncheck.app.repository.CpeDictionaryRepository;
+import com.vulncheck.app.repository.EcosystemRegistryRepository;
+import com.vulncheck.app.repository.IdentifiedProductRepository;
+import com.vulncheck.app.repository.ResearchJobItemRepository;
+import com.vulncheck.app.service.llm.LlmServiceClient;
+import com.vulncheck.app.service.llm.LlmServiceModels.CandidateDto;
+import com.vulncheck.app.service.llm.LlmServiceModels.DisambiguateResponse;
+import com.vulncheck.app.service.llm.LlmServiceModels.EcosystemCandidateDto;
+import com.vulncheck.app.service.llm.LlmServiceModels.PlatformHintDto;
+import com.vulncheck.app.service.llm.LlmServiceModels.WebSearchIdentifyResponse;
+import com.vulncheck.app.service.nvd.CpeNameVariantCache;
+import com.vulncheck.app.service.nvd.CpeUtils;
+import com.vulncheck.app.service.nvd.NameVariantGenerator;
+import com.vulncheck.app.service.registry.PackageRegistryLookup;
+import com.vulncheck.app.service.registry.RegistryLookupCache;
+import com.vulncheck.app.service.registry.RegistryMatch;
+import com.vulncheck.app.service.registry.RegistryRoutingPolicy;
+import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Service;
+
+/**
+ * Stage1 product identification — Tier1 (static registries + CPE Dictionary), Tier2 (LLM
+ * disambiguation among an ambiguous CPE candidate set), and Tier3 (LLM+web_search when Tier1
+ * found nothing at all, e.g. marketplace name variance).
+ *
+ * <p>Tier1's CPE matching is not limited to whatever an admin has pre-synced into the local
+ * dictionary: {@link #fuzzyMatchCpe} falls back to a live, single-page NVD CPE API call (via
+ * {@link NvdCpeSyncService#syncKeywordSinglePage}) whenever the local mirror has zero candidates,
+ * so a product nobody has synced a keyword for yet can still be resolved — the whole point of a
+ * research tool is handling products that aren't already known locally.
+ *
+ * <p>Tier2/3 both go through {@link UserApiKeyService} for the job owner's own Claude key —
+ * if it's not configured, both tiers are silently skipped and this degrades to Tier1-only
+ * behavior (same as before Tier2/3 existed), never blocking or failing the item.
+ */
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class Stage1IdentificationService {
+
+    /**
+     * Two separate thresholds, not one: {@code product} holds the CPE's normalized single-word
+     * product slug (e.g. "gson", "nuget") and pg_trgm gives every real match near-1.0 similarity
+     * there — but {@code title} is a full human-readable string ("Microsoft NuGet 4.3.1") whose
+     * similarity to another short query inflates just from sharing a vendor word, independent of
+     * the actual product. Confirmed live: with a sparse dictionary (only a handful of keywords ever
+     * synced), "Microsoft Edge" and "Microsoft Teams" both scored ~0.35-0.4 title-similarity against
+     * "Microsoft NuGet ..." entries and were accepted as matches under a single 0.3 threshold —
+     * "Google Chrome" likewise matched "Google Gson ..." at 0.35. Requiring a much higher bar for a
+     * title-only hit (no product-slug corroboration) closes this off without narrowing product-slug
+     * matching, which was never the source of the false positives.
+     */
+    private static final double CPE_PRODUCT_SIMILARITY_THRESHOLD = 0.3;
+    private static final double CPE_TITLE_SIMILARITY_THRESHOLD = 0.6;
+    private static final int CPE_CANDIDATE_LIMIT = 3;
+    /**
+     * The dictionary search pulls a much wider pool than the {@value #CPE_CANDIDATE_LIMIT}
+     * candidates ultimately handed to Tier2, because the raw pg_trgm ordering is a poor final
+     * ranking on its own: the same product occupies one row per catalogued version (measured
+     * against the real NVD dictionary: 72.7% of its 1.8M rows are version duplicates — TeamViewer
+     * alone has dozens), so a narrow window is easily filled by near-duplicates or by unrelated
+     * products that merely score well on generic shared words. Pulling a wide pool first, then
+     * de-duplicating per vendor:product and re-ranking by vendor affinity, is what makes the final
+     * three actually mean "the three best distinct products".
+     */
+    private static final int CPE_CANDIDATE_POOL = 40;
+    private static final int LIVE_NVD_LOOKUP_RESULTS_PER_PAGE = 20;
+    private static final int MAX_LIVE_NVD_QUERY_ATTEMPTS = 3;
+    private static final BigDecimal CPE_MATCH_CONFIDENCE = new BigDecimal("0.6");
+    /**
+     * Hard cap on how many *extra* local-dictionary queries {@link #findByNameVariants} may issue
+     * per item, on top of the one literal query {@link #localCpeLookup} always runs first — this is
+     * the "candidate fan-out" the design explicitly requires a named limit for. Only ever spent at
+     * all when the literal search already found nothing, and stops at the first variant that finds
+     * something, so the common case (literal search already succeeds) pays none of this.
+     */
+    private static final int MAX_NAME_VARIANT_QUERIES_PER_ITEM = 3;
+    /**
+     * Hard cap on the initialism-expansion anchor search ({@link #expandLeadingInitialism}), a
+     * left-anchored regex search against the {@code product} column (see {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryCustom#findByLeadingInitialismMatch} for
+     * why this can still use the existing trigram index despite not being a plain similarity
+     * search). As of 2026-08-25 the regex itself does the real filtering at the SQL level (a
+     * candidate's leading per-word initials must spell the abbreviation, immediately followed by
+     * the anchor) rather than a broad ILIKE pre-filter — this limit is now generous headroom above
+     * the handful of genuine matches a real abbreviation+anchor pair has, not a correctness-critical
+     * window a real match has to fit inside.
+     */
+    private static final int NAME_VARIANT_ANCHOR_SEARCH_LIMIT = 500;
+    /** An initialism this short (1 char) or this long (7+) isn't a plausible abbreviation of
+     *  several other words — either too little signal either way, or simply a real first word. */
+    private static final int MIN_INITIALISM_LENGTH = 2;
+    private static final int MAX_INITIALISM_LENGTH = 6;
+    /**
+     * Below this many characters, the anchor phrase in {@link #expandLeadingInitialism} has no
+     * trigram pg_trgm's GIN index can extract from the generated regex at all — measured live
+     * 2026-08-25 via {@code EXPLAIN ANALYZE} against the real 1.8M-row dictionary: a 1-2 character
+     * anchor still nominally "uses" the index but degrades into a 230ms-1.4s bitmap scan that has
+     * to recheck tens of thousands of rows, run synchronously on a {@code registryLookupExecutor}
+     * thread — a real throughput risk. A 3+ character anchor stayed at ~13ms in the same test.
+     */
+    private static final int MIN_ANCHOR_LENGTH_FOR_INITIALISM_EXPANSION = 3;
+    /**
+     * Ecosystem -&gt; CPE {@code target_sw} value (REVISE item 5, senior review 2026-08-26 / job 36
+     * root-cause): the platform-scoping word NVD uses in a CPE's {@code target_sw} segment for a
+     * package originating from that ecosystem's own runtime, when a real CPE happens to be scoped
+     * that way (e.g. a Java library's Maven-published NVD CPE occasionally carries
+     * {@code target_sw=maven}, a Jenkins plugin carries {@code target_sw=jenkins}). Deliberately
+     * omits {@code hex} and {@code maven} — hex packages (e.g. Elixir's "tesla") and Maven
+     * coordinates don't map to one canonical {@code target_sw} word the way the other eight do, so
+     * both are left with no mapping and therefore no target_sw signal at all (see {@link
+     * #mapEcosystemToTargetSw}) rather than guessing one and risking a wrong gate/preference.
+     */
+    private static final java.util.Map<String, String> ECOSYSTEM_TO_TARGET_SW = java.util.Map.of(
+            "npm", "node.js",
+            "pypi", "python",
+            "rubygems", "ruby",
+            "crates.io", "rust",
+            "go", "go",
+            "packagist", "php",
+            "pub", "dart",
+            "nuget", ".net");
+
+    /**
+     * REVISE item 2 (senior review, job 37 root-cause): {@code target_sw} values that scope a CPE to
+     * an operating system/CPU architecture rather than to being a *component of some other software
+     * platform* — the actual thing {@link #passesTargetSwGate} exists to reject. {@code
+     * target_sw=macos} on Sophos Home's real NVD entry means "the macOS build of Sophos Home", not
+     * "a plugin for macOS the way target_sw=jenkins means a Jenkins plugin" — treating every non-
+     * wildcard target_sw value as equally disqualifying wrongly rejected that entry (senior review,
+     * job 36/37: Sophos Home went from a correct match to a lost one). Treated exactly like {@code *}/
+     * {@code -}: always passes the gate, never a hard requirement either.
+     */
+    private static final java.util.Set<String> NON_SCOPING_TARGET_SW_VALUES = java.util.Set.of(
+            "windows", "macos", "mac_os", "linux", "unix",
+            "android", "iphone_os", "ios", "ipados", "x86", "x64");
+
+    /**
+     * REVISE item 3 (senior review, job 37 root-cause): no registry ecosystem this project ever
+     * routes to is "jenkins" — a CPE scoped {@code target_sw=jenkins} is always a Jenkins plugin,
+     * never a standalone ecosystem package, so it must be rejected unconditionally, including through
+     * the {@code hex}/{@code maven} fallback path ({@link #passesTargetSwGate}'s {@code
+     * orElse(true)} default-allow for those two unmapped ecosystems) which would otherwise let it
+     * through. Fixes {@code junit:junit} (Maven) wrongly resolving to {@code jenkins:junit}
+     * (NVD's real "JUnit plugin for Jenkins" entry) instead of correctly falling through to no-CPE.
+     */
+    private static final String JENKINS_TARGET_SW = "jenkins";
+
+    private final List<PackageRegistryLookup> registryLookups;
+    private final RegistryRoutingPolicy registryRoutingPolicy;
+    private final RegistryLookupCache registryLookupCache;
+    private final CpeDictionaryRepository cpeDictionaryRepository;
+    private final CpeNameVariantCache cpeNameVariantCache;
+    private final IdentifiedProductRepository identifiedProductRepository;
+    private final UserApiKeyService userApiKeyService;
+    private final LlmServiceClient llmServiceClient;
+    private final NvdCpeSyncService nvdCpeSyncService;
+    private final EcosystemRegistryRepository ecosystemRegistryRepository;
+    private final ResearchJobItemRepository researchJobItemRepository;
+    private final JobCostBudgetService jobCostBudgetService;
+    @Qualifier("registryLookupExecutor")
+    private final Executor registryLookupExecutor;
+
+    /**
+     * Attempts identification for a single job item and persists the result.
+     *
+     * @param userId the job's owner, whose own Claude key (if any) is used for Tier2/3
+     * @return the saved {@link IdentifiedProduct}, or empty if nothing could be identified
+     */
+    public Optional<IdentifiedProduct> identify(ResearchJobItem item, Long userId) {
+        // The local CPE dictionary check (DB-only, no network) and the external registry fan-out
+        // are independent of each other's *local* result — only the decision of whether to fall
+        // back to a *live* NVD call (below) needs to know whether a registry matched. Previously
+        // these ran strictly sequentially (registry fan-out fully resolved before the local check
+        // even started), which meant every item paid the full registry latency — up to Maven
+        // Central's 20s circuit-breaker worst case — before a usually-much-faster local dictionary
+        // hit ever got a chance to shortcut anything. Kicking the local lookup off concurrently
+        // doesn't skip either signal (both are still always gathered, same coverage as before),
+        // it just removes the pure waiting-on-nothing between them.
+        CompletableFuture<List<CpeDictionaryEntry>> localCpeFuture = CompletableFuture.supplyAsync(
+                () -> localCpeLookup(item.getVendor(), item.getProductName()), registryLookupExecutor);
+
+        RegistryResolution registryResolution = resolveRegistryMatch(item, userId, item.getProductName(), item.getVersion());
+        // A registry match already gives Stage2 vulnerability coverage via OSV/GHSA, so a missing
+        // local CPE cache entry isn't worth a ~6.5s (or ~0.7s with an NVD key) live NVD round trip
+        // here — NVD-via-CPE is a supplementary Stage2 source in that case, not the only signal.
+        // Coverage still wins when nothing else has already confirmed this product is real.
+        Optional<String> registryEcosystem = registryResolution.match().map(RegistryMatch::ecosystem);
+        Optional<String> registryPackageName = registryResolution.match().map(RegistryMatch::packageName);
+        CpeCandidateResult cpeCandidateResult = resolveCpeCandidates(item.getVendor(), item.getProductName(), userId,
+                registryEcosystem, registryPackageName, localCpeFuture.join());
+
+        Optional<IdentifiedProduct> result = (registryResolution.match().isEmpty() && cpeCandidateResult.candidates().isEmpty())
+                ? tryTier3(item, userId)
+                : resolveCandidates(item, userId, registryResolution, cpeCandidateResult, IdentifiedProduct.METHOD_STATIC,
+                        item.getVendor(), item.getProductName());
+
+        log.info("Stage1 identify item {} ('{}' v{}): registryMatch={}, cpeCandidates={}, result={}",
+                item.getId(), item.getProductName(), item.getVersion(),
+                registryResolution.match().map(RegistryMatch::packageName).orElse(null),
+                cpeCandidateResult.candidates().size(),
+                result.map(this::describe).orElse("UNIDENTIFIED"));
+
+        return result;
+    }
+
+    private String describe(IdentifiedProduct product) {
+        return product.getMethod() + " ecosystem=" + product.getEcosystem()
+                + " package=" + product.getPackageName() + " cpe=" + product.getCpe();
+    }
+
+    /**
+     * Tier3: Tier1 found absolutely nothing (common for marketplace/store listing names that
+     * differ from the vendor's real product name). Asks the LLM (with web_search) to resolve the
+     * real vendor/product name, then re-runs Tier1 against that resolved name.
+     *
+     * <p>The LLM is also given the enabled ecosystem list ({@link #ecosystemRegistryRepository})
+     * and may propose {@code ecosystem_candidates} — a guessed exact registry package name per
+     * ecosystem. This is the one place Tier3 is allowed to name a specific package directly
+     * (rather than only a human-readable name fed back into fuzzy lookup): Tier1 already found
+     * literally nothing, so there is no backend-provided candidate list to select from, and a
+     * generic "resolved name" re-query fails whenever the marketplace/official name doesn't
+     * happen to equal the registry's exact slug (e.g. "AWS CLI" vs the real PyPI name "awscli").
+     * Each guess is still verified against the real registry before being trusted — never
+     * persisted on the LLM's say-so alone.
+     */
+    private Optional<IdentifiedProduct> tryTier3(ResearchJobItem item, Long userId) {
+        Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
+        if (apiKey.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER3_WEB_SEARCH_IDENTIFY_COST_USD)) {
+            log.info("Tier3 skipped for item {}: job cost budget exhausted", item.getId());
+            return Optional.empty();
+        }
+
+        List<String> enabledEcosystems = ecosystemRegistryRepository.findByEnabledTrue().stream()
+                .map(EcosystemRegistry::getEcosystem)
+                .toList();
+
+        Optional<WebSearchIdentifyResponse> resolved = llmServiceClient.webSearchIdentify(
+                apiKey.get(), item, enabledEcosystems, JobCostBudgetService.TIER3_WEB_SEARCH_IDENTIFY_COST_USD);
+        if (resolved.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!resolved.get().found()) {
+            applyUnresolvableReasonIfPresent(item, resolved.get().reasoning());
+            return Optional.empty();
+        }
+
+        String resolvedProductName = resolved.get().officialProductName();
+        String resolvedVendor = resolved.get().officialVendor();
+        if (resolvedProductName == null || resolvedProductName.isBlank()) {
+            return Optional.empty();
+        }
+
+        RegistryResolution requeryRegistry = resolveRegistryMatch(item, userId, resolvedProductName, item.getVersion());
+        if (requeryRegistry.match().isEmpty()) {
+            requeryRegistry = new RegistryResolution(
+                    bestEcosystemCandidateMatch(item.getId(), resolved.get().ecosystemCandidates(), item.getVersion()),
+                    false, null);
+        }
+        CpeCandidateResult requeryCpe = fuzzyMatchCpe(resolvedVendor, resolvedProductName, userId,
+                requeryRegistry.match().map(RegistryMatch::ecosystem),
+                requeryRegistry.match().map(RegistryMatch::packageName));
+
+        if (requeryRegistry.match().isEmpty() && requeryCpe.candidates().isEmpty()) {
+            // Tier3 learned the real name, but re-querying Tier1 with it still found nothing
+            // structural (no ecosystem/cpe) to persist — a known v1 gap, logged for visibility.
+            log.info("Tier3 resolved item {} to '{}' (vendor: {}), but Tier1 re-query still found nothing",
+                    item.getId(), resolvedProductName, resolvedVendor);
+            applyPlatformHintIfPresent(item, resolved.get().platformHint());
+            return Optional.empty();
+        }
+
+        return resolveCandidates(item, userId, requeryRegistry, requeryCpe, IdentifiedProduct.METHOD_LLM_WEB_SEARCH,
+                resolvedVendor, resolvedProductName);
+    }
+
+    /**
+     * Item stays UNIDENTIFIED, but if the AI recognized this as belonging to a distribution
+     * channel this app can't query directly (a marketplace/registry with no adapter here — VS
+     * Code Marketplace, Chrome Web Store, Docker Hub, a Linux distro's own package manager, etc.)
+     * and found a concrete identifier there, save it as a manual-verification hint rather than
+     * silently dropping information the AI already went and found. Generalizes past the VS Code
+     * case: {@code platform}/{@code note} are free text the AI fills in for whatever channel is
+     * actually relevant, not a fixed enum.
+     */
+    private void applyPlatformHintIfPresent(ResearchJobItem item, PlatformHintDto hint) {
+        if (hint == null || hint.identifier() == null || hint.identifier().isBlank()) {
+            return;
+        }
+        String platform = hint.platform() != null && !hint.platform().isBlank() ? hint.platform() : "不明なプラットフォーム";
+        String note = hint.note() != null && !hint.note().isBlank() ? " — " + hint.note() : "";
+        item.setIdentificationHint(platform + ": " + hint.identifier() + note);
+        item.setHintPlatform(platform);
+        item.setHintIdentifier(hint.identifier());
+        researchJobItemRepository.save(item);
+        log.info("Item {} left UNIDENTIFIED but got a manual hint: platform={} identifier={}",
+                item.getId(), hint.platform(), hint.identifier());
+    }
+
+    /**
+     * Item stays UNIDENTIFIED, but when Tier3's web search concluded there's nothing to find at
+     * all (firmware with no public registry, a commercial/proprietary product with no public
+     * source, an internal-only tool, a plain typo with no real matching software, etc.), surface
+     * *why* rather than just leaving a bare UNIDENTIFIED with no explanation — the reasoning was
+     * already computed and previously discarded here. Not a manual-verification hint (there's no
+     * identifier to look up), so this deliberately does not touch hintPlatform/hintIdentifier —
+     * Stage4's hint-based research stays gated on hintIdentifier being present and won't fire on
+     * a reasoning-only explanation.
+     */
+    private void applyUnresolvableReasonIfPresent(ResearchJobItem item, String reasoning) {
+        if (reasoning == null || reasoning.isBlank()) {
+            return;
+        }
+        item.setIdentificationHint("特定不可（AI判定）: " + reasoning);
+        researchJobItemRepository.save(item);
+        log.info("Item {} left UNIDENTIFIED — AI reported why: {}", item.getId(), reasoning);
+    }
+
+    private Optional<RegistryMatch> bestEcosystemCandidateMatch(Long itemId, List<EcosystemCandidateDto> candidates, String version) {
+        if (candidates == null) {
+            return Optional.empty();
+        }
+        for (EcosystemCandidateDto candidate : candidates) {
+            if (candidate.ecosystem() == null || candidate.packageName() == null || candidate.packageName().isBlank()) {
+                continue;
+            }
+            Optional<PackageRegistryLookup> lookup = registryLookups.stream()
+                    .filter(l -> l.ecosystem().equalsIgnoreCase(candidate.ecosystem()))
+                    .findFirst();
+            if (lookup.isEmpty()) {
+                log.warn("AI proposed ecosystem candidate '{}' for item {} which is not an enabled ecosystem — ignored",
+                        candidate.ecosystem(), itemId);
+                continue;
+            }
+            Optional<RegistryMatch> match = safeLookup(lookup.get(), candidate.packageName(), version);
+            if (match.isPresent()) {
+                log.info("AI-guessed ecosystem candidate matched for item {}: ecosystem={} package={}",
+                        itemId, candidate.ecosystem(), candidate.packageName());
+                return match;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Merges a registry match and CPE candidate(s) into one {@link IdentifiedProduct}. The common
+     * case — at most one CPE candidate — needs no LLM call: it's simply merged with the registry
+     * match, exactly as Tier1 always did. Tier2 only fires when the CPE fuzzy search itself
+     * returned more than one plausible candidate (genuine ambiguity worth spending a call on).
+     */
+    private Optional<IdentifiedProduct> resolveCandidates(
+            ResearchJobItem item,
+            Long userId,
+            RegistryResolution registryResolution,
+            CpeCandidateResult cpeCandidateResult,
+            String methodIfNoDisambiguationNeeded,
+            String vendorForCpeRescue,
+            String productNameForCpeRescue) {
+
+        List<CpeDictionaryEntry> cpeCandidates = cpeCandidateResult.candidates();
+        boolean cpeCandidatesAreVariantDerived = cpeCandidateResult.variantDerived();
+        Optional<RegistryMatch> registryMatch = registryResolution.match();
+        CpeDictionaryEntry chosenCpe = null;
+        String method = methodIfNoDisambiguationNeeded;
+        BigDecimal disambiguationConfidence = null;
+
+        if (cpeCandidates.size() > 1) {
+            Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
+            boolean withinBudget = apiKey.isPresent()
+                    && jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
+            if (withinBudget) {
+                List<CandidateDto> candidateDtos = cpeCandidates.stream()
+                        .map(entry -> new CandidateDto(null, entry.getProduct(), maskCpeVersion(entry.getCpeString()), null, "cpe_dictionary"))
+                        .toList();
+                Optional<DisambiguateResponse> result = llmServiceClient.disambiguate(
+                        apiKey.get(), item, candidateDtos, JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
+
+                if (result.isEmpty()) {
+                    // LLM call failed — degrade to the pre-Tier2 best-effort behavior.
+                    chosenCpe = cpeCandidates.get(0);
+                } else if (!result.get().matched()) {
+                    chosenCpe = null;
+                    method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
+                } else if (result.get().selectedIndex() != null
+                        && result.get().selectedIndex() >= 0
+                        && result.get().selectedIndex() < cpeCandidates.size()) {
+                    chosenCpe = cpeCandidates.get(result.get().selectedIndex());
+                    method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
+                    disambiguationConfidence = BigDecimal.valueOf(result.get().confidence());
+                } else {
+                    log.warn("LLM disambiguate returned an invalid selection for item {}: {}", item.getId(), result.get());
+                    chosenCpe = cpeCandidates.get(0);
+                }
+            } else {
+                chosenCpe = cpeCandidates.get(0);
+            }
+        } else if (cpeCandidates.size() == 1) {
+            Optional<ChosenCpe> chosen = resolveSingleCpeCandidate(item, userId, cpeCandidates.get(0), cpeCandidatesAreVariantDerived);
+            if (chosen.isPresent()) {
+                chosenCpe = chosen.get().entry();
+                if (chosen.get().aiConfidence() != null) {
+                    disambiguationConfidence = chosen.get().aiConfidence();
+                    method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
+                }
+            }
+        }
+
+        // A registry match is only as trustworthy as its corroboration. Two mitigations, cheapest
+        // first:
+        //   1. If a CPE match already corroborates a *specific* different product, trust that
+        //      over an unconfirmed registry hit outright — no LLM call needed (see
+        //      trustRegistryMatch below).
+        //   2. Otherwise (no CPE to cross-check against), ask the LLM to judge the single
+        //      candidate against the item's usage_text — same anti-hallucination shape as Tier2's
+        //      CPE disambiguation (index-select only, never invents a new package). This fires for
+        //      an *unconfirmed* match (generic short/common product names collide with unrelated
+        //      same-named packages surprisingly often — observed live across npm/PyPI/NuGet:
+        //      "gson"/"gin"/"PuTTY"/"Slack"/"Zoom" etc.) but also for a *confirmed* one, because
+        //      "the version number happens to match" is not proof of product identity either —
+        //      observed live: PyPI's "redis" (a Python client library) coincidentally ships a
+        //      release numbered the same as the Redis *server* version in the CSV row, which would
+        //      otherwise be accepted as version-confirmed/high-confidence with nothing to catch
+        //      it. No Claude key configured (or job cost budget exhausted) degrades to the
+        //      pre-existing best-effort behavior (trust the match) — this residual gap is real but
+        //      unavoidable without either AI or a corroborating CPE.
+        BigDecimal registryDisambiguationConfidence = null;
+        if (registryMatch.isPresent() && chosenCpe == null && registryResolution.aiVerified()) {
+            // Already arbitrated among multiple same-named registry candidates in
+            // resolveRegistryMatch (same AI-arbitration pattern as CPE Tier2, just applied across
+            // registries) — re-running the single-candidate weak-match check below would be a
+            // redundant second AI call for a question already answered.
+            registryDisambiguationConfidence = registryResolution.aiConfidence();
+            log.info("Registry match for item {} (ecosystem={} package={}) already AI-arbitrated among "
+                    + "multiple registry candidates — skipping the single-candidate weak-match check",
+                    item.getId(), registryMatch.get().ecosystem(), registryMatch.get().packageName());
+        } else if (registryMatch.isPresent() && chosenCpe == null) {
+            RegistryMatch weakMatch = registryMatch.get();
+            Optional<DisambiguateResponse> verdict = verifyWeakRegistryMatchWithAi(item, userId, weakMatch);
+            if (verdict.isEmpty()) {
+                // REVISE item 3 (senior review 2026-08-26, job 38): no Claude key configured (or the
+                // LLM call itself failed), so the AI-verdict path below never ran — but that doesn't
+                // mean there's nothing to go on. Measured against real job data: of 19 items with an
+                // unconfirmed registry match and no corroborating CPE, the ones with a non-blank item
+                // *vendor* field are 14/14 WRONG (genuine same-named-but-different products, e.g.
+                // "Slack" the desktop app matching crates.io's unrelated `slack` Rust crate), while
+                // the ones with a blank/null vendor are 5/5 correct. A clean, measured split, so this
+                // fires as a calibrated static rule — not a guess — rather than defaulting to "trust
+                // it" the way this branch used to unconditionally. Only ever reachable here, i.e. only
+                // when no AI verdict exists at all; an actual AI verdict (matched or not, the two
+                // branches below) always takes precedence over this static rule.
+                boolean itemHasVendor = item.getVendor() != null && !item.getVendor().isBlank();
+                // REVISE item 5 (senior review 2026-08-26, job 39 Chocolatey existence-fallback
+                // fix): the 14/14-wrong calibration above came from a collision pattern that is
+                // specific to a *library/language* package registry sharing a name with an
+                // unrelated desktop app (crates.io's `slack` crate vs. the Slack desktop app).
+                // Chocolatey is itself a desktop-software catalog, not a library registry, so it
+                // doesn't share that false-positive shape — and critically, every one of job 39's
+                // 32 target items (the population ChocolateyRegistryClient's existence-fallback was
+                // built to recover) has a non-blank vendor, so applying this rule unexempted would
+                // statically reject 100% of the unconfirmed-version Chocolatey matches that fix
+                // produces. Narrow and explicit: chocolatey only, not a general widening of the
+                // rule for every ecosystem.
+                boolean isExemptEcosystem = "chocolatey".equals(weakMatch.ecosystem());
+                if (!weakMatch.exactVersionConfirmed() && itemHasVendor && !isExemptEcosystem) {
+                    log.info("Statically rejecting weak registry match for item {} (ecosystem={} package={}) — "
+                            + "no AI verification available, version is unconfirmed, and item vendor '{}' is "
+                            + "present (REVISE item 3: measured 14/14 wrong with a non-blank vendor vs 5/5 "
+                            + "correct with a blank one)", item.getId(), weakMatch.ecosystem(),
+                            weakMatch.packageName(), item.getVendor());
+                    registryMatch = Optional.empty();
+                    CpeDictionaryEntry rescued = rescueCpeAfterRegistryMatchRejected(
+                            item, userId, vendorForCpeRescue, productNameForCpeRescue);
+                    if (rescued != null) {
+                        chosenCpe = rescued;
+                        log.info("Live CPE lookup after statically-rejected weak registry match found a "
+                                + "fallback candidate for item {}: {}", item.getId(), chosenCpe.getCpeString());
+                    }
+                } else {
+                    // No AI available, and either the version already came back confirmed, the item
+                    // has no vendor field to weigh against it (the 5/5-correct case above), or the
+                    // match's ecosystem is chocolatey (REVISE item 5's narrow exemption above) —
+                    // degrade to trusting the weak match, same as before this fix.
+                    log.info("No AI verification available for weak registry match on item {} (ecosystem={} package={}) "
+                            + "— using it as a best-effort fallback", item.getId(), weakMatch.ecosystem(), weakMatch.packageName());
+                }
+            } else if (!verdict.get().matched()) {
+                log.info("AI rejected weak registry match for item {} (ecosystem={} package={}) as implausible "
+                        + "given the usage text — likely an unrelated same-named package",
+                        item.getId(), weakMatch.ecosystem(), weakMatch.packageName());
+                registryMatch = Optional.empty();
+                CpeDictionaryEntry rescued = rescueCpeAfterRegistryMatchRejected(
+                        item, userId, vendorForCpeRescue, productNameForCpeRescue);
+                if (rescued != null) {
+                    chosenCpe = rescued;
+                    log.info("Live CPE lookup after AI-rejected registry match found a fallback candidate "
+                            + "for item {}: {}", item.getId(), chosenCpe.getCpeString());
+                }
+            } else {
+                log.info("AI confirmed weak registry match for item {} (ecosystem={} package={})",
+                        item.getId(), weakMatch.ecosystem(), weakMatch.packageName());
+                registryDisambiguationConfidence = BigDecimal.valueOf(verdict.get().confidence());
+            }
+        }
+
+        // Round-5 fix (senior review 2026-08-26): captured once, BEFORE any mutation of chosenCpe
+        // below — recomputing this after nulling chosenCpe would flip it back to true (chosenCpe ==
+        // null is itself one of the conditions that makes a match trustable), silently re-admitting
+        // the very registry match this fix rejects, in a different shape.
+        boolean trustRegistryMatch = registryMatch.isPresent()
+                && (registryMatch.get().exactVersionConfirmed() || chosenCpe == null);
+        if (registryMatch.isPresent() && !trustRegistryMatch) {
+            log.info("Distrusting unconfirmed-version registry match for item {} (ecosystem={} package={}) — "
+                    + "a CPE match already identifies this product, likely an unrelated same-named package",
+                    item.getId(), registryMatch.get().ecosystem(), registryMatch.get().packageName());
+            // Round-5 fix: the CPE that got this far may only have passed passesTargetSwGate BECAUSE
+            // of this registry match's own ecosystem context (e.g. crates.io "slack" admitting
+            // slack_morphism_project:slack_morphism, target_sw=rust) — now that the registry match
+            // itself is being discarded as untrustworthy, that ecosystem context goes with it, so the
+            // CPE must be re-checked against a bare no-registry-context gate before it's allowed to
+            // survive on its own.
+            if (chosenCpe != null && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), ""))) {
+                log.info("Dropping CPE {} for item {} — it only passed the target_sw gate via the "
+                        + "now-distrusted registry match's ecosystem context, so it cannot stand on its own",
+                        chosenCpe.getCpeString(), item.getId());
+                chosenCpe = null;
+            }
+        }
+
+        if (!trustRegistryMatch && chosenCpe == null) {
+            return Optional.empty();
+        }
+
+        IdentifiedProduct identifiedProduct = new IdentifiedProduct();
+        identifiedProduct.setJobItemId(item.getId());
+        identifiedProduct.setMethod(method);
+
+        BigDecimal confidence = BigDecimal.ZERO;
+        // Cheap half of the "confidence-lending" fix (senior review, 2026-08-26; the general
+        // "confidence should be two separate fields" schema change stays deferred). A CPE candidate
+        // only ever had to explain the item's *query* text (via plausibleContainmentOnly) to become
+        // chosenCpe — never the specific package a *trusted* registry match actually resolved to,
+        // which can legitimately differ (Tier2 registry arbitration, the CPE-rescue path's own
+        // vendor/productName, or simply a registry search landing on a different-but-same-named
+        // package than what was literally queried). Measured live: ~30 of 96 registry+CPE items in
+        // job 35 had a wrong CPE riding along at the registry match's own high (typically 0.95)
+        // confidence this way (e.g. "rayon" -> crayon_project:crayon, "django" ->
+        // gofiber:django, "MediatR" -> m5t:mediatrix_4102s). Re-checking the chosen CPE against the
+        // trusted match's own package name, through the same Fix-2-tightened containment gate,
+        // catches this without touching the registry match's own confidence at all — a rejected CPE
+        // here still leaves ecosystem/package/purl/confidence intact below, just with cpe=null
+        // instead of a wrong one.
+        if (chosenCpe != null && trustRegistryMatch) {
+            RegistryMatch trustedMatch = registryMatch.get();
+            if (!cpeCorroboratesRegistryPackage(item.getVendor(), chosenCpe, trustedMatch)) {
+                log.info("Dropping CPE {} for item {} — it does not independently corroborate the trusted "
+                        + "registry match's own package name (ecosystem={} package={}), so it must not "
+                        + "ride along on that match's confidence", chosenCpe.getCpeString(), item.getId(),
+                        trustedMatch.ecosystem(), trustedMatch.packageName());
+                chosenCpe = null;
+            }
+        }
+        if (trustRegistryMatch) {
+            RegistryMatch match = registryMatch.get();
+            identifiedProduct.setEcosystem(match.ecosystem());
+            identifiedProduct.setPackageName(match.packageName());
+            identifiedProduct.setPurl(match.purl());
+            identifiedProduct.setVersionConfirmed(match.exactVersionConfirmed());
+            confidence = registryDisambiguationConfidence != null ? registryDisambiguationConfidence : match.confidence();
+            if (registryDisambiguationConfidence != null) {
+                method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
+                identifiedProduct.setMethod(method);
+            }
+        }
+        if (chosenCpe != null) {
+            identifiedProduct.setCpe(withItemVersion(chosenCpe.getCpeString(), item.getVersion()));
+            if (disambiguationConfidence != null) {
+                // CPE Tier2 actually ran an AI call and selected this candidate — the displayed
+                // confidence must be *that* call's own stated number, not max()'d against an
+                // unrelated static registry confidence. Blindly taking the larger of the two let a
+                // static constant (e.g. registry confidence 0.95) silently win and be shown under a
+                // method of llm_disambiguate, implying it reflects AI judgment it never actually
+                // returned. Confirmed live: of 138 llm_disambiguate rows, 119 sat at exactly the
+                // static 0.95/0.5 constants — the AI's own (usually lower, e.g. 0.7-0.9) confidence
+                // was being silently discarded whenever the untouched registry number was bigger.
+                confidence = disambiguationConfidence;
+            } else {
+                confidence = confidence.max(CPE_MATCH_CONFIDENCE);
+            }
+        }
+
+        identifiedProduct.setConfidence(confidence);
+        return Optional.of(identifiedProductRepository.save(identifiedProduct));
+    }
+
+    /**
+     * Shared rescue path for both ways {@link #resolveCandidates} can decide a weak registry match
+     * must not be trusted (the pre-existing AI-{@code matched=false} rejection, and REVISE item 3's
+     * static no-AI-available rejection): the registry match being present is exactly what earlier
+     * made {@link #fuzzyMatchCpe} skip its live NVD CPE lookup (see that method's own {@code
+     * registryEcosystem} javadoc) — that assumption just broke. Retries now, forcing the live
+     * lookup, so a real product (e.g. "Redis" the server, rejected as the unrelated PyPI "redis"
+     * client) doesn't end up UNIDENTIFIED purely because the skip fired before the registry match
+     * was known to be bogus.
+     *
+     * <p>Best-effort: takes the first candidate without a further disambiguation round, except for
+     * the same "never auto-accept a lone variant-derived candidate" rule the main selection path
+     * uses — a rescue lookup is just as capable of landing on a single name-variant guess. Multiple
+     * rescue candidates keep the pre-existing best-effort behavior (take the first, no further AI
+     * call); this rescue path has never been disambiguated, and widening that is out of scope here.
+     *
+     * @return the rescued CPE candidate, or {@code null} if the retried lookup still found nothing.
+     */
+    private CpeDictionaryEntry rescueCpeAfterRegistryMatchRejected(
+            ResearchJobItem item, Long userId, String vendorForCpeRescue, String productNameForCpeRescue) {
+        CpeCandidateResult rescueResult =
+                fuzzyMatchCpe(vendorForCpeRescue, productNameForCpeRescue, userId, Optional.empty(), Optional.empty());
+        List<CpeDictionaryEntry> rescueCandidates = rescueResult.candidates();
+        if (rescueCandidates.isEmpty()) {
+            return null;
+        }
+        CpeDictionaryEntry rescueCandidate = rescueCandidates.get(0);
+        Optional<ChosenCpe> chosen = (rescueCandidates.size() == 1 && rescueResult.variantDerived())
+                ? resolveSingleCpeCandidate(item, userId, rescueCandidate, true)
+                : Optional.of(new ChosenCpe(rescueCandidate, null));
+        return chosen.map(ChosenCpe::entry).orElse(null);
+    }
+
+    /** Fix5 gate: whether {@code candidate} independently explains {@code trustedMatch}'s own
+     *  package name, through the exact same {@link #explainsQuery} containment logic used
+     *  everywhere else in this class — never a looser or bespoke check. A blank/unparseable
+     *  registry package name can't meaningfully gate anything, so it defaults to trusting the CPE
+     *  rather than blocking on a signal that isn't really there. */
+    private boolean cpeCorroboratesRegistryPackage(String itemVendor, CpeDictionaryEntry candidate, RegistryMatch trustedMatch) {
+        String normalizedRegistryQuery = normalizeForContainment(lastMeaningfulPackageSegment(trustedMatch.packageName()));
+        if (normalizedRegistryQuery.isBlank()) {
+            return true;
+        }
+        String normalizedItemVendor = normalizeForContainment(itemVendor);
+        return explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getProduct(), false)
+                || explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getTitle(), true);
+    }
+
+    /**
+     * Reduces a registry package name to its one meaningful identifying segment before it's used as
+     * a containment query — e.g. a Maven coordinate ({@code "com.google.guava:guava"}) or a Go
+     * module path ({@code "github.com/gin-gonic/gin"}) is mostly non-identity-bearing groupId/host
+     * scaffolding (see {@link RegistryRoutingPolicy#stripHostPrefix} and {@link
+     * com.vulncheck.app.service.registry.MavenCentralRegistryClient}'s own groupId/artifactId split
+     * for the same reasoning applied elsewhere), and running the *whole* coordinate through
+     * containment would spuriously fail on
+     * that scaffolding the same way Fix 1/3 had to correct for it on the query side.
+     */
+    private String lastMeaningfulPackageSegment(String packageName) {
+        if (packageName == null) {
+            return "";
+        }
+        String stripped = RegistryRoutingPolicy.stripHostPrefix(packageName);
+        int lastSeparator = Math.max(stripped.lastIndexOf(':'), stripped.lastIndexOf('/'));
+        return lastSeparator >= 0 ? stripped.substring(lastSeparator + 1) : stripped;
+    }
+
+    /**
+     * Reuses the Tier2 disambiguate endpoint with a single registry-match candidate — same
+     * anti-hallucination shape (the LLM only ever selects/rejects a backend-provided candidate,
+     * never invents a new package) as CPE disambiguation, just applied to a weak registry hit
+     * instead. Returns empty when no verdict is available at all (no Claude key, or the call
+     * itself failed) — callers treat that as "degrade to the pre-existing best-effort trust",
+     * distinct from an actual {@code matched=false} rejection.
+     */
+    private Optional<DisambiguateResponse> verifyWeakRegistryMatchWithAi(ResearchJobItem item, Long userId, RegistryMatch match) {
+        Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
+        if (apiKey.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD)) {
+            log.info("Weak registry match AI verification skipped for item {}: job cost budget exhausted", item.getId());
+            return Optional.empty();
+        }
+        CandidateDto candidate = new CandidateDto(match.ecosystem(), match.packageName(), null, match.purl(), "registry");
+        return llmServiceClient.disambiguate(
+                apiKey.get(), item, List.of(candidate), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
+    }
+
+    /** The (possibly AI-checked) result of {@link #resolveSingleCpeCandidate}: {@code aiConfidence}
+     *  is non-null only when an AI call actually determined this candidate was correct, so the
+     *  caller can attribute the displayed confidence/method to the real AI verdict rather than a
+     *  static constant — same shape as {@link #resolveCandidates}'s own {@code
+     *  disambiguationConfidence} handling for the multi-candidate Tier2 path. */
+    private record ChosenCpe(CpeDictionaryEntry entry, BigDecimal aiConfidence) {
+    }
+
+    /**
+     * A lone CPE candidate is normally trusted with zero AI spend — the pre-existing, high-precision
+     * behavior for a literal dictionary/live-NVD match, left untouched here. But a candidate produced
+     * by the name-variant search ({@code variantDerived=true}) is a mechanically-derived *guess*
+     * about what an abbreviation/contraction refers to, not a corroborated hit — measured false
+     * positives (senior review, 2026-08-25) showed both directions produce real wrong single-candidate
+     * matches (e.g. "VM Player" -&gt; {@code vlc_media_player}, "AD Manager" -&gt; {@code
+     * ams_device_manager}). Forces the same anti-hallucination AI check {@link
+     * #verifyWeakRegistryMatchWithAi} already uses for a weak registry hit, applied to this CPE case
+     * instead — but unlike that method, a missing verdict here (no key, exhausted budget, or the call
+     * itself failing) drops the candidate entirely rather than degrading to trusting it: today's real
+     * -world outcome for these items is UNIDENTIFIED, and dropping preserves exactly that
+     * non-regression baseline instead of risking a confident wrong CPE with nothing to catch it.
+     */
+    private Optional<ChosenCpe> resolveSingleCpeCandidate(
+            ResearchJobItem item, Long userId, CpeDictionaryEntry candidate, boolean variantDerived) {
+        if (!variantDerived) {
+            return Optional.of(new ChosenCpe(candidate, null));
+        }
+        Optional<DisambiguateResponse> verdict = verifyVariantDerivedCpeMatchWithAi(item, userId, candidate);
+        if (verdict.isEmpty()) {
+            log.info("No AI verification available for name-variant-derived CPE candidate on item {} ({}) — "
+                    + "dropping it rather than trusting an unverified guess", item.getId(), candidate.getCpeString());
+            return Optional.empty();
+        }
+        if (!verdict.get().matched()) {
+            log.info("AI rejected name-variant-derived CPE candidate for item {} ({}) as implausible given the usage text",
+                    item.getId(), candidate.getCpeString());
+            return Optional.empty();
+        }
+        log.info("AI confirmed name-variant-derived CPE candidate for item {} ({})", item.getId(), candidate.getCpeString());
+        return Optional.of(new ChosenCpe(candidate, BigDecimal.valueOf(verdict.get().confidence())));
+    }
+
+    /**
+     * Reuses the Tier2 disambiguate endpoint with a single name-variant-derived CPE candidate — same
+     * anti-hallucination shape as {@link #verifyWeakRegistryMatchWithAi}, applied to a CPE match
+     * instead of a registry one. Callers must NOT degrade to trusting the match when this returns
+     * empty (see {@link #resolveSingleCpeCandidate}'s javadoc for why) — that's the one place this
+     * intentionally differs from the registry-match verification it's modeled on.
+     */
+    private Optional<DisambiguateResponse> verifyVariantDerivedCpeMatchWithAi(ResearchJobItem item, Long userId, CpeDictionaryEntry candidate) {
+        Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
+        if (apiKey.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD)) {
+            log.info("Variant-derived CPE candidate AI verification skipped for item {}: job cost budget exhausted", item.getId());
+            return Optional.empty();
+        }
+        CandidateDto candidateDto = new CandidateDto(
+                null, candidate.getProduct(), maskCpeVersion(candidate.getCpeString()), null, "cpe_dictionary_name_variant");
+        return llmServiceClient.disambiguate(
+                apiKey.get(), item, List.of(candidateDto), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
+    }
+
+    /**
+     * Masks the version field (5th colon-separated segment) of a CPE 2.3 string with {@code *}
+     * before showing it to the LLM for Tier2 disambiguation. The specific historical version
+     * baked into a dictionary candidate is irrelevant to vendor/product identity — Stage2
+     * substitutes the item's real version when it queries NVD anyway (see {@code CpeUtils.buildCpe}).
+     * Leaving the real version in was observed to make the LLM falsely reject correct vendor/
+     * product matches purely because the candidate's cataloged version differed from the item's.
+     */
+    private String maskCpeVersion(String cpeString) {
+        String[] parts = cpeString.split(":", -1);
+        if (parts.length > 5) {
+            parts[5] = "*";
+        }
+        return String.join(":", parts);
+    }
+
+    /**
+     * Replaces a dictionary candidate's cataloged version with the item's real version before
+     * persisting. The dictionary match is a vendor/product text match only (pg_trgm doesn't
+     * compare versions), so the candidate's own version is essentially arbitrary/historical —
+     * persisting it verbatim looked like a bug to a human reading the results (e.g. a CSV row for
+     * Wireshark 4.6.0 showing `cpe:...:wireshark:0.99.2:...`), even though Stage2 already ignored
+     * it and substituted the real version internally. This makes the persisted value match what
+     * Stage2 actually queries with, so the displayed CPE is truthful.
+     */
+    private String withItemVersion(String cpeString, String itemVersion) {
+        // REVISE item 6 (senior review, job 36 root-cause): must preserve every trailing segment
+        // (update, edition, language, sw_edition, target_sw, target_hw, other) from the dictionary
+        // candidate's own CPE string, not just vendor/product — a candidate scoped by target_sw
+        // (e.g. a Jenkins plugin) has a real NVD CPE only *with* that scoping; silently resetting it
+        // to "*" via CpeUtils.buildCpe produced a CPE string that doesn't actually exist in NVD.
+        return CpeUtils.withVersion(cpeString, itemVersion);
+    }
+
+    /**
+     * Outcome of {@link #resolveRegistryMatch}: {@code aiVerified} tells {@link #resolveCandidates}
+     * whether this already went through an AI plausibility check (arbitration among multiple
+     * same-named registry candidates), so it can skip its own single-candidate weak-match check
+     * rather than spending a second, redundant LLM call on an already-answered question.
+     */
+    private record RegistryResolution(Optional<RegistryMatch> match, boolean aiVerified, BigDecimal aiConfidence) {
+    }
+
+    /**
+     * Outcome of {@link #resolveCpeCandidates}: {@code variantDerived} tells {@link
+     * #resolveCandidates} whether every entry in {@code candidates} came from the name-variant
+     * search ({@link #findByNameVariants}) rather than a literal dictionary/live-NVD hit. The two
+     * are never mixed within one result — the variant search only ever runs as a genuine last
+     * resort once both the literal search and the live NVD fallback have already come back empty —
+     * so a single flag for the whole list is enough; no per-entry provenance tracking is needed.
+     */
+    private record CpeCandidateResult(List<CpeDictionaryEntry> candidates, boolean variantDerived) {
+    }
+
+    /**
+     * Tier1 static registry lookup, now with the same AI-arbitration pattern CPE Tier2 already
+     * had: a generic/common product name (e.g. "commons-io", "phoenix", "http") can get a match
+     * from *multiple* registries simultaneously — previously this just took the max-confidence one
+     * with no arbitration, so ties/near-ties silently went to whichever registry client happened to
+     * be injected first. Observed live repeatedly, including one case where the AI correctly
+     * rejected a wrong npm hit but the CPE-rescue fallback then landed on yet *another* wrong
+     * generic-name collision from a different registry that was never even considered. When more
+     * than one registry matches, this asks the LLM to pick (or reject all) among them using the
+     * item's usage_text — same anti-hallucination shape as CPE Tier2 (index-select only, never
+     * invents a new package) and the same {@code disambiguate} endpoint/cost as the existing
+     * single-candidate weak-match check, just applied across registries instead of within one.
+     */
+    private RegistryResolution resolveRegistryMatch(ResearchJobItem item, Long userId, String productName, String version) {
+        // Narrowed by RegistryRoutingPolicy *before* any request is issued: each registry's own
+        // naming grammar (npm's @scope/name, Maven's groupId:artifactId, a Go module's host.tld/path,
+        // Composer's vendor/package, ...) can already rule out most registries for a given name with
+        // zero network calls — measured live (job 35): Stage1 spent ~99% of its time on rate-limiter
+        // waits, with Maven Central alone accounting for 32 minutes, much of it on names that could
+        // never have been a Maven coordinate in the first place. Falls back to asking everyone when
+        // the routing rule can't narrow anything down (see RegistryRoutingPolicy's own javadoc).
+        List<PackageRegistryLookup> routedLookups = registryRoutingPolicy.route(productName, registryLookups);
+
+        // Dispatched concurrently, not via a sequential stream: each registry is an independent
+        // several-second network round trip, so scanning them one at a time serializes the
+        // slowest registry's latency behind every other one. Measured live: this was the single
+        // largest contributor to per-item processing time (see registryLookupExecutor's javadoc).
+        List<CompletableFuture<Optional<RegistryMatch>>> futures = routedLookups.stream()
+                .map(lookup -> CompletableFuture.supplyAsync(() -> safeLookup(lookup, productName, version), registryLookupExecutor))
+                .toList();
+        List<RegistryMatch> matches = futures.stream()
+                .map(CompletableFuture::join)
+                .flatMap(Optional::stream)
+                .toList();
+
+        if (matches.isEmpty()) {
+            return new RegistryResolution(Optional.empty(), false, null);
+        }
+        if (matches.size() == 1) {
+            return new RegistryResolution(Optional.of(matches.get(0)), false, null);
+        }
+
+        Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
+        boolean withinBudget = apiKey.isPresent()
+                && jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
+        if (!withinBudget) {
+            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches)), false, null);
+        }
+
+        List<CandidateDto> candidateDtos = matches.stream()
+                .map(m -> new CandidateDto(m.ecosystem(), m.packageName(), null, m.purl(), "registry"))
+                .toList();
+        Optional<DisambiguateResponse> result = llmServiceClient.disambiguate(
+                apiKey.get(), item, candidateDtos, JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
+
+        if (result.isEmpty()) {
+            // LLM call failed — degrade to the pre-arbitration best-effort behavior.
+            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches)), false, null);
+        }
+        if (!result.get().matched()) {
+            log.info("AI rejected all {} same-named registry candidates for item {} ('{}') as implausible "
+                    + "given the usage text", matches.size(), item.getId(), productName);
+            return new RegistryResolution(Optional.empty(), true, null);
+        }
+        Integer selectedIndex = result.get().selectedIndex();
+        if (selectedIndex == null || selectedIndex < 0 || selectedIndex >= matches.size()) {
+            log.warn("LLM registry arbitration returned an invalid selection for item {}: {}", item.getId(), result.get());
+            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches)), false, null);
+        }
+        RegistryMatch selected = matches.get(selectedIndex);
+        log.info("AI arbitrated {} same-named registry candidates for item {} ('{}') -> selected ecosystem={} package={}",
+                matches.size(), item.getId(), productName, selected.ecosystem(), selected.packageName());
+        return new RegistryResolution(Optional.of(selected), true, BigDecimal.valueOf(result.get().confidence()));
+    }
+
+    private RegistryMatch maxConfidenceMatch(List<RegistryMatch> matches) {
+        return matches.stream().max((a, b) -> a.confidence().compareTo(b.confidence())).orElseThrow();
+    }
+
+    /** Routes every registry call through {@link RegistryLookupCache} (keyed on ecosystem+productName,
+     *  not version — see that class's javadoc) so a product name repeated across many CSV rows, the
+     *  common case at real inventory scale, costs at most one request per registry instead of one
+     *  per row. */
+    private Optional<RegistryMatch> safeLookup(PackageRegistryLookup lookup, String productName, String version) {
+        try {
+            return registryLookupCache.get(lookup.ecosystem(), productName, version,
+                    () -> lookup.lookup(productName, version));
+        } catch (Exception e) {
+            log.warn("Registry lookup {} threw unexpectedly for product {}", lookup.getClass().getSimpleName(), productName, e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Fuzzy-matches against the local {@code cpe_dictionary} mirror first (fast, free); if that
+     * mirror has nothing at all for this product — the common case for anything nobody has synced
+     * a keyword for yet — falls back to a single live, rate-limited NVD CPE API call so an unknown
+     * product can still be resolved instead of silently requiring a pre-sync, UNLESS
+     * {@code registryEcosystem} is present (a registry match already confirmed this product is real
+     * and already gives Stage2 vulnerability coverage via OSV/GHSA) — in that case the live round
+     * trip is skipped and this returns empty rather than spending ~6.5s (or ~0.7s with an NVD key)
+     * per item on a source that's merely supplementary here. Hits from the live call are upserted
+     * into the local dictionary, so this also warms the cache for next time.
+     *
+     * <p>{@code registryEcosystem} doubles as the signal {@link #resolveCpeCandidates} needs for
+     * the REVISE item 1/3 target_sw gate/ranking preference (empty when there's no registry match at
+     * all, e.g. desktop software with nothing to map). {@code registryPackageName} is that same
+     * registry match's own resolved package name, used only for REVISE item 1's exact-slug-match
+     * ranking preference — likewise empty whenever there's no registry match to draw one from.
+     */
+    private CpeCandidateResult fuzzyMatchCpe(String vendor, String productName, Long userId,
+            Optional<String> registryEcosystem, Optional<String> registryPackageName) {
+        return resolveCpeCandidates(vendor, productName, userId, registryEcosystem, registryPackageName,
+                localCpeLookup(vendor, productName));
+    }
+
+    /** Just the local-dictionary half of {@link #fuzzyMatchCpe} — DB-only, no network, literal
+     *  matches only (the name-variant search is a separate, later-stage last resort — see {@link
+     *  #resolveCpeCandidates}) — split out so {@link #identify} can run it concurrently with the
+     *  registry fan-out instead of only starting it after the registry fan-out (and thus the {@code
+     *  registryEcosystem} this method's caller needs) has already fully resolved. Ranked here with
+     *  no target_sw preference (that context genuinely isn't known yet on the concurrent path) and,
+     *  critically, ranked but NOT truncated down to {@value #CPE_CANDIDATE_LIMIT} yet — {@code limit}
+     *  is passed as {@value #CPE_CANDIDATE_POOL} here, not {@value #CPE_CANDIDATE_LIMIT}. {@link
+     *  #resolveCpeCandidates} re-ranks/gates with the real ecosystem once it's known via {@link
+     *  #rankAndGate}, and THAT is the one place allowed to cut down to the final {@value
+     *  #CPE_CANDIDATE_LIMIT}, strictly after its target_sw gate has run.
+     *
+     *  <p>REVISE item 1 (senior review 2026-08-26, job 38 root-cause — the {@code http}/crates.io
+     *  bug): this method previously truncated to {@value #CPE_CANDIDATE_LIMIT} right here, before any
+     *  ecosystem/target_sw context existed to gate on. Measured live: crates.io {@code http}'s
+     *  ungated candidate pool, all tied at exact-slug rank, is {@code [ktat, ietf, dart, hyper,
+     *  reactphp, tokuhirom]} — truncating to 3 *first* kept only {@code [ktat, ietf, dart]}, and only
+     *  then did {@link #rankAndGate}'s gate get a chance to drop {@code ktat} (target_sw=perl) and
+     *  {@code dart} (target_sw=dart); with the real answer, {@code hyper:http} (target_sw=rust),
+     *  already discarded before the gate ever ran, the surviving {@code ietf:http} — merely untagged
+     *  rather than actually correct — won by default. Ranking the full pool here and deferring the
+     *  cut to after gating in {@link #rankAndGate} is what lets {@code hyper:http} survive to be
+     *  correctly chosen once the crates.io ecosystem context is known. */
+    private List<CpeDictionaryEntry> localCpeLookup(String vendor, String productName) {
+        List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
+                productName, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
+        List<CpeDictionaryEntry> literalMatches = plausibleContainmentOnly(vendor, productName, pool);
+        return rankCpeCandidates(vendor, productName, literalMatches, Optional.empty(), CPE_CANDIDATE_POOL);
+    }
+
+    /**
+     * Generalized short-form&lt;-&gt;long-form candidate generation — a genuine last resort, tried
+     * by {@link #resolveCpeCandidates} only after *both* the literal pg_trgm+containment search and
+     * the live NVD fallback have already come back empty for this item (senior review, 2026-08-25:
+     * this used to run one step earlier, inside {@link #localCpeLookup} itself, whenever the literal
+     * search alone found nothing — which meant producing *a* candidate here, even a wrong one, was
+     * enough to make {@link #resolveCpeCandidates} think local matches existed and skip the live NVD
+     * fallback and Tier3 entirely, silently suppressing two strictly better fallback stages). Never
+     * runs in addition to an already-successful literal or live-NVD match, so the common case pays
+     * nothing extra. Confirmed live 2026-08-25 that plain trigram similarity misses this shape of
+     * match in both directions no matter the query text tried ("VS Code", "Code" alone, and the full
+     * expanded name all score under threshold against {@code visual_studio_code}), so this needs its
+     * own retrieval strategy, not just a lower threshold.
+     *
+     * <p>Two independent, mechanical directions — not a hardcoded table of specific product-name
+     * pairs — plus a related vendor-prefix strip:
+     * <ul>
+     *   <li><b>Contraction</b> (long form -&gt; acronym): "GNU Image Manipulation Program" -&gt;
+     *       "GIMP" ({@link NameVariantGenerator#contractToAcronym}). Requires an exact product-slug
+     *       match ({@link #acronymVariantSearch}) rather than the literal query's containment check
+     *       — a synthetic few-letter acronym has no word-boundary protection of its own, see that
+     *       method's own javadoc.</li>
+     *   <li><b>Vendor-prefix strip</b>: a product name that literally begins with the item's own
+     *       vendor field (e.g. "Broadcom Norton 360") retried on the remainder — the local-dictionary
+     *       counterpart of {@link #liveNvdCpeLookupWithFallback}'s "drop a word, retry" shape. Re-runs
+     *       the same trigram+containment pipeline the literal query already used, since a real vendor
+     *       -stripped remainder is a real (if partial) product name, not a synthetic string.</li>
+     *   <li><b>Expansion</b> (abbreviation + word -&gt; long form): "VS Code" -&gt; the dictionary's
+     *       own {@code visual_studio_code} ({@link #expandLeadingInitialism}) — fundamentally
+     *       different from the other two since it can't be reduced to an alternate query string for
+     *       the same trigram pipeline (see that method's own javadoc).</li>
+     * </ul>
+     *
+     * <p>Every candidate this produces is still only ever a *guess*, never auto-trusted the way a
+     * literal match is — see {@link #resolveSingleCpeCandidate}'s forced AI check for a lone
+     * variant-derived candidate.
+     *
+     * <p>Bounded to at most {@value #MAX_NAME_VARIANT_QUERIES_PER_ITEM} extra local-dictionary
+     * queries per item (stops at the first direction that finds anything) and memoized per
+     * (vendor, productName) via {@link #cpeNameVariantCache} for the rest of this process's life —
+     * this project's CSVs repeat the same product name across many version-duplicate rows, so a
+     * job that pays for this once for "VS Code" should not pay for it again on every other row (see
+     * {@link RegistryLookupCache}'s own precedent for the same reasoning).
+     */
+    private List<CpeDictionaryEntry> findByNameVariants(String vendor, String productName) {
+        return cpeNameVariantCache.get(vendor, productName, () -> computeNameVariantMatches(vendor, productName));
+    }
+
+    private List<CpeDictionaryEntry> computeNameVariantMatches(String vendor, String productName) {
+        int queriesLeft = MAX_NAME_VARIANT_QUERIES_PER_ITEM;
+
+        String acronym = NameVariantGenerator.contractToAcronym(productName);
+        if (acronym != null) {
+            List<CpeDictionaryEntry> viaContraction = acronymVariantSearch(acronym);
+            queriesLeft--;
+            if (!viaContraction.isEmpty()) {
+                return viaContraction;
+            }
+        }
+        if (queriesLeft <= 0) {
+            return List.of();
+        }
+
+        String vendorStripped = NameVariantGenerator.stripLeadingVendor(productName, vendor);
+        if (vendorStripped != null) {
+            List<CpeDictionaryEntry> viaVendorStrip = literalVariantSearch(vendor, vendorStripped);
+            queriesLeft--;
+            if (!viaVendorStrip.isEmpty()) {
+                return viaVendorStrip;
+            }
+        }
+        if (queriesLeft <= 0) {
+            return List.of();
+        }
+
+        return expandLeadingInitialism(productName);
+    }
+
+    /**
+     * Contraction-direction candidate search: unlike {@link #literalVariantSearch} (used for the
+     * vendor-strip direction), a mechanically-derived acronym is deliberately NOT run through {@link
+     * #plausibleContainmentOnly}'s unanchored substring check. That check is calibrated for real (if
+     * abbreviated) product names sharing actual words with a candidate; it's unsafe for a synthetic
+     * few-letter string with no word-boundary protection of its own. Measured false positives
+     * (senior review, 2026-08-25): 7 of 8 real acronym-direction candidates tested were wrong when
+     * routed through containment (e.g. "animal-sniffer-annotations" -&gt; {@code pix_asa},
+     * "javax.servlet-api" -&gt; {@code jsa1500}) — the same false-positive class already fixed for
+     * "failureaccess" -&gt; {@code microsoft:access}. Requires the candidate's normalized product
+     * slug to equal the acronym exactly instead: safe for any acronym length, since there is no
+     * partial-credit path left to exploit.
+     */
+    private List<CpeDictionaryEntry> acronymVariantSearch(String acronym) {
+        List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
+                acronym, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
+        return pool.stream()
+                .filter(entry -> acronym.equals(normalizedProductSlug(entry)))
+                .toList();
+    }
+
+    private String normalizedProductSlug(CpeDictionaryEntry entry) {
+        return entry.getProduct() == null ? "" : entry.getProduct().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** Re-runs the same trigram-search + containment pipeline {@link #localCpeLookup} uses on the
+     *  literal query, but against an alternate query string (a vendor-stripped remainder) instead of
+     *  the item's raw product name. NOT used for the contraction/acronym direction — see {@link
+     *  #acronymVariantSearch}'s javadoc for why a synthetic acronym needs a stricter check. */
+    private List<CpeDictionaryEntry> literalVariantSearch(String vendor, String variantQuery) {
+        List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
+                variantQuery, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
+        return plausibleContainmentOnly(vendor, variantQuery, pool);
+    }
+
+    /**
+     * Initialism-expansion direction of name-variant matching: "VS Code" -&gt; the dictionary's own
+     * {@code visual_studio_code}. Can't be reduced to "try this alternate query string against the
+     * usual trigram pipeline" like {@link #literalVariantSearch} — confirmed live 2026-08-25, no
+     * variant of the query text scores high enough on either product/title trigram similarity
+     * ({@code similarity('visual_studio_code','vs code')} = 0.29, {@code
+     * similarity('visual_studio_code','code')} = 0.26, both under the 0.3 threshold — an
+     * underscore-joined slug is just too different, character-for-character, from either form of an
+     * abbreviated query). Instead:
+     *
+     * <ol>
+     *   <li>Treats the query's leading token as a possible abbreviation (bounded to {@value
+     *       #MIN_INITIALISM_LENGTH}-{@value #MAX_INITIALISM_LENGTH} characters — long enough to
+     *       carry real signal, short enough that a real first *word* doesn't get treated as one) and
+     *       the rest of the query as the "anchor" phrase, requiring the anchor be at least {@value
+     *       #MIN_ANCHOR_LENGTH_FOR_INITIALISM_EXPANSION} characters (see that constant's javadoc —
+     *       shorter anchors can't use the trigram index the SQL query below relies on).</li>
+     *   <li>Finds candidates whose {@code product} slug's leading per-word initials spell the
+     *       abbreviation and are immediately followed by the anchor, via a left-anchored SQL regex
+     *       built directly from the abbreviation and anchor (see {@link
+     *       com.vulncheck.app.repository.CpeDictionaryRepositoryCustom#findByLeadingInitialismMatch}),
+     *       capped at {@value #NAME_VARIANT_ANCHOR_SEARCH_LIMIT}.</li>
+     *   <li>Re-applies the same initials check in Java ({@link #leadingInitialsMatch}) as a safety
+     *       net after the SQL-level filter — "visual studio" -&gt; "vs". Verified against the real
+     *       dictionary: of 424 distinct products whose slug contains "code", exactly 4 satisfy this
+     *       for "vs", and all 4 are genuinely Visual Studio Code or one of its extensions.</li>
+     * </ol>
+     */
+    private List<CpeDictionaryEntry> expandLeadingInitialism(String productName) {
+        List<String> queryTokens = tokenize(normalizeForContainment(productName));
+        if (queryTokens.size() < 2) {
+            return List.of();
+        }
+        String abbreviation = queryTokens.get(0);
+        if (abbreviation.length() < MIN_INITIALISM_LENGTH || abbreviation.length() > MAX_INITIALISM_LENGTH) {
+            return List.of();
+        }
+        List<String> anchorTokens = queryTokens.subList(1, queryTokens.size());
+        String anchor = String.join("_", anchorTokens);
+        if (anchor.length() < MIN_ANCHOR_LENGTH_FOR_INITIALISM_EXPANSION) {
+            return List.of();
+        }
+
+        List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findByLeadingInitialismMatch(
+                abbreviation, anchor, NAME_VARIANT_ANCHOR_SEARCH_LIMIT);
+        return pool.stream()
+                .filter(entry -> leadingInitialsMatch(abbreviation, anchorTokens, entry))
+                .toList();
+    }
+
+    /** @return whether {@code entry}'s product-slug words immediately preceding the {@code
+     *  anchorTokens} occurrence spell {@code abbreviation} letter-for-letter, one letter per word —
+     *  the signal that separates "VS Code" -&gt; {@code visual_studio_code} (real) from a coincidental
+     *  anchor-word overlap with something unrelated. */
+    private boolean leadingInitialsMatch(String abbreviation, List<String> anchorTokens, CpeDictionaryEntry entry) {
+        List<String> productTokens = tokenize(normalizeForContainment(entry.getProduct()));
+        int start = java.util.Collections.indexOfSubList(productTokens, anchorTokens);
+        if (start <= 0) {
+            // start == 0: the anchor is the product's very first word — nothing left for the
+            // abbreviation to explain, so this isn't the initialism-expansion shape at all.
+            // start < 0: the anchor phrase isn't even present as contiguous tokens.
+            return false;
+        }
+        StringBuilder initials = new StringBuilder();
+        for (int i = 0; i < start; i++) {
+            String token = productTokens.get(i);
+            if (token.isEmpty()) {
+                return false;
+            }
+            initials.append(token.charAt(0));
+        }
+        return initials.toString().equals(abbreviation);
+    }
+
+    /**
+     * De-duplicates the wide {@value #CPE_CANDIDATE_POOL}-row pool down to one best row per distinct
+     * product and ranks them, preferring ones whose CPE vendor agrees with the vendor the user typed.
+     * Truncates to {@code limit} entries only at the very end — callers control how far down that
+     * happens, and MUST NOT pass {@value #CPE_CANDIDATE_LIMIT} here until after {@link
+     * #passesTargetSwGate} has already run over the full ranked list (see {@link #rankAndGate}); see
+     * {@link #localCpeLookup}'s own javadoc for the measured {@code http}/crates.io bug this
+     * ordering requirement exists to prevent.
+     *
+     * <p>Callers that need the small final {@value #CPE_CANDIDATE_LIMIT}-row list handed to Tier2/3
+     * should call {@link #rankAndGate} instead of this method directly, so the gate is never skipped.
+     *
+     * <p>Two separate problems are solved here, both measured against real data 2026-08-24:
+     * <ul>
+     *   <li><b>Version-duplicate rows.</b> The dictionary stores one row per catalogued version,
+     *       so a single product can occupy the entire candidate window (TeamViewer has dozens of
+     *       rows). De-duplicating on vendor:product means the three candidates Tier2 eventually
+     *       sees are three genuinely different products, not the same one three times.</li>
+     *   <li><b>Vendor as a ranking signal, never as query text.</b> The old code concatenated the
+     *       vendor into the pg_trgm query itself, which was actively harmful: for "Amazon Web
+     *       Services TeamViewer", the vendor words scored {@code amazon_web_services_aws-c-io}
+     *       (0.51) and {@code amazon_web_services_freertos} (0.50) above the real
+     *       {@code teamviewer} (0.35), so with a 3-row window the correct product never surfaced
+     *       at all and the item came back UNIDENTIFIED. Confirmed as the cause of a whole class of
+     *       misses (TeamViewer, Microsoft Teams, ... all present in the dictionary yet
+     *       unidentified). Vendor agreement is a weak *bonus* — a mismatch never rejects a
+     *       candidate, since real-world vendor columns are frequently blank, wrong, or a
+     *       reseller/parent-company name rather than the CPE vendor slug.</li>
+     * </ul>
+     *
+     * <p>REVISE item 3 (senior review, job 36 root-cause): {@code mappedTargetSw} — the item's own
+     * ecosystem's mapped {@code target_sw} value (see {@link #ECOSYSTEM_TO_TARGET_SW}), present
+     * only when there's a registry match on a mapped ecosystem — is a ranking signal positioned
+     * <em>behind</em> the exact-product-slug-match signal below but still <em>ahead of</em> {@code
+     * vendorAgrees}: it's what makes rubygems "puma" prefer {@code puma:puma} over an unrelated
+     * {@code intel:puma}-shaped candidate, and npm "uuid" prefer {@code uuidjs:uuid} over {@code
+     * satori:uuid}, when vendor agreement alone can't distinguish them (the item's own vendor field
+     * is often blank or unhelpful for a bare package name). Never a hard requirement — see {@link
+     * #passesTargetSwGate} for the actual hard-reject gate.
+     *
+     * <p>REVISE item 1 (senior review, job 37 root-cause): {@code exactMatchQuery}'s normalized text
+     * exactly equaling a candidate's normalized product slug is the <em>primary</em> sort key, ahead
+     * of even {@code mappedTargetSw} — demoted from behind it, where round 2 had put it. Round 2's
+     * ordering let a merely target_sw-agreeing but otherwise wrong sub-package
+     * ({@code bigcat88:pillow-heif}, {@code rails_admin_project:rails_admin}, {@code
+     * matrix:react_sdk}, {@code mhenrixon:sidekiq-unique-jobs}, {@code
+     * typescript_deep_merge_project:typescript_deep_merge}) outrank the real, exactly-named
+     * canonical package purely because target_sw happened to line up too. An exact slug match is
+     * strictly stronger evidence of identity than a platform-scoping hint ever is, so it must win
+     * first. {@link #passesTargetSwGate}'s hard rejection of a genuinely wrong-platform candidate is
+     * unaffected by this reordering — this only changes which of several <em>already-gated-in</em>
+     * candidates sorts first.
+     */
+    private List<CpeDictionaryEntry> rankCpeCandidates(String vendor, String exactMatchQuery,
+            List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit) {
+        java.util.LinkedHashMap<String, CpeDictionaryEntry> bestPerProduct = new java.util.LinkedHashMap<>();
+        for (CpeDictionaryEntry entry : candidates) {
+            // REVISE item 6 (senior review, job 37 root-cause): a CPE Dictionary row can be for
+            // hardware or an operating system just as easily as an application — NVD really does
+            // catalogue cpe:2.3:h:corsair:commander_pro alongside every software "commander"-named
+            // product, and no text-matching heuristic anywhere else in this class can ever be a
+            // legitimate reason to attach a hardware/OS CPE to a software inventory item. Filtered
+            // here, the one choke point every candidate-producing path (literal search, live NVD
+            // fallback, name-variant search) already funnels through via rankAndGate.
+            if (!isApplicationPart(entry)) {
+                continue;
+            }
+            // Candidates arrive in descending trigram-score order, so the first row seen for a
+            // vendor:product pair is already that product's best-scoring row.
+            bestPerProduct.putIfAbsent(identityKey(entry), entry);
+        }
+
+        String normalizedVendor = normalizeForContainment(vendor);
+        String normalizedExactMatchQuery = normalizeForContainment(exactMatchQuery);
+        return bestPerProduct.values().stream()
+                // Stable sort: preserves the underlying trigram ranking within each group, so this
+                // only promotes exact-slug-matching / target_sw-matching / vendor-agreeing candidates
+                // rather than re-ordering arbitrarily.
+                .sorted(java.util.Comparator
+                        .comparing((CpeDictionaryEntry e) -> exactProductSlugMatch(normalizedExactMatchQuery, e) ? 0 : 1)
+                        .thenComparing(e -> targetSwMatchesEcosystem(e, mappedTargetSw) ? 0 : 1)
+                        .thenComparing(e -> vendorAgrees(normalizedVendor, e) ? 0 : 1))
+                .limit(limit)
+                .toList();
+    }
+
+    /** REVISE item 1's primary ranking signal: whether {@code normalizedExactMatchQuery} (already
+     *  run through {@link #normalizeForContainment}) is exactly equal to {@code entry}'s own
+     *  normalized product slug — not mere containment, which every candidate in this list has
+     *  already passed to get this far. */
+    private boolean exactProductSlugMatch(String normalizedExactMatchQuery, CpeDictionaryEntry entry) {
+        return !normalizedExactMatchQuery.isBlank()
+                && normalizedExactMatchQuery.equals(normalizeForContainment(entry.getProduct()));
+    }
+
+    /** REVISE item 6: whether {@code entry}'s CPE {@code part} segment (index 2, 0-indexed) is
+     *  {@code a} (application) — the only part value that can ever be a software inventory item's
+     *  own identity. A plain split is safe here (never the escape-aware {@link CpeUtils} splitter):
+     *  the part segment always precedes any vendor/product field, so it can never itself contain an
+     *  escaped colon. Defensively permissive (returns true) for a CPE string too short to even have
+     *  a part segment, mirroring this class's other defensive CPE-parsing fallbacks. */
+    private boolean isApplicationPart(CpeDictionaryEntry entry) {
+        String cpeString = entry.getCpeString();
+        if (cpeString == null) {
+            return true;
+        }
+        String[] segments = cpeString.split(":", -1);
+        return segments.length <= 2 || "a".equals(segments[2]);
+    }
+
+    /** Derived from the CPE string rather than the entity's own vendor/product columns: the CPE
+     *  string is the one field guaranteed to be present and authoritative for every row, and
+     *  parsing it keeps this correct even for rows written before those columns existed (or by a
+     *  caller that only populated the CPE itself). */
+    private String identityKey(CpeDictionaryEntry entry) {
+        CpeUtils.VendorProduct vendorProduct = CpeUtils.parseVendorProduct(entry.getCpeString());
+        return vendorProduct != null
+                ? vendorProduct.vendor() + ":" + vendorProduct.product()
+                : String.valueOf(entry.getCpeString());
+    }
+
+    private boolean vendorAgrees(String normalizedVendor, CpeDictionaryEntry entry) {
+        if (normalizedVendor.isBlank()) {
+            return false;
+        }
+        return containsEitherWay(normalizedVendor, normalizeForContainment(cpeVendorOf(entry)));
+    }
+
+    /** Prefers the vendor parsed out of the CPE string over the entity column, for the same reason
+     *  {@link #identityKey} does: the CPE string is the one field every row is guaranteed to have. */
+    private String cpeVendorOf(CpeDictionaryEntry entry) {
+        CpeUtils.VendorProduct vendorProduct = CpeUtils.parseVendorProduct(entry.getCpeString());
+        return vendorProduct != null ? vendorProduct.vendor() : entry.getVendor();
+    }
+
+    /**
+     * The rest of {@link #fuzzyMatchCpe} once the local (literal-only) lookup's result is already in
+     * hand (whether computed just now or, in {@link #identify}'s case, concurrently with the
+     * registry fan-out) — decides whether a live NVD fallback is warranted at all, and only as a
+     * genuine last resort (after that live fallback has itself been attempted and failed) tries the
+     * name-variant search ({@link #findByNameVariants}).
+     *
+     * <p>The variant search deliberately does NOT run any earlier than this: it used to live inside
+     * {@link #localCpeLookup} itself, firing whenever the literal search alone found nothing — which
+     * meant producing *a* candidate there, even a wrong one, made this method think local matches
+     * already existed, permanently skipping the live NVD fallback below and, via {@link #identify},
+     * Tier3 as well (both gated on "found literally nothing at all"). Trying it only after the live
+     * fallback has already come back empty preserves both of those strictly-better fallback stages.
+     *
+     * <p>REVISE item 1 (senior review, job 36 root-cause): every candidate list this method can
+     * return is passed through {@link #rankAndGate}, which — on top of the existing ranking — hard
+     * -rejects a candidate whose {@code target_sw} set scopes it to a platform the item doesn't
+     * belong to (see {@link #passesTargetSwGate}). A rejection empties out whichever branch produced
+     * it, which naturally falls through to the next fallback stage exactly like "found nothing" did
+     * before this fix — never a silent drop to a lower-ranked candidate within the same branch.
+     */
+    private CpeCandidateResult resolveCpeCandidates(String vendor, String productName, Long userId,
+            Optional<String> registryEcosystem, Optional<String> registryPackageName,
+            List<CpeDictionaryEntry> localMatches) {
+        // REVISE item 1: a registry-sourced item's own resolved package name — reduced to its one
+        // meaningful segment the same way Fix 5's cpeCorroboratesRegistryPackage already does for a
+        // Maven groupId:artifactId coordinate or a Go module path — is a strictly more precise exact
+        // -match query than the item's raw productName, since it's a real registry's own canonical
+        // name rather than whatever free text the inventory happened to record. Falls back to
+        // productName whenever there's no registry match to draw on.
+        String exactMatchQuery = registryPackageName.map(this::lastMeaningfulPackageSegment).orElse(productName);
+        TargetSwContext targetSwContext = TargetSwContext.from(registryEcosystem, exactMatchQuery);
+
+        List<CpeDictionaryEntry> gatedLocalMatches = rankAndGate(vendor, localMatches, targetSwContext);
+        if (!gatedLocalMatches.isEmpty()) {
+            return new CpeCandidateResult(gatedLocalMatches, false);
+        }
+
+        String query = cpeQuery(vendor, productName);
+        if (registryEcosystem.isPresent()) {
+            log.info("Local CPE dictionary had no candidates for '{}' — skipping live NVD CPE lookup "
+                    + "since a registry match already covers this item", query);
+            return new CpeCandidateResult(List.of(), false);
+        }
+
+        Optional<String> nvdApiKey = userApiKeyService.getNvdApiKey(userId);
+        Optional<String> successfulQuery = liveNvdCpeLookupWithFallback(query, nvdApiKey);
+        if (successfulQuery.isEmpty()) {
+            // Genuine last resort: even the live, rate-limited NVD keyword search (already retried
+            // with several word-dropped fallback queries) found nothing at all for this product.
+            List<CpeDictionaryEntry> variantMatches =
+                    rankAndGate(vendor, findByNameVariants(vendor, productName), targetSwContext);
+            return new CpeCandidateResult(variantMatches, !variantMatches.isEmpty());
+        }
+
+        // Re-query with whichever (possibly word-dropped) variant actually found results, not the
+        // original full query — observed live: a live sync for "GitKraken GitLens - Git
+        // supercharged" only succeeded after dropping "supercharged" down to "GitKraken GitLens -
+        // Git", but re-querying the local dictionary with the original, longer string diluted
+        // trigram similarity below both thresholds (0.276/0.286 vs. 0.3/0.6), silently discarding
+        // the very entries the live call had just upserted a moment earlier.
+        List<CpeDictionaryEntry> refreshed = rankAndGate(vendor, localCpeLookup(vendor, productName), targetSwContext);
+        if (!refreshed.isEmpty()) {
+            return new CpeCandidateResult(refreshed, false);
+        }
+        return new CpeCandidateResult(rankAndGate(vendor, plausibleContainmentOnly(vendor, productName,
+                cpeDictionaryRepository.findFuzzyMatches(successfulQuery.get(),
+                        CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL)),
+                targetSwContext), false);
+    }
+
+    private String cpeQuery(String vendor, String productName) {
+        return vendor != null && !vendor.isBlank() ? vendor + " " + productName : productName;
+    }
+
+    /** Ranks {@code candidates} (see {@link #rankCpeCandidates}) and then applies the REVISE item 1
+     *  target_sw hard-reject gate ({@link #passesTargetSwGate}) — the one place both operations are
+     *  applied together, so every exit point of {@link #resolveCpeCandidates} gets both regardless
+     *  of which branch produced the raw candidate list.
+     *
+     *  <p>REVISE item 1 (senior review 2026-08-26, job 38 root-cause): ranks over the full {@value
+     *  #CPE_CANDIDATE_POOL}-sized pool (passing {@code CPE_CANDIDATE_POOL}, not {@code
+     *  CPE_CANDIDATE_LIMIT}, as {@link #rankCpeCandidates}'s {@code limit}) and gates BEFORE
+     *  truncating to the final {@value #CPE_CANDIDATE_LIMIT} — not the other way around. Truncating
+     *  first was the entire bug: crates.io {@code http}'s correct answer, {@code hyper:http}, sat
+     *  outside the first 3 rows of the ungated, ecosystem-unaware ranking (tied with several wrong
+     *  candidates at exact-slug rank), so a truncate-then-gate order discarded it before the gate
+     *  that would have rejected the other 2 finalists (and kept {@code hyper}) ever got to run. */
+    private List<CpeDictionaryEntry> rankAndGate(String vendor, List<CpeDictionaryEntry> candidates, TargetSwContext ctx) {
+        return rankCpeCandidates(vendor, ctx.exactMatchQuery(), candidates, ctx.mappedTargetSw(), CPE_CANDIDATE_POOL)
+                .stream()
+                .filter(entry -> passesTargetSwGate(entry, ctx))
+                .limit(CPE_CANDIDATE_LIMIT)
+                .toList();
+    }
+
+    /**
+     * Gating/ranking context for target_sw-aware CPE matching (REVISE items 1/3, senior review
+     * 2026-08-26 / job 36 root-cause). {@code hasRegistryMatch} distinguishes two cases {@link
+     * #passesTargetSwGate} treats differently: "no registry match at all" (desktop software with no
+     * ecosystem to map, e.g. Slack/Atom/OWASP ZAP/Camtasia — the stricter "reject anything entirely
+     * platform-scoped" gate) versus "a registry matched, but its ecosystem has no target_sw mapping"
+     * (hex, maven — deliberately treated as no signal at all, per {@link #ECOSYSTEM_TO_TARGET_SW}'s
+     * own javadoc and REVISE item 8, which leaves hex's "tesla" alone entirely). {@code
+     * mappedTargetSw} is therefore only ever present when there IS a registry match AND its
+     * ecosystem is one of the eight mapped ones.
+     */
+    private record TargetSwContext(boolean hasRegistryMatch, Optional<String> mappedTargetSw, String exactMatchQuery) {
+        static TargetSwContext from(Optional<String> registryEcosystem, String exactMatchQuery) {
+            return registryEcosystem.isEmpty()
+                    ? new TargetSwContext(false, Optional.empty(), exactMatchQuery)
+                    : new TargetSwContext(true, mapEcosystemToTargetSw(registryEcosystem.get()), exactMatchQuery);
+        }
+    }
+
+    private static Optional<String> mapEcosystemToTargetSw(String ecosystem) {
+        return Optional.ofNullable(ecosystem).map(ECOSYSTEM_TO_TARGET_SW::get);
+    }
+
+    /**
+     * REVISE item 1 (senior review, job 36 root-cause): a CPE whose {@code target_sw} set scopes it
+     * to being a component of some other platform (e.g. {@code target_sw=jenkins} — "this CPE is
+     * the Jenkins Slack Notification plugin for Jenkins", not Slack itself) can never be a
+     * standalone item's own identity, and can only be a *registry-sourced* item's identity when that
+     * scoping actually matches the item's own ecosystem. A blank/absent target_sw set — the common
+     * case, since only candidates sourced from {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#findFuzzyMatches} ever get one
+     * populated at all (see {@link CpeDictionaryEntry#getTargetSwValues}) — means there's no signal
+     * to gate on at all, so it always passes rather than being treated as evidence of anything.
+     */
+    private boolean passesTargetSwGate(CpeDictionaryEntry entry, TargetSwContext ctx) {
+        java.util.Set<String> targetSwValues = entry.getTargetSwValues();
+        if (targetSwValues == null || targetSwValues.isEmpty()) {
+            return true;
+        }
+        // REVISE item 3: checked before anything else, including the wildcard passthrough just
+        // below — a (vendor, product) pair whose rows span both a wildcard-scoped version and a
+        // Jenkins-plugin-scoped version is not a realistic case in practice, but "unconditional"
+        // means unconditional: this must never be reachable via any other branch of this method,
+        // including the hex/maven orElse(true) default-allow at the bottom.
+        if (targetSwValues.contains(JENKINS_TARGET_SW)) {
+            return false;
+        }
+        boolean isWildcardOrNotApplicableOrNonScoping = targetSwValues.stream()
+                .anyMatch(v -> "*".equals(v) || "-".equals(v) || NON_SCOPING_TARGET_SW_VALUES.contains(v));
+        if (isWildcardOrNotApplicableOrNonScoping) {
+            return true;
+        }
+        if (!ctx.hasRegistryMatch()) {
+            // No registry match at all, so no ecosystem of the item's own to compare against — a
+            // CPE scoped only to being a component of *some* other platform can never be this
+            // standalone item's identity.
+            return false;
+        }
+        // A registry match exists but its ecosystem has no target_sw mapping (hex/maven) is treated
+        // as "nothing to gate on" (orElse(true)) rather than a rejection — see ECOSYSTEM_TO_TARGET_SW's
+        // own javadoc for why guessing a mapping for those two would be worse than having none.
+        return ctx.mappedTargetSw().map(targetSwValues::contains).orElse(true);
+    }
+
+    /** REVISE item 3's soft ranking-preference signal: whether {@code entry}'s target_sw set
+     *  contains the item's own ecosystem's mapped value — see {@link #rankCpeCandidates}'s own
+     *  javadoc for where this sits in the sort priority. */
+    private boolean targetSwMatchesEcosystem(CpeDictionaryEntry entry, Optional<String> mappedTargetSw) {
+        if (mappedTargetSw.isEmpty()) {
+            return false;
+        }
+        java.util.Set<String> targetSwValues = entry.getTargetSwValues();
+        return targetSwValues != null && targetSwValues.contains(mappedTargetSw.get());
+    }
+
+    /**
+     * A pg_trgm threshold alone isn't reliable for long, multi-word CPE product slugs — trigram
+     * similarity is inflated by generic shared words even between unrelated products. Observed
+     * live: querying "Python Extension Pack for Visual Studio Code" scored 0.59 product-similarity
+     * against {@code visual_studio_code_eslint_extension} (comfortably past the 0.3 threshold)
+     * purely from sharing "visual"/"studio"/"code"/"extension" — a completely different VS Code
+     * extension. Every confirmed-correct match observed live (gson, wireshark, notepad++, nuget,
+     * gimp) satisfies plain case-insensitive substring containment one way or the other between the
+     * query and the candidate's product/title; the false positive above does not (neither contains
+     * "python" nor "eslint"). Cheap, no extra query, applied as a post-filter after the pg_trgm
+     * candidate search rather than replacing it — pg_trgm still does the real work of finding
+     * candidates at all despite typos/word-order/punctuation differences.
+     *
+     * <p>Callers deliberately pass the bare {@code productName} here, not the vendor-prefixed
+     * search query used for the pg_trgm lookup itself — found live 2026-08-24: a query like
+     * "Mozilla Zoom" or "Mozilla echo" (vendor "Mozilla" + an unrelated product) matched NVD's
+     * real but low-quality {@code cpe:2.3:a:mozilla:mozilla:-:*:*:*:*:*:*:*} entry (product
+     * literally "mozilla", title "Mozilla Mozilla") purely because the *vendor* word "mozilla"
+     * is trivially contained in that candidate — 94 items across two test jobs ended up
+     * misidentified as generic "Mozilla Mozilla" this way, regardless of what the actual product
+     * was. Requiring containment against the product name alone (vendor's role stays limited to
+     * widening the initial pg_trgm search) closes this off without narrowing genuine matches,
+     * since a real candidate's title/product almost always still contains the bare product name.
+     */
+    private List<CpeDictionaryEntry> plausibleContainmentOnly(String vendor, String query, List<CpeDictionaryEntry> candidates) {
+        // A Go module path anchors on its VCS host ("github.com/gin-gonic/gin"), and that host
+        // component has no CPE identity of its own — left in, it made containment matching anchor
+        // on the near-universal "github"/"gitlab"/etc. vendor:vendor CPE entry instead of the
+        // module's real, meaningful path segments (confirmed live: "github.com/gin-gonic/gin"
+        // resolved to the generic github:github CPE). Reuses the same host.tld/path detection
+        // RegistryRoutingPolicy already applies when routing registry lookups, rather than
+        // inventing a second one here.
+        String normalizedQuery = normalizeForContainment(RegistryRoutingPolicy.stripHostPrefix(query));
+        String normalizedItemVendor = normalizeForContainment(vendor);
+        return candidates.stream()
+                .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false)
+                        || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true))
+                .toList();
+    }
+
+    /**
+     * Decides whether {@code candidateText} (a candidate's product slug or title) actually accounts
+     * for the query, rather than merely overlapping with it.
+     *
+     * <p>The old check was a symmetric substring test, and the "query contains candidate" half of it
+     * turned out to be the dominant source of *false positives* once the dictionary went from 1,791
+     * entries to the full 1,815,263: with 1.8M products there is now always some short slug lurking
+     * inside any multi-word name. Measured on jobs 30/31/32 (2026-08-25), it produced:
+     *
+     * <ul>
+     *   <li>"GitHub Desktop", "Power BI Desktop" and "Tableau Desktop" → {@code docker:desktop},
+     *       because NVD really does catalogue Docker Desktop as vendor {@code docker}, product
+     *       {@code desktop}. "Docker Desktop" is the only one of the four that is correct, and the
+     *       thing that distinguishes it is that its leftover word *is* the CPE vendor.</li>
+     *   <li>"OBS Studio" → {@code nvidia:studio}, "7-Zip File Manager" → {@code horde:file_manager},
+     *       "Paint.NET" → {@code microsoft:.net}, "ramsey/uuid" → {@code satori:uuid}.</li>
+     *   <li>Mid-word overlaps with no word boundary at all: "failureaccess" → {@code microsoft:access},
+     *       "javapoet" → {@code ibm:java}, "guice" → {@code sap:gui}, "ioredis" → {@code
+     *       pivotal_software:redis}.</li>
+     * </ul>
+     *
+     * <p>These are worse than a miss: an UNIDENTIFIED item is visibly handed back for review, whereas
+     * a confident wrong CPE quietly attaches someone else's CVEs to the product. So the two
+     * directions are no longer treated alike:
+     *
+     * <ul>
+     *   <li><b>Candidate contains query</b> — accepted as before. The candidate is the broader
+     *       string ("Sublime Text" → {@code sublime_text_3}), so nothing in the query is unaccounted
+     *       for.</li>
+     *   <li><b>Query contains candidate</b> — the candidate is narrower, so the leftover words are
+     *       exactly what distinguishes GitHub Desktop from Docker Desktop. Accepted only if the
+     *       candidate lines up on <em>whole tokens</em> (killing the mid-word class outright) and
+     *       every leftover token <em>ahead of</em> the match is explained by the CPE vendor
+     *       ({@link #vendorExplains}).</li>
+     * </ul>
+     *
+     * <p>Only the <em>leading</em> leftovers are policed, because the head of a software name is
+     * where its identity lives; everything after is routinely descriptive ("IntelliJ IDEA Community
+     * Edition", "VLC Media Player Portable", "GitKraken GitLens - Git supercharged"). Every one of
+     * the false positives above matched in the interior or at the tail — "desktop" is the second
+     * word of "GitHub Desktop", "file manager" the third of "7-Zip File Manager" — while every
+     * correct narrower match either starts at the head ("qBittorrent Enhanced Edition") or has the
+     * CPE vendor as its head ("Docker Desktop", "Adobe Acrobat Reader", "Apache HTTP Server"). That
+     * makes a curated stop-word list unnecessary, which matters: such a list is unbounded in
+     * practice and silently wrong for whatever product ships the word it omits.
+     *
+     * <p>Verified against every CPE-backed identification in jobs 30/31/32: all eight false
+     * positives above are rejected and no correct match is lost. The residual risk it accepts is a
+     * name whose head is a real product but whose tail changes what it is ("Redis Desktop Manager"
+     * → {@code redis}); that is rarer than the class removed here, and the trigram search still
+     * ranks an exact full-name entry above it whenever NVD has one.
+     *
+     * <p>REVISE item 5 (senior review, job 37 root-cause): direction 2 above only ever policed the
+     * query tokens <em>ahead of</em> the matched candidate run, never the ones <em>after</em> it —
+     * fine when there's already a leading anchor proving the vendor tie ("AVG AntiVirus Free" against
+     * {@code avg:antivirus}: "avg" leads and is vendor-explained, "free" trails unchecked), but a
+     * real gap when the candidate is a single, generic token that matches at the very head of the
+     * query with nothing preceding it at all to prove anything — "Windows Terminal" against {@code
+     * microsoft:windows}, "Android Studio" against {@code google:android}, "Chrome Remote Desktop"
+     * against {@code 360:chrome}, "Unity Hub" against {@code ayatana_project:unity} all matched this
+     * way with the entire rest of the query silently unaccounted for. Requiring the trailing tokens
+     * to be vendor-explained too, but only when there was no leading anchor to already vouch for the
+     * match, closes this without re-breaking the AVG case (whose leading "avg" already proves it).
+     */
+    private boolean explainsQuery(String normalizedItemVendor, String normalizedQuery, CpeDictionaryEntry entry,
+            String candidateText, boolean isTitleField) {
+        String candidate = normalizeForContainment(candidateText);
+        if (normalizedQuery.isBlank() || candidate.isBlank()) {
+            return false;
+        }
+
+        List<String> queryTokens = tokenize(normalizedQuery);
+        List<String> candidateTokens = tokenize(candidate);
+        if (queryTokens.isEmpty() || candidateTokens.isEmpty()) {
+            return false;
+        }
+
+        // Direction 1 (2026-08-26 fix): candidate is the broader string — the whole query must
+        // align, token-boundary-and-concatenation-aware, against a *leading* run of candidate
+        // tokens (see alignPrefix's own javadoc for the concatenation handling). This replaces the
+        // old raw, unconstrained `candidate.contains(normalizedQuery)` fast path, which matched any
+        // short query mid-word against any candidate that happened to embed it as a substring
+        // (confirmed live: "rayon" -> crayon_project:crayon, "log" -> siemens:logo!, "get" ->
+        // ...:set-or-get) — this same loose check ran against entry.getTitle() too, which is far
+        // worse: with 1.8M NVD titles formatted "Vendor Product Version", any short query trivially
+        // substring-matches thousands of unrelated titles purely off their leading vendor word
+        // (confirmed live: "slack" -> jenkins:slack / a WordPress plugin titled "Slack WP
+        // SlackSync..." merely because its vendor happens to be "Slack"). For a title specifically
+        // (never for a bare product slug — see stillAcceptsANarrowerCandidateWhenTheLeftoverWordIs
+        // TheCpeVendor, a legitimate case of the *opposite* direction below, for why the vendor
+        // can't just be exempted from policing here the way it's used to *explain* leftovers there),
+        // a match consumed entirely within the entry's own vendor-token count proves nothing about
+        // the actual product and is rejected outright, since the title format guarantees its
+        // leading word(s) literally *are* the vendor.
+        int candidateTokensConsumed = alignPrefix(queryTokens, candidateTokens);
+        // REVISE item 2 (senior review, job 36): a real multi-word product name doesn't only ever
+        // sit at the very front of a longer candidate product slug — "Process Monitor" is a real,
+        // previously-working match against sysinternals_process_monitor that Fix 2's index-0-only
+        // anchoring above silently broke (a regression, not a new gap). Retried at any later
+        // candidate token boundary, but ONLY for the product field (never the title field, which
+        // stays strictly prefix-anchored via vendorTokenCount above) and ONLY when the query itself
+        // has at least two tokens — a single-token query (e.g. "get" against "set-or-get") has no
+        // internal structure of its own to prove the match landed on a real word boundary rather
+        // than a coincidental one, which is exactly why an unconditional relaxation would wrongly
+        // re-accept "get" -> ...:set-or-get, the very false positive Fix 2 closed off.
+        if (candidateTokensConsumed <= 0 && !isTitleField && queryTokens.size() >= 2) {
+            candidateTokensConsumed = alignPrefixAtAnyBoundary(queryTokens, candidateTokens, normalizedItemVendor);
+        }
+        if (candidateTokensConsumed > 0 && (!isTitleField || candidateTokensConsumed > vendorTokenCount(entry))) {
+            return true;
+        }
+
+        // Direction 2 (unchanged since the 2026-08-25 fix): candidate is the narrower string, found
+        // as a contiguous run of whole tokens somewhere within the query. Accepted only if every
+        // query token *ahead of* that run is explained by the candidate's own CPE vendor — see this
+        // method's own class-level javadoc above for the full Docker/GitHub Desktop reasoning.
+        int start = java.util.Collections.indexOfSubList(queryTokens, candidateTokens);
+        if (start < 0) {
+            return false;
+        }
+        String cpeVendor = normalizeForContainment(cpeVendorOf(entry));
+        for (int i = 0; i < start; i++) {
+            if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
+                return false;
+            }
+        }
+        // REVISE item 5: a single-token candidate that matched with nothing ahead of it (start == 0)
+        // has no leading anchor at all vouching for the tie — the trailing leftovers must be
+        // vendor-explained too in that case, the same way the leading ones already are above. A
+        // multi-token candidate, or one with a nonempty (and therefore already vendor-explained)
+        // leading run, is left exactly as before — see this method's own javadoc for the AVG
+        // AntiVirus Free / Windows Terminal contrast this distinction is calibrated against.
+        if (start == 0 && candidateTokens.size() == 1) {
+            for (int i = start + candidateTokens.size(); i < queryTokens.size(); i++) {
+                if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * REVISE item 2 (senior review, job 36): retries {@link #alignPrefix} starting at every later
+     * candidate token boundary (index 1 onward — index 0 is already tried by the caller first, see
+     * that call site's own guard for why this is gated on the query having at least two tokens and
+     * never running for the title field). Returns the first successful alignment's own consumed-
+     * token count (relative to the sublist it was tried against) — the caller only ever tests this
+     * for {@code > 0}, so the exact count doesn't need adjusting back to the original indices.
+     *
+     * <p>REVISE item 4 (senior review, job 37 root-cause): a successful alignment at a non-zero
+     * boundary leaves candidate tokens {@code [0, start)} unaccounted for, and those must be
+     * explained by the <em>item's own vendor field</em> — never the CPE's own vendor, which trivially
+     * "explains" its own leftover fragment (measured live: {@code vendorExplains("goanother",
+     * "another")} passed purely because the CPE's vendor slug itself contains the word "another",
+     * wrongly matching "Redis Desktop Manager" — item vendor "RDM Dev Team", which does not — against
+     * {@code goanother:another_redis_desktop_manager}'s leftover "another" token). "Process Monitor"
+     * (item vendor "Microsoft Sysinternals") against {@code sysinternals_process_monitor}'s leftover
+     * "sysinternals" is the positive case this must keep working.
+     */
+    private int alignPrefixAtAnyBoundary(List<String> queryTokens, List<String> candidateTokens, String normalizedItemVendor) {
+        for (int start = 1; start < candidateTokens.size(); start++) {
+            int consumed = alignPrefix(queryTokens, candidateTokens.subList(start, candidateTokens.size()));
+            if (consumed > 0 && precedingCandidateTokensExplainedByItemVendor(candidateTokens, start, normalizedItemVendor)) {
+                return consumed;
+            }
+        }
+        return -1;
+    }
+
+    /** REVISE item 4's own vendor-explanation check: every candidate token before {@code start} must
+     *  be explained by the item's own (already-normalized) vendor field. */
+    private boolean precedingCandidateTokensExplainedByItemVendor(
+            List<String> candidateTokens, int start, String normalizedItemVendor) {
+        for (int i = 0; i < start; i++) {
+            if (!vendorExplains(normalizedItemVendor, candidateTokens.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Attempts to align the *entirety* of {@code queryTokens}, token-boundary-and-concatenation-
+     * aware, against a leading run of {@code containerTokens} — a run of consecutive whole tokens
+     * on either side may need to be concatenated together to line up with a single token on the
+     * other side (e.g. query tokens "wamp"+"server" against a single container token
+     * "wampserver"), since a real product name is sometimes split differently by whitespace/
+     * punctuation on one side than the other. Any leftover once the query is fully consumed must
+     * fall exactly on a container token boundary, never mid-token — that's what keeps "log" from
+     * matching "logo!" (the leftover "o" is not a whole token gap) while still letting "win"+"rar"
+     * match "winrar" exactly.
+     *
+     * @return the number of leading {@code containerTokens} consumed by the match, or {@code -1} if
+     *         no such alignment exists — including when {@code containerTokens} runs out before
+     *         {@code queryTokens} does, since a container that's actually the *shorter* side is
+     *         direction 2's job above, not this one.
+     */
+    private int alignPrefix(List<String> queryTokens, List<String> containerTokens) {
+        int qi = 0;
+        int ci = 0;
+        String qRemainder = "";
+        String cRemainder = "";
+        while (qi < queryTokens.size() || !qRemainder.isEmpty()) {
+            if (qRemainder.isEmpty()) {
+                qRemainder = queryTokens.get(qi++);
+            }
+            if (cRemainder.isEmpty()) {
+                if (ci >= containerTokens.size()) {
+                    return -1;
+                }
+                cRemainder = containerTokens.get(ci++);
+            }
+            if (qRemainder.equals(cRemainder)) {
+                qRemainder = "";
+                cRemainder = "";
+            } else if (cRemainder.length() > qRemainder.length() && cRemainder.startsWith(qRemainder)) {
+                cRemainder = cRemainder.substring(qRemainder.length());
+                qRemainder = "";
+            } else if (qRemainder.length() > cRemainder.length() && qRemainder.startsWith(cRemainder)) {
+                qRemainder = qRemainder.substring(cRemainder.length());
+                cRemainder = "";
+            } else {
+                return -1;
+            }
+        }
+        // The query is fully consumed; a nonempty cRemainder means the match ended mid-token on the
+        // container side rather than at a real token boundary.
+        return cRemainder.isEmpty() ? ci : -1;
+    }
+
+    /** How many leading tokens of {@code entry}'s own CPE vendor there are — see direction 1's
+     *  javadoc in {@link #explainsQuery} for why a title match confined to this many tokens doesn't
+     *  count as explaining the query. */
+    private int vendorTokenCount(CpeDictionaryEntry entry) {
+        return tokenize(normalizeForContainment(cpeVendorOf(entry))).size();
+    }
+
+    /**
+     * Whether a leftover query word is accounted for by the candidate's CPE vendor — the signal that
+     * separates "Docker Desktop" from "GitHub Desktop".
+     *
+     * <p>Deliberately stricter than plain substring containment: CPE vendor slugs are short, so a
+     * loose test lets two-letter fragments through (the leftover "go" of "github.com/go-redis/redis"
+     * is a substring of {@code google}). A whole-token hit is always enough; a substring hit has to
+     * clear four characters, which still admits the run-together vendor slugs this exists for
+     * ("Charles Proxy" → {@code charlesproxy:charles}).
+     */
+    private boolean vendorExplains(String normalizedCpeVendor, String token) {
+        if (normalizedCpeVendor.isBlank() || token.isBlank()) {
+            return false;
+        }
+        List<String> vendorTokens = tokenize(normalizedCpeVendor);
+        return vendorTokens.contains(token)
+                || (token.length() >= 4 && String.join("", vendorTokens).contains(token));
+    }
+
+    private List<String> tokenize(String normalized) {
+        return java.util.Arrays.stream(normalized.split("[^a-z0-9]+"))
+                .filter(token -> !token.isEmpty())
+                .toList();
+    }
+
+    /** Blank-guarded both ways — an empty string is trivially "contained" in everything in Java,
+     *  which would make this check vacuously pass for entries with no title (or, defensively, no
+     *  product) rather than actually requiring evidence. */
+    private boolean containsEitherWay(String a, String b) {
+        if (a.isBlank() || b.isBlank()) {
+            return false;
+        }
+        return a.contains(b) || b.contains(a);
+    }
+
+    // Package-private (not private) solely so Stage1IdentificationServiceTest can exercise it
+    // directly — no other production caller outside this class, no behavior change.
+    String normalizeForContainment(String value) {
+        // CPE 2.3 strings backslash-escape reserved characters (e.g. "notepad\+\+") — strip those
+        // so "Notepad++" (the query, unescaped) still matches its own dictionary entry.
+        return value == null ? "" : value.toLowerCase(java.util.Locale.ROOT).replace('_', ' ').replace("\\", "").trim();
+    }
+
+    /**
+     * NVD's {@code keywordSearch} is a literal, all-words-must-roughly-match search, not a fuzzy
+     * one — confirmed live: {@code "Apache Log4j Core"} returns zero results while
+     * {@code "Apache Log4j"} (drop the trailing "Core") returns 162. A Tier3-resolved vendor+
+     * product string (e.g. "The Apache Software Foundation" + "Apache Log4j Core") very easily
+     * picks up qualifier words that don't appear in NVD's own terse CPE titles, silently losing a
+     * product NVD actually has cataloged — a real miss observed live for Log4j (CVE-2021-44228).
+     * Mitigates by retrying with trailing words dropped one at a time (bounded to a few extra
+     * rate-limited calls) until a query returns something or words run out.
+     */
+    private Optional<String> liveNvdCpeLookupWithFallback(String query, Optional<String> nvdApiKey) {
+        String[] words = query.trim().split("\\s+");
+        int wordsToTry = words.length;
+        int attempts = 0;
+
+        while (wordsToTry >= 1 && attempts < MAX_LIVE_NVD_QUERY_ATTEMPTS) {
+            String attempt = String.join(" ", Arrays.copyOfRange(words, 0, wordsToTry));
+            log.info("Querying NVD CPE API live for '{}' (apiKey={})", attempt, nvdApiKey.isPresent());
+            int upserted = nvdCpeSyncService.syncKeywordSinglePage(attempt, LIVE_NVD_LOOKUP_RESULTS_PER_PAGE, nvdApiKey);
+            log.info("Live NVD CPE lookup for '{}' upserted {} dictionary entries", attempt, upserted);
+            if (upserted > 0) {
+                return Optional.of(attempt);
+            }
+            wordsToTry--;
+            attempts++;
+        }
+        return Optional.empty();
+    }
+}

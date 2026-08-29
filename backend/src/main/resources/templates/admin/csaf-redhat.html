@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>CSAF（Red Hat）同期 - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>Red Hat CSAFベンダーアドバイザリー同期</h1>
+
+<p th:if="${result}" th:text="${result}" style="color: green;"></p>
+
+<h2>同期状態</h2>
+<p th:if="${syncState == null}" style="color: #b00;">未同期です（一度も全件同期を実行していません）。</p>
+<p th:if="${syncState != null}">
+    最終同期日時: <span th:text="${syncState.lastSyncedAt}"></span><br/>
+    同期カーソル（"changes.csvカーソル|deletions.csvカーソル"の形式）: <span th:text="${syncState.lastCursor}"></span>
+</p>
+
+<h2>差分同期（日次・変動あり）</h2>
+<p>
+    前回の同期カーソルより新しい changes.csv / deletions.csv の行のみを取得します。
+    実測（2026-08-27）では1日あたり35〜3,561件と変動が大きく、1回の実行では最大2,000件までしか
+    処理しません（超過分は次回実行に持ち越されます）。本番では毎日04:15 UTCに自動実行されます。
+</p>
+<form th:action="@{/admin/csaf-redhat/sync-delta}" method="post">
+    <button type="submit">差分同期を今すぐ実行</button>
+</form>
+
+<h2>全件同期（初回・アーカイブ一括取得）</h2>
+<p style="color: #b00;">
+    Red Hatが配布する年次アーカイブ（<code>archive_latest.txt</code>が指す<code>.tar.zst</code>、
+    2026-08時点で約103.4MB圧縮・27,930文書）を1回のダウンロードでまとめて取得し、SHA-256検証後に
+    ストリーム展開しながら同期します（文書ごとの個別取得は行いません — 個別取得だと約7.75時間かかる
+    見積もりに対し、アーカイブ方式は実測で数秒程度です）。
+</p>
+<p style="color: #b00;">
+    アーカイブのダウンロード自体は実測数秒規模ですが、27,930文書分のDB書き込み（1文書あたり最大
+    約12,056件の製品行・約171,072件のステータス行に達する場合あり）を含めると、想定所要時間は
+    <strong>環境のDB性能に依存</strong>します。このボタンはリクエストが完了するまで応答を返さない
+    同期処理のため、ブラウザ／HTTPリクエスト自体はその前にタイムアウトする可能性が高いです。
+    タイムアウトしても同期はサーバー側で継続して実行されているため、時間を置いてこのページを
+    再読み込みし、上の「同期状態」欄で進捗・完了を確認してください（タイムアウト＝失敗ではありません）。
+</p>
+<p style="color: #b00;">
+    実測の書き込み量（2026-08-27、実アーカイブ全27,930文書のbaseline同期1回あたり）:
+    製品行 約1,751,250件＋ステータス行 約4,245,640件＝合計約600万INSERT、加えて生JSON約6.09GBが
+    <code>csaf_advisories.raw_json</code>に書き込まれます。DB書き込みそのものがbaseline同期の
+    所要時間を支配する最大の要因であり、上記のタイムアウト前提はこの書き込み量を踏まえたものです。
+</p>
+<form th:action="@{/admin/csaf-redhat/sync-baseline}" method="post"
+      onsubmit="return confirm('全件同期を実行します。よろしいですか？');">
+    <button type="submit">全件同期を実行</button>
+</form>
+
+<p><a th:href="@{/}">ホームに戻る</a></p>
+</body>
+</html>

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>GHSA同期 - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>GHSA（GitHub Security Advisories）ミラー同期</h1>
+
+<p th:if="${result}" th:text="${result}" style="color: green;"></p>
+
+<h2>同期状態</h2>
+<p th:if="${syncState == null}" style="color: #b00;">未同期です（一度も全件同期を実行していません）。</p>
+<div th:if="${syncState != null}">
+    <p>
+        baseline読み込み済み: <span th:text="${syncState.baselineLoaded} ? 'はい' : 'いいえ'"></span><br/>
+        同期実行中: <span th:text="${syncState.syncInProgress} ? 'はい' : 'いいえ'"></span><br/>
+        最終同期日時: <span th:text="${syncState.lastSyncedAt}"></span><br/>
+        同期カーソル（最後に処理したアドバイザリーのupdated_at）: <span th:text="${syncState.lastCursor}"></span><br/>
+        baselineコミットSHA: <span th:text="${syncState.baselineCommitSha}"></span>
+    </p>
+    <p th:if="${syncState.lastSyncError != null}" style="color: #b00;">
+        直近の失敗理由: <span th:text="${syncState.lastSyncError}"></span>
+    </p>
+</div>
+<p>
+    デッドレター件数（連続失敗によりスキップされたアドバイザリー数）: <span th:text="${deadLetterCount}"></span>
+</p>
+
+<h2>差分同期（日次・小規模）</h2>
+<p>
+    前回の同期カーソルより新しいアドバイザリーのみを取得します。通常は1日あたり14〜50件程度（直近実測: 24時間で36件）で、
+    REST応答1頁（最大100件）に収まります。本番では毎日04:00 UTCに自動実行されます。
+    baseline未読み込みの場合は何も行わずスキップします。
+</p>
+<form th:action="@{/admin/ghsa/sync-delta}" method="post">
+    <button type="submit">差分同期を今すぐ実行</button>
+</form>
+
+<h2>全件同期（初回・カーソル無視）</h2>
+<p style="color: #b00;">
+    github-reviewed全アドバイザリー（2026-08時点で実測34,768件）を含むgit tarball（実測123MB）を1回ダウンロードして走査します。
+    ダウンロード＋展開だけで実測約30秒規模ですが、34,768件全件のDB書き込み（1アドバイザリーあたり複数テーブルへのINSERT）に
+    かかる時間は本実装では実測できておらず、環境（DB性能等）に依存するため<strong>数分〜十数分程度かかる可能性があります</strong>
+    （未実測の外挿であることを明記します）。
+</p>
+<p style="color: #b00;">
+    このボタンはリクエストが完了するまで応答を返さない同期処理のため、ブラウザ／HTTPリクエスト自体は
+    その前にタイムアウトする可能性が高いです。タイムアウトしても同期はサーバー側で継続して実行されて
+    いるため、時間を置いてこのページを再読み込みし、上の「同期状態」欄で進捗・完了を確認してください
+    （タイムアウト＝失敗ではありません）。
+</p>
+<form th:action="@{/admin/ghsa/sync-baseline}" method="post"
+      onsubmit="return confirm('全件同期を実行します。よろしいですか？');">
+    <button type="submit">全件同期を実行</button>
+</form>
+
+<p><a th:href="@{/}">ホームに戻る</a></p>
+</body>
+</html>

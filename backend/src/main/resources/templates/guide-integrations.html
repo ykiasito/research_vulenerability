@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>対応API・エコシステム一覧 - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>対応API・エコシステム・マーケットプレイス一覧</h1>
+<p><a th:href="@{/guide}">使い方ガイドに戻る</a> | <a th:href="@{/}">ホームに戻る</a></p>
+
+<h2>1. パッケージレジストリ（自動照合対応）</h2>
+<p>製品名から自動的にパッケージの実在・バージョンを照合できるレジストリです。下表はデータベース（<code>ecosystem_registries</code>）の登録内容をそのまま表示しています。</p>
+<table border="1" cellpadding="4">
+    <thead>
+    <tr><th>エコシステム</th><th>表示名</th><th>照会先ベースURL</th><th>有効</th></tr>
+    </thead>
+    <tbody>
+    <tr th:each="eco : ${ecosystems}">
+        <td th:text="${eco.ecosystem}"></td>
+        <td th:text="${eco.displayName}"></td>
+        <td th:text="${eco.lookupBaseUrl}"></td>
+        <td th:text="${eco.enabled} ? '○' : '×'"></td>
+    </tr>
+    </tbody>
+</table>
+<p style="color: #888;">AI（Tier3）がパッケージ識別子を推測する際も、この「有効」なエコシステムのみを候補として提示できます。</p>
+
+<h2>2. 脆弱性データソース</h2>
+<table border="1" cellpadding="4">
+    <thead>
+    <tr><th>ソース</th><th>タグ</th><th>発火条件</th><th>認証</th></tr>
+    </thead>
+    <tbody>
+    <tr><td>NVD (NIST)</td><td><code>nvd</code></td><td>CPEが確定している場合</td><td>不要</td></tr>
+    <tr><td>OSV.dev</td><td><code>osv</code></td><td>エコシステム・パッケージ名が確定している場合</td><td>不要</td></tr>
+    <tr><td>GitHub Security Advisories</td><td><code>ghsa</code></td><td>現在無効（発火しません）。未認証60req/hourでは件数あたりの実行に非現実的なため、コード上は残るがコンポーネント未登録。相当分はOSV.devが既に取り込み済み</td><td>-</td></tr>
+    <tr><td>Claude（Web検索・最終手段）</td><td><code>llm_web_search</code></td><td>上記が0件、またはヒントのみ存在する場合</td><td>ユーザー登録のClaude APIキー</td></tr>
+    </tbody>
+</table>
+
+<h2>3. 自動照合できない配布チャネル（AIヒント方式で対応）</h2>
+<p>
+    以下のような配布チャネルには専用の自動照会アダプタがありません。製品がこれらに該当する場合、
+    Claude APIキー登録済みであればTier3のWeb検索がベンダー名の特定を試み、識別子が判明すれば
+    「ヒント」として結果画面に表示し、その識別子を使った簡易的なAI脆弱性調査（Stage4）も行います。
+    ただし自動レジストリ照合のような確度の高い検証はできません。
+</p>
+<ul>
+    <li>VS Code Marketplace（拡張機能）</li>
+    <li>Chrome ウェブストア（拡張機能）</li>
+    <li>Docker Hub（コンテナイメージ）</li>
+    <li>Homebrew（macOS/Linuxパッケージ）</li>
+    <li>Linuxディストリビューションの各パッケージマネージャ（apt/rpm等）</li>
+    <li>各種App Store / モバイルアプリストア</li>
+</ul>
+<p style="color: #888;">
+    このリストは固定の実装ではなく、AIが都度自由記述で判断するため網羅的ではありません。
+    上記以外のチャネルでもAIが識別子を認識できればヒントとして表示されます。
+</p>
+
+<h2>4. ベンダー公式アドバイザリー（CSAF等）</h2>
+<p>
+    Siemens ProductCERT・Red Hat Product Securityが公開するCSAF形式のセキュリティアドバイザリーは、既知のCVEに
+    対してベンダー独自の適用可否ステータス（修正済み／影響あり／影響なし／調査中）を注記として表示します（他の
+    情報源が該当CVEを見つけた場合のみ表示——CSAF単独でしか見つからないCVEについては、修正済み・影響ありの場合の
+    み新規に表示します）。Ciscoについては専用アダプタが未実装です（システムレベル認証情報が必要なため）。該当
+    する脆弱性はStage4のAI Web検索が見つけられる場合があります。
+</p>
+
+<p><a th:href="@{/guide}">使い方ガイドに戻る</a></p>
+</body>
+</html>

@@ -1,0 +1,57 @@
+# --- Java / Maven ---
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/timing.properties
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# --- Env / secrets ---
+.env
+*.env.local
+
+# --- IDE ---
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Node ---
+node_modules/
+package.json
+package-lock.json
+
+# --- Claude Code MCP config (local, would auto-load MCP servers for anyone who clones this) ---
+.mcp.json
+
+# --- Playwright ---
+.playwright-mcp/
+
+# --- Claude Code local config ---
+.claude/
+CLAUDE.md
+
+# --- Stray local files (kept on disk, not tracked) ---
+resume.txt
+cap-*.png
+jobs-*.png
+styled-login.png
+
+# --- Internal design docs (not for public repo) ---
+docs/spec/

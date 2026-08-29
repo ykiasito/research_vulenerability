@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>CPE辞書同期 - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>CPE辞書（NVD CPE Dictionary）同期</h1>
+
+<p>指定したキーワードに一致するCPEエントリをNVDから取得し、ローカルのCPE辞書に反映します。</p>
+
+<p th:if="${result}" th:text="${result}" style="color: green;"></p>
+
+<form th:action="@{/admin/cpe-dictionary/sync}" method="post">
+    <div>
+        <label for="keyword">キーワード</label>
+        <input type="text" id="keyword" name="keyword" required="required" placeholder="例: lodash"/>
+    </div>
+    <button type="submit">同期実行</button>
+</form>
+
+<p><a th:href="@{/}">ホームに戻る</a></p>
+</body>
+</html>

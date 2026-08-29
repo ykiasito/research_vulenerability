@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>ホーム - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>ソフトウェア脆弱性調査サーバー</h1>
+<p th:text="'ログイン済み: ' + ${email}"></p>
+
+<p><a th:href="@{/jobs}">調査ジョブ一覧</a> | <a th:href="@{/jobs/new}">新規CSVアップロード</a> | <a th:href="@{/settings/secrets}">APIキー設定</a> | <a th:href="@{/guide}">初期設定・使い方</a></p>
+
+<form th:action="@{/logout}" method="post">
+    <button type="submit">ログアウト</button>
+</form>
+</body>
+</html>

@@ -1,0 +1,55 @@
+=== 7-Zip (cpe:2.3:a:7-zip:7-zip) === total=203 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3A7-zip%3A7-zip&resultsPerPage=5
+=== Notepad++ (cpe:2.3:a:don_ho:notepad\+\+) === total=73 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Adon_ho%3Anotepad%5C%2B%5C%2B&resultsPerPage=5
+=== VLC media player (cpe:2.3:a:videolan:vlc_media_player) === total=158 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Avideolan%3Avlc_media_player&resultsPerPage=5
+=== Mozilla Firefox (cpe:2.3:a:mozilla:firefox) === total=1196 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Amozilla%3Afirefox&resultsPerPage=5
+=== Google Chrome (cpe:2.3:a:google:chrome) === total=9541 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Agoogle%3Achrome&resultsPerPage=5
+=== Wireshark (cpe:2.3:a:wireshark:wireshark) === total=390 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Awireshark%3Awireshark&resultsPerPage=5
+=== PuTTY (cpe:2.3:a:simon_tatham:putty) === total=26 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Asimon_tatham%3Aputty&resultsPerPage=5
+=== WinRAR (cpe:2.3:a:rarlab:winrar) === total=50 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Ararlab%3Awinrar&resultsPerPage=5
+=== TeamViewer (cpe:2.3:a:teamviewer:teamviewer) === total=67 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Ateamviewer%3Ateamviewer&resultsPerPage=5
+=== Skype (cpe:2.3:a:microsoft:skype) === total=8 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Amicrosoft%3Askype&resultsPerPage=5
+=== Docker Desktop (cpe:2.3:a:docker:docker_desktop) === total=143 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Adocker%3Adocker_desktop&resultsPerPage=5
+=== Postman (cpe:2.3:a:postman:postman) === total=344 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Apostman%3Apostman&resultsPerPage=5
+=== IntelliJ IDEA (cpe:2.3:a:jetbrains:intellij_idea) === total=230 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Ajetbrains%3Aintellij_idea&resultsPerPage=5
+=== Eclipse IDE (cpe:2.3:a:eclipse:eclipse_ide) === total=56 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aeclipse%3Aeclipse_ide&resultsPerPage=5
+=== MySQL Workbench (cpe:2.3:a:oracle:mysql_workbench) === total=24 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aoracle%3Amysql_workbench&resultsPerPage=5
+=== GIMP (cpe:2.3:a:gimp:gimp) === total=232 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Agimp%3Agimp&resultsPerPage=5
+=== Git for Windows (cpe:2.3:a:git_for_windows_project:git_for_windows) === total=404 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Agit_for_windows_project%3Agit_for_windows&resultsPerPage=5
+=== WinSCP (cpe:2.3:a:winscp:winscp) === total=224 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Awinscp%3Awinscp&resultsPerPage=5
+=== FileZilla (cpe:2.3:a:filezilla-project:filezilla) === total=12 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Afilezilla-project%3Afilezilla&resultsPerPage=5
+=== KeePass (cpe:2.3:a:keepass:keepass) === total=134 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Akeepass%3Akeepass&resultsPerPage=5
+=== CCleaner (cpe:2.3:a:piriform:ccleaner) === total=39 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Apiriform%3Accleaner&resultsPerPage=5
+=== Malwarebytes (cpe:2.3:a:malwarebytes:malwarebytes) === total=50 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Amalwarebytes%3Amalwarebytes&resultsPerPage=5
+=== Kaspersky Total Security (cpe:2.3:a:kaspersky:total_security) === total=9 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Akaspersky%3Atotal_security&resultsPerPage=5
+=== McAfee Total Protection (cpe:2.3:a:mcafee:total_protection) === total=17 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Amcafee%3Atotal_protection&resultsPerPage=5
+=== Sophos Endpoint Protection (cpe:2.3:a:sophos:endpoint_protection) === total=3 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Asophos%3Aendpoint_protection&resultsPerPage=5
+=== Symantec Endpoint Protection (cpe:2.3:a:broadcom:symantec_endpoint_protection) === total=11 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Abroadcom%3Asymantec_endpoint_protection&resultsPerPage=5
+=== Citrix Workspace App (cpe:2.3:a:citrix:workspace_app) === total=4 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Acitrix%3Aworkspace_app&resultsPerPage=5
+=== VMware Workstation Pro (cpe:2.3:a:vmware:workstation_pro) === total=23 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Avmware%3Aworkstation_pro&resultsPerPage=5
+=== Microsoft Office (cpe:2.3:a:microsoft:office) === total=139 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Amicrosoft%3Aoffice&resultsPerPage=5
+=== PostgreSQL (cpe:2.3:a:postgresql:postgresql) === total=600 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Apostgresql%3Apostgresql&resultsPerPage=5
+=== Python (cpe:2.3:a:python:python) === total=640 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Apython%3Apython&resultsPerPage=5
+=== OpenSSL (cpe:2.3:a:openssl:openssl) === total=354 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aopenssl%3Aopenssl&resultsPerPage=5
+=== nginx (cpe:2.3:a:igor_sysoev:nginx) === total=383 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aigor_sysoev%3Anginx&resultsPerPage=5
+=== Apache HTTP Server (cpe:2.3:a:apache:http_server) === total=275 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aapache%3Ahttp_server&resultsPerPage=5
+=== MongoDB (cpe:2.3:a:mongodb:mongodb) === total=826 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Amongodb%3Amongodb&resultsPerPage=5
+=== Jenkins (cpe:2.3:a:cloudbees:jenkins) === total=196 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Acloudbees%3Ajenkins&resultsPerPage=5
+=== GitLab (cpe:2.3:a:gitlab:gitlab) === total=3172 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Agitlab%3Agitlab&resultsPerPage=5
+=== Grafana (cpe:2.3:a:grafana:grafana) === total=1260 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Agrafana%3Agrafana&resultsPerPage=5
+=== Splunk (cpe:2.3:a:splunk:splunk) === total=391 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Asplunk%3Asplunk&resultsPerPage=5
+=== Adobe Photoshop (cpe:2.3:a:adobe:photoshop) === total=98 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aadobe%3Aphotoshop&resultsPerPage=5
+=== Adobe Illustrator (cpe:2.3:a:adobe:illustrator) === total=89 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aadobe%3Aillustrator&resultsPerPage=5
+=== AutoCAD (cpe:2.3:a:autodesk:autocad) === total=86 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aautodesk%3Aautocad&resultsPerPage=5
+=== SolidWorks (cpe:2.3:a:3ds:solidworks) === total=46 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3A3ds%3Asolidworks&resultsPerPage=5
+=== Ansible (cpe:2.3:a:ansibleworks:ansible) === total=13 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aansibleworks%3Aansible&resultsPerPage=5
+=== Microsoft Visual Studio (cpe:2.3:a:microsoft:visual_studio) === total=36 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Amicrosoft%3Avisual_studio&resultsPerPage=5
+=== WinZip (cpe:2.3:a:winzip:winzip) === total=72 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Awinzip%3Awinzip&resultsPerPage=5
+=== Total Commander (cpe:2.3:a:ghisler:total_commander) === total=1 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aghisler%3Atotal_commander&resultsPerPage=5
+=== HashiCorp Terraform (cpe:2.3:a:hashicorp:terraform) === total=185 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Ahashicorp%3Aterraform&resultsPerPage=5
+=== IrfanView (cpe:2.3:a:irfanview:irfanview) === total=220 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Airfanview%3Airfanview&resultsPerPage=5
+=== Everything (cpe:2.3:a:voidtools:everything) === total=81 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Avoidtools%3Aeverything&resultsPerPage=5
+=== ImgBurn (cpe:2.3:a:imgburn:imgburn) === total=3 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aimgburn%3Aimgburn&resultsPerPage=5
+=== PDF-XChange Editor (cpe:2.3:a:pdf-xchange:pdf-xchange_editor) === total=97 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Apdf-xchange%3Apdf-xchange_editor&resultsPerPage=5
+=== ExifTool (cpe:2.3:a:exiftool_project:exiftool) === total=979 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?cpeMatchString=cpe%3A2.3%3Aa%3Aexiftool_project%3Aexiftool&resultsPerPage=5
+
+53 checked, 0 with totalResults=0 or ERROR (would mean a fabricated/non-existent CPE):

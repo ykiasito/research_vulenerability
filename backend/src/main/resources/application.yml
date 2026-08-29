@@ -1,0 +1,70 @@
+spring:
+  application:
+    name: vulncheck-server
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/vulncheck}
+    username: ${SPRING_DATASOURCE_USERNAME:vulncheck}
+    # No default: a committed dev-only password default is the same class of problem as the
+    # encryption key default below. MUST be set via SPRING_DATASOURCE_PASSWORD in every environment.
+    password: ${SPRING_DATASOURCE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  thymeleaf:
+    cache: false
+
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 5MB
+
+app:
+  # No default (see SecretEncryptionService): a committed dev-only default here was previously the
+  # de facto encryption key in every deployment because docker-compose.yml never wired this env var
+  # through. MUST be set via APP_SECRET_ENCRYPTION_KEY — SecretEncryptionService fails fast at
+  # startup if it's blank or matches a retired default's hash.
+  secret-encryption-key: ${APP_SECRET_ENCRYPTION_KEY:}
+  # docker-compose service name by default; override for non-compose environments.
+  llm-service-url: ${LLM_SERVICE_URL:http://llm-service:8000}
+  # The one account granted ROLE_ADMIN (see AppUserDetailsService) — /admin/** requires it. Empty
+  # by default (no admin at all) so a fresh deployment never accidentally leaves admin endpoints
+  # open to every authenticated user. Set to the operator's own login email.
+  admin-email: ${ADMIN_EMAIL:}
+  # Research jobs (and everything under them) older than this are deleted daily at 04:00 UTC.
+  # 0 or negative disables the cleanup entirely.
+  job-retention-days: ${JOB_RETENTION_DAYS:30}
+  # One-shot full NVD CPE Dictionary mirror (~1.8M entries) on startup. Off by default: it runs for
+  # hours and only needs to happen once per environment. See CpeDictionaryBootstrapSync.
+  cpe-full-sync-on-startup: ${CPE_FULL_SYNC_ON_STARTUP:false}
+
+server:
+  port: 8080
+
+logging:
+  level:
+    org.springframework.security: INFO
+  # Writes to console AND this file (Spring Boot's default logback config adds a FILE appender
+  # automatically once logging.file.name is set — no custom logback.xml needed). The directory is
+  # bind-mounted to the host via docker-compose.yml so log files survive container
+  # restarts/recreates and are readable directly from the host filesystem, not just via
+  # `docker compose logs`. Override via LOG_FILE for non-compose environments.
+  file:
+    name: ${LOG_FILE:/var/log/app/backend.log}
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 14
+      total-size-cap: 500MB

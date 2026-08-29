@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vulncheck}
+      POSTGRES_USER: ${POSTGRES_USER:-vulncheck}
+      # No default: a committed dev-only password default is exactly the class of problem this
+      # rotation is fixing for the encryption key too. MUST be set via .env (never committed).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vulncheck} -d ${POSTGRES_DB:-vulncheck}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-vulncheck}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-vulncheck}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      # No default on purpose (unlike the vars below): SecretEncryptionService fail-fasts at
+      # startup if this is blank or matches a retired default's hash. Set via .env, generate with
+      # `openssl rand -base64 32`.
+      APP_SECRET_ENCRYPTION_KEY: ${APP_SECRET_ENCRYPTION_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      JOB_RETENTION_DAYS: ${JOB_RETENTION_DAYS:-30}
+      # One-shot: mirrors the full NVD CPE Dictionary on boot (hours). Leave false; flip to true
+      # once per environment, then set it back. See CpeDictionaryBootstrapSync.
+      CPE_FULL_SYNC_ON_STARTUP: ${CPE_FULL_SYNC_ON_STARTUP:-false}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./logs/backend:/var/log/app
+    # Gives the researchJobExecutor's setAwaitTerminationSeconds(20) room to actually run before
+    # Docker SIGKILLs the process — default stop_grace_period (10s) is shorter than that window.
+    stop_grace_period: 30s
+
+  llm-service:
+    build:
+      context: ./llm-service
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./logs/llm-service:/var/log/app
+
+volumes:
+  postgres_data:
