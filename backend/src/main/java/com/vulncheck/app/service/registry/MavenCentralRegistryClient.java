@@ -182,7 +182,7 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
 
     private List<CanonicalArtifact> findCandidateArtifacts(String productName) {
         try {
-            JsonNode body = solrSearchWithRetry("a:\"" + productName + "\"", null, CANDIDATE_GROUP_LIMIT);
+            JsonNode body = solrSearchWithRetry("a:\"" + escapeLuceneQueryValue(productName) + "\"", null, CANDIDATE_GROUP_LIMIT);
             if (body == null) {
                 return List.of();
             }
@@ -249,7 +249,8 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
 
     private boolean solrVersionExists(CanonicalArtifact artifact, String version) {
         try {
-            String query = "g:\"" + artifact.groupId() + "\" AND a:\"" + artifact.artifactId() + "\" AND v:\"" + version + "\"";
+            String query = "g:\"" + escapeLuceneQueryValue(artifact.groupId()) + "\" AND a:\""
+                    + escapeLuceneQueryValue(artifact.artifactId()) + "\" AND v:\"" + escapeLuceneQueryValue(version) + "\"";
             JsonNode body = solrSearchWithRetry(query, "gav", 1);
             return body != null && body.path("response").path("docs").isArray()
                     && !body.path("response").path("docs").isEmpty();
@@ -331,6 +332,31 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                 .body(JsonNode.class);
     }
 
+    /**
+     * Escapes Lucene/Solr query syntax characters in {@code value} before it's embedded into a
+     * quoted {@code q} clause (e.g. {@code a:"..."}) — mirrors {@code
+     * org.apache.lucene.queryparser.classic.QueryParser#escape}. Without this, a CSV-supplied
+     * {@code productName}/groupId/artifactId/version containing a literal {@code "} could close
+     * the quoted phrase early and append arbitrary Solr query syntax of its own choosing — e.g. a
+     * fabricated version query that always matches ({@code numFound > 0}) regardless of whether
+     * that version was ever actually published, which {@link #toMatch} then reports as a
+     * confirmed, confidence-0.95 result. CSV input is untrusted, so every value reaching a {@code
+     * q} parameter here goes through this first, not just the ones that look adversarial today.
+     */
+    private static String escapeLuceneQueryValue(String value) {
+        StringBuilder escaped = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\\' || c == '+' || c == '-' || c == '!' || c == '(' || c == ')' || c == ':'
+                    || c == '^' || c == '[' || c == ']' || c == '"' || c == '{' || c == '}' || c == '~'
+                    || c == '*' || c == '?' || c == '|' || c == '&' || c == '/') {
+                escaped.append('\\');
+            }
+            escaped.append(c);
+        }
+        return escaped.toString();
+    }
+
     /** Hard cap on how much of a {@code maven-metadata.xml} response is read into memory —
      *  defense in depth, mirroring the same cap {@link ChocolateyRegistryClient} applies to its own
      *  XML feed. A real {@code maven-metadata.xml}, even for a package with hundreds of releases
@@ -350,6 +376,13 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
      * times used to cost 3 wasted requests plus {@code 3x} the shared rate limiter's pacing delay
      * (see {@link ExternalRegistryRateLimiter}, which gates every Maven lookup in the process, not
      * just this one item's) for zero benefit.
+     *
+     * <p>REVISE (senior review 2026-08-30): a response exceeding {@link #MAX_METADATA_RESPONSE_BYTES}
+     * is excluded from the retry policy for the same reason — it's a deterministic rejection of
+     * that specific response, not a transient failure, so retrying it wastes the same 3 requests
+     * and pacing delay for zero benefit. {@link #fetchMetadataXml} likewise returns {@code null}
+     * directly for it instead of letting the underlying {@link ResponseTooLargeException} reach
+     * this loop's generic {@code catch (Exception e)} below.
      */
     private byte[] fetchMetadataXmlWithRetry(String groupId, String artifactId) {
         Exception lastError = null;
@@ -425,7 +458,16 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                         throw new IllegalStateException(
                                 "maven-metadata.xml request returned " + response.getStatusCode());
                     }
-                    return readBounded(response.getBody(), MAX_METADATA_RESPONSE_BYTES);
+                    // A response exceeding the byte cap is likewise a confirmed, deterministic
+                    // answer -- not a transient failure -- so it must not be retried either: see
+                    // ResponseTooLargeException's and fetchMetadataXmlWithRetry's javadoc.
+                    try {
+                        return readBounded(response.getBody(), MAX_METADATA_RESPONSE_BYTES);
+                    } catch (ResponseTooLargeException e) {
+                        log.debug("maven-metadata.xml response exceeded size cap for {}:{}: {}",
+                                groupId, artifactId, e.getMessage());
+                        return null;
+                    }
                 });
     }
 
@@ -486,6 +528,22 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         return factory.newDocumentBuilder();
     }
 
+    /**
+     * REVISE (senior review 2026-08-30): thrown by {@link #readBounded} when a response exceeds
+     * its byte cap. This is deliberately unchecked and distinct from the genuine {@link
+     * IOException}s the same read loop can still throw (e.g. a real connection drop mid-read) —
+     * exceeding the cap is a confirmed, content-based rejection, not a transient I/O failure, so
+     * {@link #fetchMetadataXml} catches this one specifically and returns {@code null} the same
+     * way it already does for a 404 (see {@link #fetchMetadataXmlWithRetry}'s javadoc for why a
+     * deterministic "no" must not be retried), while a genuine {@link IOException} still falls
+     * through to that retry loop unchanged.
+     */
+    private static final class ResponseTooLargeException extends RuntimeException {
+        ResponseTooLargeException(String message) {
+            super(message);
+        }
+    }
+
     /** Reads {@code in} fully into memory, failing fast if it would exceed {@code maxBytes} — same
      *  defense-in-depth pattern {@code ChocolateyRegistryClient} uses for its own XML feed. */
     private static byte[] readBounded(InputStream in, int maxBytes) throws IOException {
@@ -496,7 +554,7 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         while ((read = in.read(buffer)) != -1) {
             total += read;
             if (total > maxBytes) {
-                throw new IOException("maven-metadata.xml response exceeded " + maxBytes + " byte cap");
+                throw new ResponseTooLargeException("maven-metadata.xml response exceeded " + maxBytes + " byte cap");
             }
             out.write(buffer, 0, read);
         }

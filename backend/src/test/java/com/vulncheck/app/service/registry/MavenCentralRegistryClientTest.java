@@ -201,6 +201,29 @@ class MavenCentralRegistryClientTest {
     }
 
     @Test
+    void treatsAMavenMetadataXmlResponseExceedingTheSizeCapAsAnImmediateNonRetryableAnswer() {
+        // Same category of bug as the 404 case above: a response exceeding the 512KB size cap is
+        // a deterministic, content-based rejection of that response -- not a transient failure --
+        // so it must not be retried either. Only one maven-metadata.xml request is expected here:
+        // if it were retried, MockRestServiceServer would reject the next (unexpected) request
+        // outright and fail this test loudly.
+        server.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(candidateSearchResponse(
+                        artifactDoc("com.example", "some-tool", 5)), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("repo1.maven.org")))
+                .andRespond(withSuccess(oversizedMavenMetadataXml(), MediaType.APPLICATION_XML));
+
+        Optional<RegistryMatch> result = client.lookup("some-tool", "9.9.9");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().exactVersionConfirmed()).isFalse();
+        assertThat(result.get().confidence()).isEqualByComparingTo("0.5");
+        server.verify();
+    }
+
+    @Test
     void onlyChecksTheMavenMetadataXmlFallbackForTheTopFewCandidatesWhenNoneConfirmViaSolr() {
         // 4 candidates, none confirmed by Solr -- the (roughly twice as costly) maven-metadata.xml
         // fallback pass must only run against the top METADATA_FALLBACK_CANDIDATE_LIMIT (3), not
@@ -262,6 +285,49 @@ class MavenCentralRegistryClientTest {
         server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
 
         Optional<RegistryMatch> result = client.lookup("com/example:some tool", "9.9.9");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().exactVersionConfirmed()).isFalse();
+        server.verify();
+    }
+
+    @Test
+    void escapesLuceneSpecialCharactersInTheProductNameBeforeBuildingTheCandidateSearchQuery() {
+        // productName is untrusted CSV input -- without escaping, a literal '"' would close the
+        // quoted a: phrase early and let the rest of the value append arbitrary Solr query syntax
+        // (e.g. an OR'd v: clause that always matches, turning a nonexistent version into a
+        // confidence-0.95 confirmed match). The escaped backslash-quote must reach Solr as a
+        // literal quote character inside the phrase, not a phrase terminator.
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.allOf(
+                        Matchers.containsString("a:%22evil%5C%22%22"),
+                        Matchers.not(Matchers.containsString("a:%22evil%22%22")))))
+                .andRespond(withSuccess(candidateSearchResponse(), MediaType.APPLICATION_JSON));
+
+        Optional<RegistryMatch> result = client.lookup("evil\"", "1.0.0");
+
+        assertThat(result).isEmpty();
+        server.verify();
+    }
+
+    @Test
+    void escapesLuceneSpecialCharactersInTheVersionBeforeBuildingTheGavConfirmationQuery() {
+        // The version column is likewise untrusted CSV input. A crafted value containing an
+        // unescaped '"' could close the v: phrase early and append arbitrary Solr syntax (e.g.
+        // `OR v:*`) that makes numFound > 0 for a version that was never actually published --
+        // exactly the confidence-0.95 spoofing this escaping prevents.
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.allOf(
+                        Matchers.containsString("v:%22evil%5C%22%22"),
+                        Matchers.not(Matchers.containsString("v:%22evil%22%22")))))
+                .andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        // Solr's gav core didn't confirm, so the maven-metadata.xml fallback also runs -- see
+        // MavenCentralRegistryClient#versionExists.
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("repo1.maven.org")))
+                .andRespond(withSuccess(mavenMetadataXml("1.0.0"), MediaType.APPLICATION_XML));
+
+        Optional<RegistryMatch> result = client.lookup("com.example:some-tool", "evil\"");
 
         assertThat(result).isPresent();
         assertThat(result.get().exactVersionConfirmed()).isFalse();
@@ -368,6 +434,15 @@ class MavenCentralRegistryClientTest {
             return "{\"response\":{\"numFound\":0,\"start\":0,\"docs\":[]}}";
         }
         return "{\"response\":{\"numFound\":1,\"start\":0,\"docs\":[{\"g\":\"x\",\"a\":\"y\",\"v\":\"z\"}]}}";
+    }
+
+    /** A well-formed maven-metadata.xml body padded past the 512KB cap {@code
+     *  MavenCentralRegistryClient#MAX_METADATA_RESPONSE_BYTES} enforces on the read. */
+    private String oversizedMavenMetadataXml() {
+        String padding = "x".repeat(600 * 1024);
+        return "<metadata><groupId>x</groupId><artifactId>y</artifactId><versioning>"
+                + "<versions><version>1.0.0</version></versions></versioning>"
+                + "<!--" + padding + "--></metadata>";
     }
 
     private String mavenMetadataXml(String... versions) {
