@@ -82,7 +82,7 @@ public class JobCostBudgetService {
     private BigDecimal costCapPerItemUsd;
 
     /**
-     * REVISE item 7 (senior review 2026-08-29): a non-default {@code app.cost-cap-per-item-usd} is
+     * REVISE item 7 (senior review 2026-08-29, round 1): a non-default {@code app.cost-cap-per-item-usd} is
      * exactly the kind of environment override that's easy to leave in place by accident after a
      * throwaway diagnostic job (see {@link #costCapPerItemUsd}'s own javadoc on that convention) —
      * logging it once at startup makes a silently-raised/lowered cost cap visible in the ordinary
@@ -179,7 +179,7 @@ public class JobCostBudgetService {
 
     /**
      * Per-item cap for the high-confidence verification ledger below ({@link
-     * #verificationCapByJobId} et al.) — REVISE item 1 (senior review 2026-08-29): job 191 real data
+     * #verificationCapByJobId} et al.) — REVISE item 1 (senior review 2026-08-29, round 1): job 191 real data
      * found 108/300 items (36%) eligible for verification, whose demand ($3.78 at {@link
      * #HIGH_CONFIDENCE_VERIFICATION_COST_USD} x 108) was 2.5x a 300-item job's own always-on {@link
      * #costCapPerItemUsd} budget ($1.50) — sharing that budget meant enabling this feature could burn
@@ -522,7 +522,7 @@ public class JobCostBudgetService {
     }
 
     // --- High-confidence verification's own budget ledger (REVISE item 1, senior review 2026-08-29,
-    // see #verificationCostCapPerItemUsd's javadoc above) -----------------------------------------
+    // round 1, see #verificationCostCapPerItemUsd's javadoc above) -----------------------------------------
 
     /** Mirrors {@link #startBundledComponentBudget}, against the separate {@link
      *  #verificationCapByJobId} ledger. Unlike the bundled-component budget (opt-in per job via

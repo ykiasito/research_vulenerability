@@ -160,7 +160,7 @@ class JobCostBudgetServiceTest {
         assertThat(service.tryReserveBundledComponent(9L, new BigDecimal("1.00"))).isTrue();
     }
 
-    // --- REVISE item 1 (senior review 2026-08-29): the high-confidence verification backstop's own
+    // --- REVISE item 1 (senior review 2026-08-29, round 1): the high-confidence verification backstop's own
     // ledger, split out of the always-on MAIN ledger so enabling that feature can never silently
     // starve every other AI tier's budget in the same job (job 191: 108/300 eligible items, $3.78
     // demand vs. a $1.50 MAIN cap) — same fail-closed/tombstone/cap-isolation shape as the bundled-
