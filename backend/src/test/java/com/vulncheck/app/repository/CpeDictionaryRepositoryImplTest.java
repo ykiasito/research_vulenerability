@@ -254,4 +254,68 @@ class CpeDictionaryRepositoryImplTest {
             previousScore = score;
         }
     }
+
+    /**
+     * Regression test for a PR #15 REVISE finding: the inner {@code DISTINCT ON (vendor, product)}
+     * subquery's own {@code ORDER BY vendor, product, score DESC} had no tiebreaker after
+     * {@code score}, so which single row {@code DISTINCT ON} kept as a (vendor, product) group's
+     * representative was itself unspecified whenever two rows in the group tied on score — the
+     * outer {@code ORDER BY score DESC, id} added in an earlier revision only orders *between*
+     * groups, and cannot fix a choice that was already arbitrary *within* one. Verified live
+     * against the real dictionary before this fix: the google:chrome group's representative row id
+     * varied between 30447 and 443462 across otherwise identical query plans.
+     *
+     * <p>Two rows here share one (vendor, product) pair and an identical {@code product} value, so
+     * both score exactly 1.0 against a product-column {@code collect()} call using that same text
+     * as the query — a genuine tie, not merely a close score.
+     *
+     * <p>Simply inserting the two rows through JPA in ascending id order (letting {@code
+     * BIGSERIAL} assign ids) was tried first and did <em>not</em> reproduce the bug: on a freshly
+     * created 2-row table, physical heap order already matches ascending id order, so even the
+     * pre-fix query (with no {@code id} tiebreak at all) happened to return the lower-id row simply
+     * because it is also the row a plain sequential scan visits first — passing for the wrong
+     * reason regardless of whether the fix is present. To make the inner tiebreak's effect
+     * actually observable, this test instead inserts the two rows with explicit, manually chosen
+     * ids (bypassing the sequence, which {@code BIGSERIAL} permits) so that physical insertion
+     * order is the *reverse* of numeric id order: the row with the higher id is written first (and
+     * so is what a sequential scan visits first), the row with the lower id second. Without the
+     * inner {@code id} tiebreak, {@code DISTINCT ON} keeps whichever row the scan visits first for
+     * equal sort keys — the higher-id row here — so this test fails pre-fix and passes post-fix,
+     * rather than passing either way.
+     */
+    @Test
+    void collectPicksLowerIdRowWhenDistinctOnGroupTiesOnScore() {
+        long higherId = 900_000_002L;
+        long lowerId = 900_000_001L;
+
+        // Inserted first (physically first in the heap) but has the *higher* id, so a plain
+        // sequential scan visits this row before the lower-id one below.
+        jdbcTemplate.update(
+                "INSERT INTO cpe_dictionary (id, cpe_string, title, vendor, product, last_synced_at) "
+                        + "VALUES (?, ?, ?, ?, ?, now())",
+                higherId,
+                "cpe:2.3:a:zzzrevise15distinctvendor:zzzrevise15distinctproduct:2.0:*:*:*:*:*:*:*",
+                "Zzzrevise15distinctproduct Two",
+                "zzzrevise15distinctvendor",
+                "zzzrevise15distinctproduct");
+        jdbcTemplate.update(
+                "INSERT INTO cpe_dictionary (id, cpe_string, title, vendor, product, last_synced_at) "
+                        + "VALUES (?, ?, ?, ?, ?, now())",
+                lowerId,
+                "cpe:2.3:a:zzzrevise15distinctvendor:zzzrevise15distinctproduct:1.0:*:*:*:*:*:*:*",
+                "Zzzrevise15distinctproduct One",
+                "zzzrevise15distinctvendor",
+                "zzzrevise15distinctproduct");
+
+        CpeDictionaryRepositoryImpl impl = new CpeDictionaryRepositoryImpl(jdbcTemplate);
+        Map<Long, CpeDictionaryEntry> byId = new LinkedHashMap<>();
+        Map<Long, Double> bestScoreById = new LinkedHashMap<>();
+
+        impl.collect("product", "zzzrevise15distinctproduct", 0.3, 10, byId, bestScoreById);
+
+        assertThat(byId).hasSize(1);
+        assertThat(byId).containsOnlyKeys(lowerId);
+        assertThat(byId.get(lowerId).getCpeString())
+                .isEqualTo("cpe:2.3:a:zzzrevise15distinctvendor:zzzrevise15distinctproduct:1.0:*:*:*:*:*:*:*");
+    }
 }
