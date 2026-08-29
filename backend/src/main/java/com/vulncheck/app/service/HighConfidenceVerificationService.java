@@ -239,11 +239,14 @@ public class HighConfidenceVerificationService {
     }
 
     /** Joins two independently-nullable strings with {@code ":"}, omitting whichever side is null
-     *  rather than rendering it as the literal text {@code "null"}. */
+     *  or blank rather than rendering it as the literal text {@code "null"} or leaving a stray
+     *  {@code ":"} when the llm-service sends {@code ""} instead of {@code null}. */
     private static String joinNonNull(String first, String second) {
-        if (first == null) {
-            return second == null ? "" : second;
+        boolean hasFirst = first != null && !first.isBlank();
+        boolean hasSecond = second != null && !second.isBlank();
+        if (!hasFirst) {
+            return hasSecond ? second : "";
         }
-        return second == null ? first : first + ":" + second;
+        return hasSecond ? first + ":" + second : first;
     }
 }
