@@ -46,7 +46,7 @@ class HighConfidenceVerificationServiceTest {
 
     @BeforeEach
     void allowAiSpendByDefault() {
-        // REVISE item 1 (senior review 2026-08-29): verification now reserves against its own
+        // REVISE item 1 (senior review 2026-08-29, round 1): verification now reserves against its own
         // separate ledger (tryReserveVerification), not the always-on MAIN budget (tryReserve).
         lenient().when(jobCostBudgetService.tryReserveVerification(any(), any())).thenReturn(true);
         lenient().when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
@@ -149,6 +149,21 @@ class HighConfidenceVerificationServiceTest {
     }
 
     @Test
+    void noOpAndNoReservationWhenCpeCannotBeParsed() {
+        // REVISE item 2 (senior review 2026-08-29, PR #1): the malformed-cpe check runs
+        // BEFORE tryReserveVerification, so a parse failure must never reserve budget it can't
+        // release (there's no matching reconcileVerification call on this early-return path).
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        product.setCpe("not-a-valid-cpe-string");
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).contains(product);
+        verify(jobCostBudgetService, never()).tryReserveVerification(any(), any());
+        verifyNoInteractions(llmServiceClient);
+    }
+
+    @Test
     void confirmedVerdictLeavesMatchIntactButRecordsStatus() {
         IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
         when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
@@ -236,6 +251,39 @@ class HighConfidenceVerificationServiceTest {
 
         assertThat(result).isEmpty();
         verify(identifiedProductRepository).delete(product);
+    }
+
+    @Test
+    void incorrectVerdictWithNullReasoningAndNoAlternativesProducesEmptyNote() {
+        // REVISE item 1 (senior review 2026-08-29, PR #1) regression guard: reasoning null
+        // and both alternative* fields null must produce an empty note, not an NPE or the literal
+        // string "null".
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", null, null, null, List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEmpty();
+    }
+
+    @Test
+    void incorrectVerdictWithOnlyAlternativeProductOmitsLiteralNullFromNote() {
+        // REVISE item 1 (senior review 2026-08-29, PR #1) regression guard: alternativeVendor
+        // and alternativeProduct are independently nullable -- only one being set must not leak the
+        // literal string "null" into the note (e.g. "null:acrobat_reader").
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", "wrong vendor entirely", null, "acrobat_reader", List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).doesNotContain("null");
+        assertThat(result.get().getVerificationNote()).contains("acrobat_reader");
     }
 
     @Test

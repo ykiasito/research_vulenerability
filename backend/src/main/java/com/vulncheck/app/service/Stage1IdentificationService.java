@@ -560,7 +560,7 @@ public class Stage1IdentificationService {
                         + "no other CPE corroborates it, so treating this as an uncorroborated weak match "
                         + "instead of a false 'investigated, 0 vulnerabilities' result",
                         item.getId(), registryMatch.get().packageName());
-                // REVISE item 3 (senior review 2026-08-29): the other two "distrust this registry
+                // REVISE item 3 (senior review 2026-08-29, round 1): the other two "distrust this registry
                 // match" paths above (static/AI rejection of a weak match, lines ~495/515) both
                 // attempt a live CPE rescue after discarding the registry match — this branch never
                 // did, even though a sole Chocolatey match is discarded for exactly the same reason
@@ -958,7 +958,7 @@ public class Stage1IdentificationService {
      * tied top candidates — see that method's javadoc for why this can never override a single clear
      * winner.
      *
-     * <p>REVISE item 2 (senior review 2026-08-29): values are pre-compiled word-boundary {@link
+     * <p>REVISE item 2 (senior review 2026-08-29, round 1): values are pre-compiled word-boundary {@link
      * Pattern}s, not plain strings matched via {@link String#contains}. Plain substring containment
      * let short keywords false-positive inside unrelated words — "JavaScript" contains maven's
      * "java", "CI pipeline" contains pypi's "pip", "hex editor" contains hex's "hex",
