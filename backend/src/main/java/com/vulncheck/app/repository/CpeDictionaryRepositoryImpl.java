@@ -124,11 +124,23 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
     private void collect(String column, String query, double threshold, int limit,
             Map<Long, CpeDictionaryEntry> byId, Map<Long, Double> bestScoreById) {
         // SET LOCAL restricts the GIN-indexed "%" pre-filter below to roughly the caller's own
-        // threshold instead of the 0.3 session default -- measured against the real dictionary:
-        // 35.6ms with SET LOCAL vs 89.8ms without (~2.5x), because a tighter threshold lets "%"
-        // itself discard more candidates before anything else runs. See this class's own javadoc
-        // for why the explicit "AND similarity(...) > ?" predicate further down is kept alongside
-        // this rather than relied on alone.
+        // threshold instead of the 0.3 session default, because a tighter threshold lets "%" itself
+        // discard more candidates before anything else runs. The magnitude of that effect depends on
+        // how much the query's own trigram score distribution clusters near the session default --
+        // it is not a fixed multiplier. Re-measured 2026-08-30 with EXPLAIN (ANALYZE, BUFFERS) against
+        // the real dictionary, on this method's current CROSS JOIN LATERAL query shape (title column,
+        // limit 40, threshold 0.6 -- CPE_TITLE_SIMILARITY_THRESHOLD): title 'Google Chrome' went from
+        // 363.3ms at the 0.3 session default down to 84.5ms with SET LOCAL 0.6 (~4.3x), while title
+        // 'Linux Kernel' only went from 222.9ms down to 147.0ms (~1.5x) -- Chrome's query text has few
+        // enough close trigram matches that tightening the pre-filter prunes much more aggressively,
+        // where Linux Kernel's more common words leave a larger candidate set at either threshold.
+        // (These absolute numbers also reflect the dev DB not yet having the V31 (vendor, product)
+        // index applied -- see this method's own d.vendor = t.vendor comment below -- so the LATERAL
+        // half of each plan falls back to the product trigram index for that equality join; V31 would
+        // change the absolute totals but not the relative SET LOCAL effect measured here, since it
+        // only touches the LATERAL join, not the "%" pre-filter this comment is about.) See this
+        // class's own javadoc for why the explicit "AND similarity(...) > ?" predicate further down is
+        // kept alongside this rather than relied on alone.
         jdbcTemplate.execute("SET LOCAL pg_trgm.similarity_threshold = " + threshold);
         // DISTINCT ON (vendor, product) before applying the limit: the dictionary holds one row
         // per catalogued version, and 72.7% of the real NVD dictionary's 1.8M rows are such
@@ -186,9 +198,20 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         // aggregate entirely instead of joining back to its own outer row — verified against the
         // real dictionary that vendor/product are NULL on zero rows today, so this never actually
         // happens in practice. "=" was chosen over "IS NOT DISTINCT FROM" because it is a plain
-        // btree-indexable equality — the V31 (vendor, product) index backs it directly — where "IS
-        // NOT DISTINCT FROM" is not (measured: cost 8.57 with "=" vs 47147 with "IS NOT DISTINCT
-        // FROM", ~5500x, even with the V31 index present).
+        // btree-indexable equality that the V31 (vendor, product) index (see that migration) can
+        // back directly, where "IS NOT DISTINCT FROM" cannot use a plain btree index scan the same
+        // way. The "cost 8.57 vs 47147" figure from an earlier revision of this comment was written
+        // before V31 had actually been applied to any real database and was never reproduced — as of
+        // 2026-08-30 the dev DB still only has V30 applied (V31 has not been rolled out yet), so that
+        // specific comparison remains unverified pending V31's actual rollout; re-measure with EXPLAIN
+        // once V31 is applied rather than trusting the old figure.
+        //
+        // What has been verified against the real dictionary on this dev DB (2026-08-30, before V31):
+        // product 'chrome' went from 2003.2ms on the pre-LATERAL query shape (a window function over
+        // the whole trigram-filtered set, re-parsed row by row in Java) to 375.0ms on this method's
+        // current CROSS JOIN LATERAL shape, ~5x faster, because the LATERAL join only re-derives
+        // target_sw_values/max_cataloged_major for the <= limit rows the trigram filter already
+        // narrowed down to, rather than for every trigram-filtered row up front.
         //
         // regexp_replace(d.cpe_string, '\\:', '', 'g') (senior review, job 37 root-cause): a plain
         // split_part mis-indexes every segment from the first escaped colon onward — CPE 2.3
@@ -209,11 +232,12 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "CROSS JOIN LATERAL ("
                 + "SELECT array_agg(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 11)) "
                 + "FILTER (WHERE d." + column + " % ? AND similarity(d." + column + ", ?) > ?) AS target_sw_values, "
-                + "max(NULLIF(substring(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 6) "
-                + "from '^[0-9]{1,9}'), ''))::integer AS max_cataloged_major "
+                + "max((NULLIF(substring(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 6) "
+                + "from '^[0-9]{1,9}'), ''))::integer) AS max_cataloged_major "
                 + "FROM cpe_dictionary d "
                 + "WHERE d.vendor = t.vendor AND d.product = t.product"
-                + ") a";
+                + ") a "
+                + "ORDER BY t.score DESC";
         jdbcTemplate.query(sql, rs -> {
             long id = rs.getLong("id");
             double score = rs.getDouble("score");
