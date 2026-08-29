@@ -182,7 +182,7 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
 
     private List<CanonicalArtifact> findCandidateArtifacts(String productName) {
         try {
-            JsonNode body = solrSearchWithRetry("a:\"" + productName + "\"", null, CANDIDATE_GROUP_LIMIT);
+            JsonNode body = solrSearchWithRetry("a:\"" + escapeLuceneQueryValue(productName) + "\"", null, CANDIDATE_GROUP_LIMIT);
             if (body == null) {
                 return List.of();
             }
@@ -249,7 +249,8 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
 
     private boolean solrVersionExists(CanonicalArtifact artifact, String version) {
         try {
-            String query = "g:\"" + artifact.groupId() + "\" AND a:\"" + artifact.artifactId() + "\" AND v:\"" + version + "\"";
+            String query = "g:\"" + escapeLuceneQueryValue(artifact.groupId()) + "\" AND a:\""
+                    + escapeLuceneQueryValue(artifact.artifactId()) + "\" AND v:\"" + escapeLuceneQueryValue(version) + "\"";
             JsonNode body = solrSearchWithRetry(query, "gav", 1);
             return body != null && body.path("response").path("docs").isArray()
                     && !body.path("response").path("docs").isEmpty();
@@ -329,6 +330,31 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                 })
                 .retrieve()
                 .body(JsonNode.class);
+    }
+
+    /**
+     * Escapes Lucene/Solr query syntax characters in {@code value} before it's embedded into a
+     * quoted {@code q} clause (e.g. {@code a:"..."}) — mirrors {@code
+     * org.apache.lucene.queryparser.classic.QueryParser#escape}. Without this, a CSV-supplied
+     * {@code productName}/groupId/artifactId/version containing a literal {@code "} could close
+     * the quoted phrase early and append arbitrary Solr query syntax of its own choosing — e.g. a
+     * fabricated version query that always matches ({@code numFound > 0}) regardless of whether
+     * that version was ever actually published, which {@link #toMatch} then reports as a
+     * confirmed, confidence-0.95 result. CSV input is untrusted, so every value reaching a {@code
+     * q} parameter here goes through this first, not just the ones that look adversarial today.
+     */
+    private static String escapeLuceneQueryValue(String value) {
+        StringBuilder escaped = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\\' || c == '+' || c == '-' || c == '!' || c == '(' || c == ')' || c == ':'
+                    || c == '^' || c == '[' || c == ']' || c == '"' || c == '{' || c == '}' || c == '~'
+                    || c == '*' || c == '?' || c == '|' || c == '&' || c == '/') {
+                escaped.append('\\');
+            }
+            escaped.append(c);
+        }
+        return escaped.toString();
     }
 
     /** Hard cap on how much of a {@code maven-metadata.xml} response is read into memory —
