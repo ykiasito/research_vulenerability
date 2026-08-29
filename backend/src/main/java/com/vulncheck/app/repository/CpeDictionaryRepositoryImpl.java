@@ -120,8 +120,12 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
     }
 
     /** {@code column} is always one of the two hardcoded literals above — never request input —
-     *  so interpolating it directly into the SQL text is safe. */
-    private void collect(String column, String query, double threshold, int limit,
+     *  so interpolating it directly into the SQL text is safe.
+     *
+     * <p>Package-private (rather than {@code private}) so {@code CpeDictionaryRepositoryImplTest} can
+     * call it directly to verify the SQL-level {@code ORDER BY} on a single {@code collect()} call's
+     * raw JDBC row order, independent of {@link #findFuzzyMatches}'s own Java-side stable sort. */
+    void collect(String column, String query, double threshold, int limit,
             Map<Long, CpeDictionaryEntry> byId, Map<Long, Double> bestScoreById) {
         // SET LOCAL restricts the GIN-indexed "%" pre-filter below to roughly the caller's own
         // threshold instead of the 0.3 session default, because a tighter threshold lets "%" itself
@@ -227,7 +231,11 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "similarity(" + column + ", ?) AS score "
                 + "FROM cpe_dictionary WHERE " + column + " % ? AND similarity(" + column + ", ?) > ? "
                 + "ORDER BY vendor, product, score DESC"
-                + ") deduped ORDER BY score DESC LIMIT ?"
+                // id as a secondary sort key breaks ties between (vendor, product) groups that score
+                // identically, so which rows land in the top-`limit` candidate pool no longer depends
+                // on Postgres's otherwise-unspecified return order for equal ORDER BY keys
+                // (docs/spec/task-backlog.md item 33) -- important for golden-benchmark reproducibility.
+                + ") deduped ORDER BY score DESC, id LIMIT ?"
                 + ") t "
                 + "CROSS JOIN LATERAL ("
                 + "SELECT array_agg(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 11)) "
