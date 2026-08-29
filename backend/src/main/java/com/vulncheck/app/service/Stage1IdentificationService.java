@@ -161,6 +161,34 @@ public class Stage1IdentificationService {
      */
     private static final String JENKINS_TARGET_SW = "jenkins";
 
+    /**
+     * Registry ecosystems whose {@link #passesTargetSwGate} fallback (the {@code orElse(true)}
+     * default-allow that applies when a registry matched but its ecosystem has no {@link
+     * #ECOSYSTEM_TO_TARGET_SW} mapping) must NOT default-allow — the gate must instead fall through
+     * to the same hard-reject a registry-less item gets. hex/maven's own default-allow is only
+     * defensible because both are registries that legitimately distribute a *component of some
+     * other platform* (an Elixir library, a Java artifact) with no single canonical {@code
+     * target_sw} word of their own — a candidate whose target_sw is platform-scoped could plausibly
+     * still be that hex/maven package for a different platform. Chocolatey shares none of that: it
+     * is a catalog of standalone Windows desktop applications, not a library/component registry, so
+     * a platform-scoped candidate (scoped to some *other* platform's plugin/component slot) can
+     * never legitimately be the Chocolatey package's own identity either.
+     *
+     * <p>Measured live (job191, golden-300 confidence=0.95 error analysis, senior review
+     * 2026-08-30): three of the five 0.95-confidence errors — Slack ({@code target_sw=wordpress}),
+     * RabbitMQ ({@code target_sw=pivotal_cloud_foundry}), and Zoom ({@code target_sw=mac_os_x}) —
+     * were sole Chocolatey matches whose corroborating CPE only survived {@link #passesTargetSwGate}
+     * because this fallback let a platform-scoped candidate through unchallenged.
+     *
+     * <p>Deliberately a separate set rather than an addition to {@link #ECOSYSTEM_TO_TARGET_SW}:
+     * {@code windows} is already in {@link #NON_SCOPING_TARGET_SW_VALUES} and so short-circuits
+     * {@link #passesTargetSwGate} to an unconditional pass before any ecosystem/target_sw mapping is
+     * even consulted — mapping chocolatey to {@code target_sw=windows} there would do nothing for the
+     * gate (that value is never rejected either way) and would only add an unrelated, unrequested
+     * ranking preference via {@link #targetSwMatchesEcosystem}/{@link #rankCpeCandidates}.
+     */
+    private static final java.util.Set<String> STANDALONE_APPLICATION_ECOSYSTEMS = java.util.Set.of("chocolatey");
+
     private final List<PackageRegistryLookup> registryLookups;
     private final RegistryRoutingPolicy registryRoutingPolicy;
     private final RegistryLookupCache registryLookupCache;
@@ -194,7 +222,7 @@ public class Stage1IdentificationService {
         // doesn't skip either signal (both are still always gathered, same coverage as before),
         // it just removes the pure waiting-on-nothing between them.
         CompletableFuture<List<CpeDictionaryEntry>> localCpeFuture = CompletableFuture.supplyAsync(
-                () -> localCpeLookup(item.getVendor(), item.getProductName()), registryLookupExecutor);
+                () -> localCpeLookup(item.getVendor(), item.getProductName(), item.getVersion()), registryLookupExecutor);
 
         RegistryResolution registryResolution = resolveRegistryMatch(item, userId, item.getProductName(), item.getVersion());
         // A registry match already gives Stage2 vulnerability coverage via OSV/GHSA, so a missing
@@ -204,7 +232,7 @@ public class Stage1IdentificationService {
         Optional<String> registryEcosystem = registryResolution.match().map(RegistryMatch::ecosystem);
         Optional<String> registryPackageName = registryResolution.match().map(RegistryMatch::packageName);
         CpeCandidateResult cpeCandidateResult = resolveCpeCandidates(item.getVendor(), item.getProductName(), userId,
-                registryEcosystem, registryPackageName, localCpeFuture.join());
+                registryEcosystem, registryPackageName, localCpeFuture.join(), item.getVersion());
 
         Optional<IdentifiedProduct> result = (registryResolution.match().isEmpty() && cpeCandidateResult.candidates().isEmpty())
                 ? tryTier3(item, userId)
@@ -284,7 +312,7 @@ public class Stage1IdentificationService {
         }
         CpeCandidateResult requeryCpe = fuzzyMatchCpe(resolvedVendor, resolvedProductName, userId,
                 requeryRegistry.match().map(RegistryMatch::ecosystem),
-                requeryRegistry.match().map(RegistryMatch::packageName));
+                requeryRegistry.match().map(RegistryMatch::packageName), item.getVersion());
 
         if (requeryRegistry.match().isEmpty() && requeryCpe.candidates().isEmpty()) {
             // Tier3 learned the real name, but re-querying Tier1 with it still found nothing
@@ -706,7 +734,8 @@ public class Stage1IdentificationService {
     private RescuedCpe rescueCpeAfterRegistryMatchRejected(
             ResearchJobItem item, Long userId, String vendorForCpeRescue, String productNameForCpeRescue) {
         CpeCandidateResult rescueResult =
-                fuzzyMatchCpe(vendorForCpeRescue, productNameForCpeRescue, userId, Optional.empty(), Optional.empty());
+                fuzzyMatchCpe(vendorForCpeRescue, productNameForCpeRescue, userId, Optional.empty(), Optional.empty(),
+                        item.getVersion());
         List<CpeDictionaryEntry> rescueCandidates = rescueResult.candidates();
         if (rescueCandidates.isEmpty()) {
             return null;
@@ -1104,9 +1133,9 @@ public class Stage1IdentificationService {
      * ranking preference — likewise empty whenever there's no registry match to draw one from.
      */
     private CpeCandidateResult fuzzyMatchCpe(String vendor, String productName, Long userId,
-            Optional<String> registryEcosystem, Optional<String> registryPackageName) {
+            Optional<String> registryEcosystem, Optional<String> registryPackageName, String itemVersion) {
         return resolveCpeCandidates(vendor, productName, userId, registryEcosystem, registryPackageName,
-                localCpeLookup(vendor, productName));
+                localCpeLookup(vendor, productName, itemVersion), itemVersion);
     }
 
     /** Just the local-dictionary half of {@link #fuzzyMatchCpe} — DB-only, no network, literal
@@ -1132,11 +1161,11 @@ public class Stage1IdentificationService {
      *  rather than actually correct — won by default. Ranking the full pool here and deferring the
      *  cut to after gating in {@link #rankAndGate} is what lets {@code hyper:http} survive to be
      *  correctly chosen once the crates.io ecosystem context is known. */
-    private List<CpeDictionaryEntry> localCpeLookup(String vendor, String productName) {
+    private List<CpeDictionaryEntry> localCpeLookup(String vendor, String productName, String itemVersion) {
         List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
                 productName, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
         List<CpeDictionaryEntry> literalMatches = plausibleContainmentOnly(vendor, productName, pool);
-        return rankCpeCandidates(vendor, productName, literalMatches, Optional.empty(), CPE_CANDIDATE_POOL);
+        return rankCpeCandidates(vendor, productName, literalMatches, Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
     }
 
     /**
@@ -1395,9 +1424,24 @@ public class Stage1IdentificationService {
      * them. {@code part=h} (hardware) stays excluded unconditionally either way — the job 37
      * incident was specifically about hardware, and network-device software update advisories are
      * never filed against hardware CPEs.
+     *
+     * <p>Backlog item 15, P2 (senior review 2026-08-30): {@link #versionCoverageIsPlausible} is
+     * inserted <em>after</em> {@code exactProductSlugMatch}/{@code targetSwMatchesEcosystem} but
+     * <em>before</em> {@code vendorAgrees}. After exact-slug/target_sw (both job 37 REVISE item 1's
+     * own ordering, left untouched) because this tie-break must never be allowed to demote a
+     * candidate that already won on stronger textual/ecosystem evidence — inserting it any earlier
+     * would risk re-litigating job 37 REVISE item 1's own fix. Before {@code vendorAgrees} because
+     * this is objective catalogue evidence (does this vendor:product pair even have a row at or
+     * above this version?), which should outrank a merely textual vendor-string overlap — measured
+     * live in the Audacity false positive this tie-break was built for: the wrong candidate
+     * ({@code audacity:audacity}, catalogued only up to old 2.x versions) has {@code vendorAgrees}
+     * true purely from sharing the word "audacity", while the correct candidate
+     * ({@code audacityteam:audacity}, actually catalogued at the item's 3.7.x version) has {@code
+     * vendorAgrees} false — placing this tie-break behind {@code vendorAgrees} would have let the
+     * wrong candidate keep winning for exactly the wrong reason.
      */
     private List<CpeDictionaryEntry> rankCpeCandidates(String vendor, String exactMatchQuery,
-            List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit) {
+            List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit, String itemVersion) {
         java.util.LinkedHashMap<String, CpeDictionaryEntry> bestPerProduct = new java.util.LinkedHashMap<>();
         java.util.LinkedHashMap<String, CpeDictionaryEntry> bestOsPerProductFallback = new java.util.LinkedHashMap<>();
         for (CpeDictionaryEntry entry : candidates) {
@@ -1435,9 +1479,63 @@ public class Stage1IdentificationService {
                 .sorted(java.util.Comparator
                         .comparing((CpeDictionaryEntry e) -> exactProductSlugMatch(normalizedExactMatchQuery, e) ? 0 : 1)
                         .thenComparing(e -> targetSwMatchesEcosystem(e, mappedTargetSw) ? 0 : 1)
+                        .thenComparing(e -> versionCoverageIsPlausible(e, itemVersion) ? 0 : 1)
                         .thenComparing(e -> vendorAgrees(normalizedVendor, e) ? 0 : 1))
                 .limit(limit)
                 .toList();
+    }
+
+    /**
+     * Backlog item 15, P2 ranking tie-break (senior review 2026-08-30): whether {@code entry}'s own
+     * catalogued version history plausibly covers {@code itemVersion} — used ONLY as a soft ranking
+     * tie-break in {@link #rankCpeCandidates}, never as a hard reject anywhere in this class. Per the
+     * design's own "no evidence means always plausible" requirement, this only ever returns {@code
+     * false} when there is concrete numeric evidence the item's version is newer than anything this
+     * (vendor, product) pair has ever been catalogued at — every other case (no catalogued versions
+     * at all, only {@code "*"}/{@code "-"}/non-numeric catalogued values, or an unparseable item
+     * version) defaults to {@code true}.
+     */
+    private boolean versionCoverageIsPlausible(CpeDictionaryEntry entry, String itemVersion) {
+        java.util.Set<String> catalogedVersions = entry.getCatalogedVersions();
+        if (catalogedVersions == null || catalogedVersions.isEmpty()) {
+            return true;
+        }
+        java.util.OptionalInt maxCatalogedMajor = catalogedVersions.stream()
+                .map(Stage1IdentificationService::leadingMajorVersion)
+                .filter(java.util.OptionalInt::isPresent)
+                .mapToInt(java.util.OptionalInt::getAsInt)
+                .max();
+        if (maxCatalogedMajor.isEmpty()) {
+            return true;
+        }
+        java.util.OptionalInt itemMajor = leadingMajorVersion(itemVersion);
+        if (itemMajor.isEmpty()) {
+            return true;
+        }
+        return itemMajor.getAsInt() <= maxCatalogedMajor.getAsInt();
+    }
+
+    /** Parses the leading run of ASCII digits at the very start of {@code version} as an integer
+     *  major-version number (e.g. {@code "3.7.1"} -&gt; {@code 3}) — empty when {@code version} is
+     *  null/blank or doesn't start with a digit at all (e.g. {@code "v3.7.1"}, {@code "-"}, {@code
+     *  "*"}), which {@link #versionCoverageIsPlausible} treats as "no usable evidence" rather than
+     *  a parse failure to reject on. */
+    private static java.util.OptionalInt leadingMajorVersion(String version) {
+        if (version == null) {
+            return java.util.OptionalInt.empty();
+        }
+        int end = 0;
+        while (end < version.length() && Character.isDigit(version.charAt(end))) {
+            end++;
+        }
+        if (end == 0) {
+            return java.util.OptionalInt.empty();
+        }
+        try {
+            return java.util.OptionalInt.of(Integer.parseInt(version.substring(0, end)));
+        } catch (NumberFormatException e) {
+            return java.util.OptionalInt.empty();
+        }
     }
 
     /** REVISE item 1's primary ranking signal: whether {@code normalizedExactMatchQuery} (already
@@ -1531,7 +1629,7 @@ public class Stage1IdentificationService {
      */
     private CpeCandidateResult resolveCpeCandidates(String vendor, String productName, Long userId,
             Optional<String> registryEcosystem, Optional<String> registryPackageName,
-            List<CpeDictionaryEntry> localMatches) {
+            List<CpeDictionaryEntry> localMatches, String itemVersion) {
         // REVISE item 1: a registry-sourced item's own resolved package name — reduced to its one
         // meaningful segment the same way Fix 5's cpeCorroboratesRegistryPackage already does for a
         // Maven groupId:artifactId coordinate or a Go module path — is a strictly more precise exact
@@ -1541,7 +1639,7 @@ public class Stage1IdentificationService {
         String exactMatchQuery = registryPackageName.map(this::lastMeaningfulPackageSegment).orElse(productName);
         TargetSwContext targetSwContext = TargetSwContext.from(registryEcosystem, exactMatchQuery);
 
-        List<CpeDictionaryEntry> gatedLocalMatches = rankAndGate(vendor, localMatches, targetSwContext);
+        List<CpeDictionaryEntry> gatedLocalMatches = rankAndGate(vendor, localMatches, targetSwContext, itemVersion);
         if (!gatedLocalMatches.isEmpty()) {
             return new CpeCandidateResult(gatedLocalMatches, false);
         }
@@ -1559,7 +1657,7 @@ public class Stage1IdentificationService {
             // Genuine last resort: even the live, rate-limited NVD keyword search (already retried
             // with several word-dropped fallback queries) found nothing at all for this product.
             List<CpeDictionaryEntry> variantMatches =
-                    rankAndGate(vendor, findByNameVariants(vendor, productName), targetSwContext);
+                    rankAndGate(vendor, findByNameVariants(vendor, productName), targetSwContext, itemVersion);
             return new CpeCandidateResult(variantMatches, !variantMatches.isEmpty());
         }
 
@@ -1569,14 +1667,15 @@ public class Stage1IdentificationService {
         // Git", but re-querying the local dictionary with the original, longer string diluted
         // trigram similarity below both thresholds (0.276/0.286 vs. 0.3/0.6), silently discarding
         // the very entries the live call had just upserted a moment earlier.
-        List<CpeDictionaryEntry> refreshed = rankAndGate(vendor, localCpeLookup(vendor, productName), targetSwContext);
+        List<CpeDictionaryEntry> refreshed =
+                rankAndGate(vendor, localCpeLookup(vendor, productName, itemVersion), targetSwContext, itemVersion);
         if (!refreshed.isEmpty()) {
             return new CpeCandidateResult(refreshed, false);
         }
         return new CpeCandidateResult(rankAndGate(vendor, plausibleContainmentOnly(vendor, productName,
                 cpeDictionaryRepository.findFuzzyMatches(successfulQuery.get(),
                         CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL)),
-                targetSwContext), false);
+                targetSwContext, itemVersion), false);
     }
 
     private String cpeQuery(String vendor, String productName) {
@@ -1596,8 +1695,9 @@ public class Stage1IdentificationService {
      *  outside the first 3 rows of the ungated, ecosystem-unaware ranking (tied with several wrong
      *  candidates at exact-slug rank), so a truncate-then-gate order discarded it before the gate
      *  that would have rejected the other 2 finalists (and kept {@code hyper}) ever got to run. */
-    private List<CpeDictionaryEntry> rankAndGate(String vendor, List<CpeDictionaryEntry> candidates, TargetSwContext ctx) {
-        return rankCpeCandidates(vendor, ctx.exactMatchQuery(), candidates, ctx.mappedTargetSw(), CPE_CANDIDATE_POOL)
+    private List<CpeDictionaryEntry> rankAndGate(
+            String vendor, List<CpeDictionaryEntry> candidates, TargetSwContext ctx, String itemVersion) {
+        return rankCpeCandidates(vendor, ctx.exactMatchQuery(), candidates, ctx.mappedTargetSw(), CPE_CANDIDATE_POOL, itemVersion)
                 .stream()
                 .filter(entry -> passesTargetSwGate(entry, ctx))
                 .limit(CPE_CANDIDATE_LIMIT)
@@ -1613,13 +1713,19 @@ public class Stage1IdentificationService {
      * (hex, maven — deliberately treated as no signal at all, per {@link #ECOSYSTEM_TO_TARGET_SW}'s
      * own javadoc and REVISE item 8, which leaves hex's "tesla" alone entirely). {@code
      * mappedTargetSw} is therefore only ever present when there IS a registry match AND its
-     * ecosystem is one of the eight mapped ones.
+     * ecosystem is one of the eight mapped ones. {@code registryEcosystem} is the raw ecosystem
+     * string itself (not just its {@code target_sw} mapping) — kept alongside {@code mappedTargetSw}
+     * so {@link #passesTargetSwGate} can check it against {@link #STANDALONE_APPLICATION_ECOSYSTEMS},
+     * which is keyed on ecosystem name, not on a target_sw mapping few of those ecosystems have.
      */
-    private record TargetSwContext(boolean hasRegistryMatch, Optional<String> mappedTargetSw, String exactMatchQuery) {
+    private record TargetSwContext(
+            boolean hasRegistryMatch, Optional<String> mappedTargetSw, String exactMatchQuery,
+            Optional<String> registryEcosystem) {
         static TargetSwContext from(Optional<String> registryEcosystem, String exactMatchQuery) {
             return registryEcosystem.isEmpty()
-                    ? new TargetSwContext(false, Optional.empty(), exactMatchQuery)
-                    : new TargetSwContext(true, mapEcosystemToTargetSw(registryEcosystem.get()), exactMatchQuery);
+                    ? new TargetSwContext(false, Optional.empty(), exactMatchQuery, Optional.empty())
+                    : new TargetSwContext(true, mapEcosystemToTargetSw(registryEcosystem.get()), exactMatchQuery,
+                            registryEcosystem);
         }
     }
 
@@ -1662,10 +1768,18 @@ public class Stage1IdentificationService {
             // standalone item's identity.
             return false;
         }
-        // A registry match exists but its ecosystem has no target_sw mapping (hex/maven) is treated
-        // as "nothing to gate on" (orElse(true)) rather than a rejection — see ECOSYSTEM_TO_TARGET_SW's
-        // own javadoc for why guessing a mapping for those two would be worse than having none.
-        return ctx.mappedTargetSw().map(targetSwValues::contains).orElse(true);
+        if (ctx.mappedTargetSw().isPresent()) {
+            return targetSwValues.contains(ctx.mappedTargetSw().get());
+        }
+        // A registry match exists but its ecosystem has no target_sw mapping (hex/maven/chocolatey)
+        // reaches here. hex/maven default-allow (see ECOSYSTEM_TO_TARGET_SW's own javadoc for why
+        // guessing a mapping for those two would be worse than having none), but chocolatey is a
+        // standalone-application catalog, not a platform-component registry, so that default-allow
+        // must not extend to it — see STANDALONE_APPLICATION_ECOSYSTEMS's own javadoc.
+        if (ctx.registryEcosystem().map(STANDALONE_APPLICATION_ECOSYSTEMS::contains).orElse(false)) {
+            return false;
+        }
+        return true;
     }
 
     /** REVISE item 3's soft ranking-preference signal: whether {@code entry}'s target_sw set

@@ -51,4 +51,17 @@ public class CpeDictionaryEntry {
      */
     @Transient
     private Set<String> targetSwValues;
+
+    /**
+     * The full set of distinct {@code version} values (CPE 2.3 segment 6, 1-indexed) across every
+     * row sharing this entry's vendor/product pair, not just this one row's own version — same
+     * per-(vendor,product) aggregate shape as {@link #targetSwValues}, populated by the same {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#findFuzzyMatches} window function.
+     * Not a persisted column: populated in Java from a per-query aggregate, hence {@link Transient}.
+     * Null/empty whenever a candidate wasn't sourced from that query (e.g. the name-variant search),
+     * which {@link com.vulncheck.app.service.Stage1IdentificationService} treats as "no version
+     * coverage evidence" (never a hard reject — see that class's {@code versionCoverageIsPlausible}).
+     */
+    @Transient
+    private Set<String> catalogedVersions;
 }

@@ -141,11 +141,21 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         // product/vendor/title columns are untouched, only this target_sw extraction is affected, and
         // it's still folded into the same window-function query. Confirmed via EXPLAIN ANALYZE that
         // this leaves the query plan (bitmap index scan -> window agg -> incremental sort) unchanged.
+        //
+        // cataloged_versions (docs/spec/task-backlog.md item 15, P2, senior review 2026-08-30): same
+        // per-(vendor,product) window-function shape as target_sw_values above, just extracting
+        // segment 6 (version, 1-indexed) instead of segment 11 — needed by
+        // Stage1IdentificationService's versionCoverageIsPlausible ranking tie-break. Runs over the
+        // exact same already-filtered window, so this adds no extra scan; confirmed via EXPLAIN
+        // ANALYZE against the real dictionary that the plan shape (bitmap index scan -> window agg
+        // -> incremental sort) is unchanged by adding this second array_agg.
         String sql = "SELECT * FROM ("
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at, "
                 + "similarity(" + column + ", ?) AS score, "
                 + "array_agg(split_part(regexp_replace(cpe_string, '\\\\:', '', 'g'), ':', 11)) "
-                + "OVER (PARTITION BY vendor, product) AS target_sw_values "
+                + "OVER (PARTITION BY vendor, product) AS target_sw_values, "
+                + "array_agg(split_part(regexp_replace(cpe_string, '\\\\:', '', 'g'), ':', 6)) "
+                + "OVER (PARTITION BY vendor, product) AS cataloged_versions "
                 + "FROM cpe_dictionary WHERE " + column + " % ? "
                 + "ORDER BY vendor, product, score DESC"
                 + ") deduped ORDER BY score DESC LIMIT ?";
@@ -162,6 +172,7 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 OffsetDateTime lastSyncedAt = rs.getObject("last_synced_at", OffsetDateTime.class);
                 entry.setLastSyncedAt(lastSyncedAt);
                 entry.setTargetSwValues(toStringSet(rs.getArray("target_sw_values")));
+                entry.setCatalogedVersions(toStringSet(rs.getArray("cataloged_versions")));
                 byId.put(id, entry);
                 bestScoreById.put(id, score);
             }
