@@ -179,8 +179,9 @@ public class Stage1IdentificationService {
      * RabbitMQ ({@code target_sw=pivotal_cloud_foundry}), and Zoom ({@code target_sw=mac_os_x}) —
      * were sole Chocolatey matches whose corroborating CPE only survived {@link #passesTargetSwGate}
      * because this fallback let a platform-scoped candidate through unchallenged. Static
-     * re-measurement after this fix landed (job193, PR #14 review, 2026-08-30) found this fallback
-     * alone does not resolve all three the same way:
+     * re-measurement done alongside this same fix (job193) found this fallback alone does not
+     * resolve all three the same way — this is this fix's own author-run measurement, not a
+     * separate, later-dated review confirmation:
      * <ul>
      *   <li><b>RabbitMQ</b> is fixed, but the outcome is column-dependent: whether the corroborating
      *       candidate's target_sw set actually reflects this fix depends on whether {@link
@@ -1520,16 +1521,16 @@ public class Stage1IdentificationService {
      * version) defaults to {@code true}.
      *
      * <p>That "no evidence means always plausible" invariant has to hold not just for the obvious
-     * null/empty {@link CpeDictionaryEntry#getCatalogedVersions()} case, but also whenever the
-     * aggregation window backing it is merely partial — a {@code cataloged_versions} set that's
-     * missing some of the pair's real catalogued versions looks identical, from here, to "genuinely
-     * has no older versions", and would wrongly demote a candidate for a version this method never
-     * actually saw evidence against. That's exactly why {@link
+     * null {@link CpeDictionaryEntry#getMaxCatalogedMajor()} case, but also whenever the aggregation
+     * window backing it is merely partial — a {@code max_cataloged_major} that's missing some of the
+     * pair's real catalogued versions looks identical, from here, to "genuinely has no newer
+     * versions", and would wrongly demote a candidate for a version this method never actually saw
+     * evidence against. That's exactly why {@link
      * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#findFuzzyMatches}'s {@code
-     * cataloged_versions} aggregate deliberately runs with no per-column trigram filter, unlike
+     * max_cataloged_major} aggregate deliberately runs with no per-column trigram filter, unlike
      * {@code target_sw_values} above — it aggregates every row in the (vendor, product) partition,
      * not just whichever subset happened to trigram-match this particular query column (see that
-     * method's own comment, PR #14 REVISE, 2026-08-30).
+     * method's own comment).
      */
     private boolean versionCoverageIsPlausible(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();

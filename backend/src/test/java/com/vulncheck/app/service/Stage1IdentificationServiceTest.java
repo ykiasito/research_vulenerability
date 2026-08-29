@@ -2077,9 +2077,9 @@ class Stage1IdentificationServiceTest {
         // positive this was built for: audacity:audacity is only catalogued up to old 2.x releases,
         // while audacityteam:audacity is genuinely catalogued at the item's own 3.7.x version.
         CpeDictionaryEntry oldAudacity = cpeEntry("cpe:2.3:a:audacity:audacity:2.4.2:*:*:*:*:*:*:*", "audacity");
-        oldAudacity.setCatalogedVersions(java.util.Set.of("1.3.3", "2.4.2"));
+        oldAudacity.setMaxCatalogedMajor(2);
         CpeDictionaryEntry realAudacity = cpeEntry("cpe:2.3:a:audacityteam:audacity:3.7.0:*:*:*:*:*:*:*", "audacity");
-        realAudacity.setCatalogedVersions(java.util.Set.of("3.4.0", "3.7.0"));
+        realAudacity.setMaxCatalogedMajor(3);
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(oldAudacity, realAudacity));
         stubSaveReturnsArgument();
@@ -2095,7 +2095,7 @@ class Stage1IdentificationServiceTest {
 
     @Test
     void versionCoverageTieBreakDoesNotHardRejectWhenNoCatalogedVersionsExist() {
-        // Non-regression control: absence of evidence (null/empty catalogedVersions, the common
+        // Non-regression control: absence of evidence (null maxCatalogedMajor, the common
         // case for a candidate not sourced from findFuzzyMatches) must never turn into a rejection —
         // this candidate would otherwise have no other tie-break signal to fall back on.
         CpeDictionaryEntry candidate = cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
