@@ -206,6 +206,14 @@ public class LlmServiceClient {
      * Bundled-package detection, step 2: text-only {@code (component, version)} extraction from
      * the changelog text step 1 found — no web_search tool attached (see the plan's §3-2), which is
      * exactly why this is a separate, cheaper call from step 1 rather than one combined request.
+     *
+     * <p>REVISE item 1 (senior review 2026-08-29, PR #1): {@code changelogText} is truncated against
+     * {@link #CHANGELOG_TEXT_MAX_LENGTH}, not {@link #USAGE_TEXT_MAX_LENGTH} — unlike {@code
+     * usageText}, it is not raw CSV user input but the generated output of the immediately preceding
+     * {@code /v1/bundled-components/discover-changelog} call, which {@code llm-service/main.py}
+     * already bounds via {@code max_tokens=2048} (roughly 8,000 characters). Truncating it to
+     * {@code usageText}'s 2,000-character limit would silently drop up to three-quarters of the
+     * changelog before it ever reaches this extraction call, degrading bundled-component recall.
      */
     public Optional<BundledExtractResponse> extractBundledComponents(
             String apiKey, ResearchJobItem item, String changelogText, BigDecimal reservedCostUsd) {
@@ -213,7 +221,7 @@ public class LlmServiceClient {
                 apiKey,
                 truncate(item.getProductName(), SHORT_FIELD_MAX_LENGTH, "productName"),
                 truncate(item.getVersion(), SHORT_FIELD_MAX_LENGTH, "version"),
-                truncate(changelogText, USAGE_TEXT_MAX_LENGTH, "changelogText"));
+                truncate(changelogText, CHANGELOG_TEXT_MAX_LENGTH, "changelogText"));
         UsageDto usage = null;
         try {
             BundledExtractResponse response = llmServiceRestClient.post()
@@ -297,12 +305,26 @@ public class LlmServiceClient {
     private static final int USAGE_TEXT_MAX_LENGTH = 2000;
     private static final int SHORT_FIELD_MAX_LENGTH = 200;
 
+    // REVISE item 1 (senior review 2026-08-29, PR #1): changelogText is a Claude-generated response
+    // (see extractBundledComponents' javadoc), not raw CSV input, and llm-service already bounds it
+    // at ~8,000 characters via max_tokens=2048 -- this limit only needs to comfortably clear that
+    // upstream bound as a defensive backstop, not actually constrain normal responses.
+    private static final int CHANGELOG_TEXT_MAX_LENGTH = 20000;
+
     private String truncate(String value, int maxLength, String fieldName) {
         if (value == null || value.length() <= maxLength) {
             return value;
         }
         log.debug("Truncating field '{}' from {} to {} characters before sending to llm-service",
                 fieldName, value.length(), maxLength);
-        return value.substring(0, maxLength);
+        int cutIndex = maxLength;
+        // REVISE item 5 (senior review 2026-08-29, PR #1): a plain substring(0, maxLength) can land
+        // mid-surrogate-pair (e.g. inside an emoji in usageText), producing an unpaired low surrogate
+        // in the truncated string sent to llm-service. Back off by one more character when that would
+        // happen, so we always cut on a whole-character boundary.
+        if (Character.isLowSurrogate(value.charAt(cutIndex))) {
+            cutIndex--;
+        }
+        return value.substring(0, cutIndex);
     }
 }

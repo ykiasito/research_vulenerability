@@ -37,6 +37,14 @@ import org.springframework.stereotype.Service;
  * <em>not</em> the same as a wrong one — the existing candidate may well be correct, there's just
  * more than one real candidate it could legitimately be — so it is flagged for human review rather
  * than downgraded like an actually-incorrect match.
+ *
+ * <p>REVISE item 7 (senior review 2026-08-29, PR #1) — throughput note: {@link #verifyIfEligible}
+ * runs synchronously on the item-processing thread (see {@code itemProcessingExecutor}, capped at 8
+ * parallel items), the same as every other Stage1 AI tier call. Enabling this feature therefore adds
+ * one more synchronous Claude round-trip to every eligible item's processing time, on top of
+ * Tier2/Tier3/Stage4 — for a 1,000-item job with a meaningful fraction of high-confidence static
+ * matches, this can plausibly add on the order of 7-8 minutes of wall-clock throughput compared to
+ * running with the feature off.
  */
 @Service
 @RequiredArgsConstructor
@@ -59,18 +67,9 @@ public class HighConfidenceVerificationService {
     private double confidenceThreshold;
 
     /** Multiplier applied to an INCORRECT verdict's confidence — e.g. 0.5 halves it. Deliberately
-     *  not 0 (that would be "全部疑う", an extreme fixed behavior) and not 1 (a no-op, "全部信用");
-     *  tunable independently of {@link #demotionFloor}. */
+     *  not 0 (that would be "全部疑う", an extreme fixed behavior) and not 1 (a no-op, "全部信用"). */
     @Value("${app.high-confidence-verification.downgrade-factor:0.5}")
     private double downgradeFactor;
-
-    /** If the downgraded confidence falls below this floor, the match is demoted to UNIDENTIFIED-
-     *  equivalent (see {@link #applyIncorrectVerdict}) rather than merely left at a low confidence
-     *  number. Configurable independently of {@link #downgradeFactor} so an operator can tune "how
-     *  suspicious does INCORRECT need to be before we stop showing it at all" separately from "how
-     *  much do we discount it in the meantime". */
-    @Value("${app.high-confidence-verification.demotion-floor:0.5}")
-    private double demotionFloor;
 
     /**
      * Runs the verification check if (and only if) {@code product} is eligible, persisting whatever
@@ -89,17 +88,21 @@ public class HighConfidenceVerificationService {
         if (apiKey.isEmpty()) {
             return Optional.of(product);
         }
-        if (!jobCostBudgetService.tryReserveVerification(item.getJobId(), JobCostBudgetService.HIGH_CONFIDENCE_VERIFICATION_COST_USD)) {
-            log.info("High-confidence verification skipped for item {}: job cost budget exhausted", item.getId());
+
+        // REVISE item 2 (senior review 2026-08-29, PR #1): parsed BEFORE the budget reservation
+        // below. A malformed cpe is detected here for free (isEligible already required a non-blank
+        // cpe, so this should never actually happen) -- if it were checked only after
+        // tryReserveVerification, this early return would leak the reservation, since it never
+        // reaches a call to reconcileVerification to release it.
+        VendorProduct vendorProduct = CpeUtils.parseVendorProduct(product.getCpe());
+        if (vendorProduct == null) {
+            log.warn("High-confidence verification skipped for item {}: could not parse vendor/product from cpe {}",
+                    item.getId(), product.getCpe());
             return Optional.of(product);
         }
 
-        VendorProduct vendorProduct = CpeUtils.parseVendorProduct(product.getCpe());
-        if (vendorProduct == null) {
-            // Shouldn't happen given isEligible already required a non-blank cpe, but a malformed
-            // string is not worth failing the item over — just skip verification for it.
-            log.warn("High-confidence verification skipped for item {}: could not parse vendor/product from cpe {}",
-                    item.getId(), product.getCpe());
+        if (!jobCostBudgetService.tryReserveVerification(item.getJobId(), JobCostBudgetService.HIGH_CONFIDENCE_VERIFICATION_COST_USD)) {
+            log.info("High-confidence verification skipped for item {}: job cost budget exhausted", item.getId());
             return Optional.of(product);
         }
 
@@ -157,21 +160,32 @@ public class HighConfidenceVerificationService {
 
     /**
      * INCORRECT always drops the CPE (it's the thing verification found implausible) and downgrades
-     * confidence by {@link #downgradeFactor}. If the result falls below {@link #demotionFloor} AND
-     * there's no surviving registry-based signal (ecosystem/packageName), the match is demoted
-     * fully — deleted, item ends up UNIDENTIFIED — rather than left showing a low-but-nonzero
-     * confidence for a product with genuinely nothing else backing it. When a registry match does
-     * survive, it's kept (verification only ever evaluated the CPE claim, not the registry hit)
-     * with the discounted confidence, so the item stays IDENTIFIED via that independent signal.
+     * confidence by {@link #downgradeFactor}. If there's no surviving registry-based signal
+     * (ecosystem/packageName), the match is demoted fully — deleted, item ends up UNIDENTIFIED —
+     * rather than left showing a low-but-nonzero confidence for a product with genuinely nothing
+     * else backing it. When a registry match does survive, it's kept (verification only ever
+     * evaluated the CPE claim, not the registry hit) with the discounted confidence, so the item
+     * stays IDENTIFIED via that independent signal.
+     *
+     * <p>REVISE item 4 (senior review 2026-08-29, PR #1): demotion no longer depends on the
+     * downgraded confidence crossing a configurable floor. It used to only demote when {@code
+     * downgraded < demotionFloor (default 0.5)} AND {@code !hasRegistryFallback} — but with an
+     * operator-raised {@code downgrade-factor} (e.g. 0.8), a 0.95-confidence match downgrades to
+     * 0.76, which never falls below the 0.5 floor, so a match with neither a CPE nor a registry
+     * fallback (nothing left to look up vulnerabilities against) would stay IDENTIFIED regardless —
+     * exactly the "IDENTIFIED with no vulnerability-lookup path" bug this whole PR's Chocolatey fix
+     * closed, reopened through a different door. Once the CPE is dropped, the absence of a registry
+     * fallback alone is sufficient reason to demote, independent of how much the confidence number
+     * happens to be discounted by.
      */
     private Optional<IdentifiedProduct> applyIncorrectVerdict(ResearchJobItem item, IdentifiedProduct product, VerifyHighConfidenceResponse verdict) {
         BigDecimal downgraded = product.getConfidence().multiply(BigDecimal.valueOf(downgradeFactor));
         boolean hasRegistryFallback = product.getEcosystem() != null && !product.getEcosystem().isBlank();
 
-        if (downgraded.compareTo(BigDecimal.valueOf(demotionFloor)) < 0 && !hasRegistryFallback) {
+        if (!hasRegistryFallback) {
             log.info("High-confidence verification INCORRECT for item {} — demoting to UNIDENTIFIED "
-                            + "(no registry fallback, downgraded confidence {} below floor {}): {}",
-                    item.getId(), downgraded, demotionFloor, verdict.reasoning());
+                            + "(no registry fallback, downgraded confidence {}): {}",
+                    item.getId(), downgraded, verdict.reasoning());
             identifiedProductRepository.delete(product);
             return Optional.empty();
         }
@@ -186,14 +200,19 @@ public class HighConfidenceVerificationService {
     }
 
     private String describeIncorrectVerdict(VerifyHighConfidenceResponse verdict) {
+        // REVISE item 3 (senior review 2026-08-29, PR #1): verdict.reasoning() is an ordinary
+        // nullable field on the wire, same as ambiguousCandidates below -- normalize null to "" here
+        // rather than either NPE'ing (StringBuilder constructor) or writing the literal string
+        // "null（AIの推測: ...）" into verification_note.
+        String reasoning = verdict.reasoning() == null ? "" : verdict.reasoning();
         if (verdict.alternativeVendor() == null && verdict.alternativeProduct() == null) {
-            return verdict.reasoning();
+            return reasoning;
         }
-        return verdict.reasoning() + "（AIの推測: " + verdict.alternativeVendor() + ":" + verdict.alternativeProduct() + "）";
+        return reasoning + "（AIの推測: " + verdict.alternativeVendor() + ":" + verdict.alternativeProduct() + "）";
     }
 
     private String describeAmbiguousCandidates(VerifyHighConfidenceResponse verdict) {
-        StringBuilder sb = new StringBuilder(verdict.reasoning());
+        StringBuilder sb = new StringBuilder(verdict.reasoning() == null ? "" : verdict.reasoning());
         // REVISE item 6 (senior review 2026-08-29): the llm-service response schema doesn't
         // guarantee ambiguousCandidates is present for an "ambiguous" outcome (it's an ordinary
         // nullable JSON field, not enforced non-null by anything on the wire) — an enhanced for loop

@@ -60,7 +60,6 @@ class HighConfidenceVerificationServiceTest {
         ReflectionTestUtils.setField(service, "enabled", enabled);
         ReflectionTestUtils.setField(service, "confidenceThreshold", 0.95);
         ReflectionTestUtils.setField(service, "downgradeFactor", 0.5);
-        ReflectionTestUtils.setField(service, "demotionFloor", 0.5);
         return service;
     }
 
@@ -210,6 +209,30 @@ class HighConfidenceVerificationServiceTest {
                         "incorrect", "wrong vendor entirely", null, null, List.of(), TEST_USAGE)));
 
         Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isEmpty();
+        verify(identifiedProductRepository).delete(product);
+    }
+
+    @Test
+    void incorrectVerdictWithNoRegistryFallbackDemotesToUnidentifiedEvenWithAHighDowngradeFactor() {
+        // REVISE item 4 (senior review 2026-08-29, PR #1): with the removed demotion-floor gate, a
+        // downgradeFactor of 0.8 (0.95 * 0.8 = 0.76, which would have stayed above the old default
+        // 0.5 floor) must still demote to UNIDENTIFIED when there's no registry fallback -- the CPE
+        // was just dropped as implausible, so nothing is left to look vulnerabilities up against
+        // regardless of how high the discounted confidence number happens to be.
+        HighConfidenceVerificationService serviceWithHighDowngradeFactor = new HighConfidenceVerificationService(
+                userApiKeyService, llmServiceClient, jobCostBudgetService, identifiedProductRepository);
+        ReflectionTestUtils.setField(serviceWithHighDowngradeFactor, "enabled", true);
+        ReflectionTestUtils.setField(serviceWithHighDowngradeFactor, "confidenceThreshold", 0.95);
+        ReflectionTestUtils.setField(serviceWithHighDowngradeFactor, "downgradeFactor", 0.8);
+
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), null);
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", "wrong vendor entirely", null, null, List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = serviceWithHighDowngradeFactor.verifyIfEligible(item(), product, USER_ID);
 
         assertThat(result).isEmpty();
         verify(identifiedProductRepository).delete(product);

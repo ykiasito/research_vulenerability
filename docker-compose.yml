@@ -37,11 +37,13 @@ services:
       # once per environment, then set it back. See CpeDictionaryBootstrapSync.
       CPE_FULL_SYNC_ON_STARTUP: ${CPE_FULL_SYNC_ON_STARTUP:-false}
       # Off by default (see HighConfidenceVerificationService) — only flip to true for a deliberate,
-      # budget-monitored diagnostic run, then set back to false.
+      # budget-monitored diagnostic run, then set back to false. Runs synchronously on the
+      # item-processing thread like every other AI tier, so enabling it can plausibly add on the
+      # order of 7-8 minutes of wall-clock throughput to a 1,000-item job (REVISE item 7, senior
+      # review 2026-08-29, PR #1).
       HIGH_CONFIDENCE_VERIFICATION_ENABLED: ${HIGH_CONFIDENCE_VERIFICATION_ENABLED:-false}
       HIGH_CONFIDENCE_VERIFICATION_THRESHOLD: ${HIGH_CONFIDENCE_VERIFICATION_THRESHOLD:-0.95}
       HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR: ${HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR:-0.5}
-      HIGH_CONFIDENCE_VERIFICATION_DEMOTION_FLOOR: ${HIGH_CONFIDENCE_VERIFICATION_DEMOTION_FLOOR:-0.5}
       # This feature's OWN per-item cost cap (separate ledger, see
       # JobCostBudgetService#verificationCostCapPerItemUsd) — defaults to 0 so enabling the feature
       # above never silently exhausts APP_COST_CAP_PER_ITEM_USD below. Must be set to a real value
