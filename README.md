@@ -1,78 +1,87 @@
-# 脆弱性事前調査Webアプリ
+# Vulnerability Pre-Screening Web App
 
-CSVアップロード型の脆弱性事前調査Webアプリです。導入予定のソフトウェア一覧（製品名・バージョン・用途等）をCSVでアップロードすると、既知の脆弱性（CVE等）の有無を製品ごとに調査して結果を返します。非エンジニア向けのGUIを想定しており、**社内利用を前提としています**。
+A CSV-upload-based vulnerability pre-screening web app. Upload a CSV list of software you plan to deploy (product name, version, purpose, etc.), and it looks up known vulnerabilities (CVEs, etc.) for each product and returns the results. It's designed with a GUI for non-engineers, and **assumes internal (in-house) use**.
 
-技術スタック: Spring Boot(Java 21, Thymeleaf) + Python/FastAPI(Claude LLMマイクロサービス) + PostgreSQL 16、すべてDocker Composeで構成。
+Tech stack: Spring Boot (Java 21, Thymeleaf) + Python/FastAPI (Claude LLM microservice) + PostgreSQL 16, all orchestrated with Docker Compose.
 
-このプロジェクトの詳細な設計・仕様ドキュメントは社内向けのため、本リポジトリには含まれていません。
+Detailed design and specification documents for this project are for internal use only and are not included in this repository.
 
-## セットアップ
+## Setup
 
-### 前提条件
+### Prerequisites
 
-- Docker / Docker Compose v2 が使えること
-- `openssl`・`curl` が使えること（`install.sh` が鍵の自動生成・起動確認に使用します)
+- Docker / Docker Compose v2
+- `openssl` and `curl` (used by `install.sh` for automatic key generation and startup verification)
 
-### 手順
+### Steps
 
 ```
 ./install.sh
 ```
 
-初回実行時、`.env.example` から `.env` を新規作成し、暗号化キー(`APP_SECRET_ENCRYPTION_KEY`)とDBパスワード(`POSTGRES_PASSWORD`)を自動生成した上で、Docker Composeでビルド・起動します。既に `.env` が存在する場合は上書きしません。
+On first run, it creates a new `.env` from `.env.example`, auto-generates an encryption key (`APP_SECRET_ENCRYPTION_KEY`) and a DB password (`POSTGRES_PASSWORD`), and then builds and starts everything with Docker Compose. If `.env` already exists, it will not be overwritten.
 
-`.env` には他にも `ADMIN_EMAIL`(管理者権限を与えるログインメールアドレス)・`JOB_RETENTION_DAYS`(ジョブの自動削除日数)といった、環境ごとに自分の値を設定すべき項目があります。必要に応じて `.env` を直接編集してください。
+`.env` also contains items you should set yourself for each environment, such as `ADMIN_EMAIL` (the login email address granted admin privileges) and `JOB_RETENTION_DAYS` (the number of days after which jobs are automatically deleted). Edit `.env` directly as needed.
 
-起動後は `http://localhost:8080` からアクセスできます。
+Once started, the app is available at `http://localhost:8080`.
 
-## 重要な注意事項
+## Important Notes
 
-**このアプリは社内利用・非公開ネットワークでの利用を前提としています。インターネットに露出する環境にそのままデプロイしないでください。**
+**This app assumes in-house use on a private, non-public network. Do not deploy it as-is to an environment exposed to the internet.**
 
-具体的には、現状のdocker-compose構成には以下の制約があります:
+Specifically, the current docker-compose configuration has the following constraints:
 
-- TLS(HTTPS)が設定されていません。通信は平文です。
-- セッションCookieに `Secure` 属性が設定されていません。
+- TLS (HTTPS) is not configured. Communication is in plain text.
+- The `Secure` attribute is not set on the session cookie.
 
-（2026-08-29対応済み）PostgreSQL(5432番ポート)・llm-service(8000番ポート)は `docker-compose.yml` で `127.0.0.1` 限定バインドに変更済みで、ホスト外部からは到達できません。ただしこれはDocker Composeをそのまま動かした場合の話であり、リバースプロキシ経由での転送設定や、ホスト自体を直接インターネットに晒す構成にすると意味を失います。
+(Addressed on 2026-08-29) PostgreSQL (port 5432) and llm-service (port 8000) have been changed in `docker-compose.yml` to bind to `127.0.0.1` only, and are no longer reachable from outside the host. However, this only holds when running Docker Compose as-is; it loses meaning if you set up reverse-proxy forwarding or expose the host itself directly to the internet.
 
-インターネット等の信頼できないネットワークに接続する環境で動かす場合は、上記に加えてリバースプロキシによるTLS終端、Cookieの `Secure` 属性設定を必ず行ってください。
+If you run this in an environment connected to an untrusted network such as the internet, you must, in addition to the above, terminate TLS via a reverse proxy and set the `Secure` attribute on cookies.
 
-## テスト実行(開発者向け)
+## Running Tests (For Developers)
 
-`mvn test` を実行するには、稼働中のPostgresに対して事前に専用の `vulncheck_test` ロール・データベースを作成しておく必要があります。手順は以下の通りです。**Postgresコンテナ内で `psql` から実行してください**(`docker exec -it <postgresコンテナ> psql -U vulncheck -d vulncheck`)。
+To run `mvn test`, you need to first create a dedicated `vulncheck_test` role and database against a running Postgres instance. Follow the steps below. **Run these from `psql` inside the Postgres container** (`docker exec -it <postgres-container> psql -U vulncheck -d vulncheck`).
 
 ```sql
--- 1. テスト専用ロールを作成(LOGIN以外の特別な属性は付与しない — SUPERUSER/CREATEDB/CREATEROLEいずれもfalseのまま)
+-- 1. Create a role dedicated to testing (no special attributes beyond LOGIN —
+--    SUPERUSER/CREATEDB/CREATEROLE all remain false)
 CREATE ROLE vulncheck_test WITH LOGIN PASSWORD 'vulncheck_test';
 
--- 2. テスト専用データベースを作成(所有者は本番ロールvulncheckのまま — vulncheck_test自身をDB所有者にしない)
+-- 2. Create a dedicated test database (owner remains the production role vulncheck —
+--    do not make vulncheck_test itself the DB owner)
 CREATE DATABASE vulncheck_test OWNER vulncheck;
 
--- 3. vulncheck_testロールがこのDBへ接続できるようにする
+-- 3. Allow the vulncheck_test role to connect to this database
 GRANT CONNECT ON DATABASE vulncheck_test TO vulncheck_test;
 
--- 4. public スキーマでのテーブル作成(Flywayマイグレーション実行に必要)・参照を許可
---    (vulncheck_test データベースに接続してから実行すること)
+-- 4. Allow table creation/reference in the public schema
+--    (needed for Flyway migrations to run)
+--    (run this after connecting to the vulncheck_test database)
 \c vulncheck_test
 GRANT USAGE, CREATE ON SCHEMA public TO vulncheck_test;
 
--- 5. 【必須】本番vulncheck・postgresデータベースへのPUBLIC経由の接続を遮断する
---    PostgreSQLはデフォルトでdatacl(データベースACL)がNULLの場合、PUBLICロールにCONNECT/TEMP権限を
---    暗黙付与する。これを塞がないと、上で作ったvulncheck_test(パスワードはこの通りリポジトリに平文で
---    載っている既知の値)が本番vulncheckデータベースへ接続でき、テーブル自体は読めなくてもカタログ全体
---    (テーブル名・列名・ロール名・pg_settings)の列挙や無制限の一時テーブル作成(ディスク枯渇リスク)が
---    可能になってしまう。
+-- 5. [REQUIRED] Block PUBLIC-role connections to the production vulncheck/postgres databases
+--    By default, when a database's datacl (database ACL) is NULL, PostgreSQL implicitly
+--    grants CONNECT/TEMP privileges to the PUBLIC role. Unless you close this off, the
+--    vulncheck_test role created above (whose password is the known, plainly-written value
+--    'vulncheck_test' checked into this repository) would be able to connect to the
+--    production vulncheck database. Even without being able to read the tables themselves,
+--    it could still enumerate the entire catalog (table names, column names, role names,
+--    pg_settings) and create unlimited temporary tables (a disk-exhaustion risk).
 REVOKE CONNECT ON DATABASE vulncheck FROM PUBLIC;
 REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;
 ```
 
-実行後、以下のSQLで `f`(接続不可)が返ることを確認してください:
+After running the above, confirm that the following SQL returns `f` (cannot connect):
 
 ```sql
 SELECT has_database_privilege('vulncheck_test', 'vulncheck', 'CONNECT');
 ```
 
-**警告: `vulncheck_test` のパスワードは `vulncheck_test` 固定であり、`backend/src/test/resources/application.yml` にそのまま平文で書かれています(このリポジトリは公開リポジトリなので、この値は誰でも読める既知の値です)。本番 `vulncheck` データベースに到達できる環境で、このロール・パスワードの組み合わせを作成してはいけません。**上記手順5のREVOKEを省略した場合、このロールは本番データベースへの偵察・DoS(一時テーブルによるディスク枯渇)の経路になります。ローカル開発専用のPostgresインスタンス(このリポジトリの `docker-compose.yml` が起動するもの)以外では、このロールを作成しないでください。
+**Warning: the `vulncheck_test` password is fixed at `vulncheck_test` and is written in plain text in `backend/src/test/resources/application.yml` (since this is a public repository, this value is known and readable by anyone). Do not create this role/password combination in any environment that can reach the production `vulncheck` database.** If you skip the REVOKE in step 5 above, this role becomes a route for reconnaissance and DoS (disk exhaustion via temporary tables) against the production database. Do not create this role anywhere other than a Postgres instance dedicated to local development (the one started by this repository's `docker-compose.yml`).
 
-`@AutoConfigureTestDatabase(Replace.NONE)` を使うテストクラスは、必ず上記の `vulncheck_test` 専用DB(`backend/src/test/resources/application.yml` でハードコード済み)に対してのみ実行してください。実dev DB(`vulncheck`)に向けて実行することは禁止です。
+Test classes that use `@AutoConfigureTestDatabase(Replace.NONE)` must always be run only against the dedicated `vulncheck_test` database above (hardcoded in `backend/src/test/resources/application.yml`). Running them against the real dev database (`vulncheck`) is prohibited.
+
+---
+
+日本語版は [README_ja.md](README_ja.md) を参照してください。
