@@ -1,6 +1,10 @@
 package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -8,10 +12,16 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+import org.w3c.dom.Document;
+import org.w3c.dom.NodeList;
 
 /**
  * Stage1 Tier1 lookup against the Maven Central search API, matching on artifactId (and, when
@@ -168,9 +178,26 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         }
     }
 
-    /** Scoped to one already-known groupId:artifactId — unlike the unscoped {@code gav} query,
-     *  there's no cross-package ambiguity left to sort incorrectly. */
+    /**
+     * Scoped to one already-known groupId:artifactId — unlike the unscoped {@code gav} query,
+     * there's no cross-package ambiguity left to sort incorrectly.
+     *
+     * <p>Confirms via the Solr {@code gav} core first, then — only if that didn't confirm — falls
+     * back to the canonical {@code maven-metadata.xml} for the same groupId:artifactId (see {@link
+     * #metadataXmlHasVersion}), OR'ing the two together: either source confirming the version is
+     * enough. Observed live (golden-300 job191, 2026-08-30): search.maven.org's Solr index can lag
+     * behind the real, authoritative {@code maven-metadata.xml} for a newly-published version (e.g.
+     * {@code org.springframework:spring-core:7.1.0-M1}, {@code com.zaxxer:HikariCP:7.1.0}),
+     * leaving an actually-real version reported as unconfirmed and confidence stuck at 0.5. The
+     * short-circuiting {@code ||} keeps the common case (Solr already confirms) at exactly one
+     * extra HTTP call, same as before this fix — {@code maven-metadata.xml} is only ever fetched
+     * when Solr didn't confirm.
+     */
     private boolean versionExists(CanonicalArtifact artifact, String version) {
+        return solrVersionExists(artifact, version) || metadataXmlHasVersion(artifact, version);
+    }
+
+    private boolean solrVersionExists(CanonicalArtifact artifact, String version) {
         try {
             String query = "g:\"" + artifact.groupId() + "\" AND a:\"" + artifact.artifactId() + "\" AND v:\"" + version + "\"";
             JsonNode body = solrSearchWithRetry(query, "gav", 1);
@@ -180,6 +207,19 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
             log.debug("Maven Central version check failed for {}:{}:{}", artifact.groupId(), artifact.artifactId(), version, e);
             return false;
         }
+    }
+
+    /**
+     * Fallback existence check against the authoritative {@code maven-metadata.xml} for a
+     * groupId:artifactId, used only when {@link #solrVersionExists} did not confirm — see {@link
+     * #versionExists}'s javadoc for why this exists and why it's OR'd rather than replacing Solr.
+     */
+    private boolean metadataXmlHasVersion(CanonicalArtifact artifact, String version) {
+        byte[] body = fetchMetadataXmlWithRetry(artifact.groupId(), artifact.artifactId());
+        if (body == null) {
+            return false;
+        }
+        return parseMetadataVersions(body).stream().anyMatch(v -> v.equals(version));
     }
 
     /**
@@ -239,6 +279,118 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                 })
                 .retrieve()
                 .body(JsonNode.class);
+    }
+
+    /** Hard cap on how much of a {@code maven-metadata.xml} response is read into memory —
+     *  defense in depth, mirroring the same cap {@link ChocolateyRegistryClient} applies to its own
+     *  XML feed. A real {@code maven-metadata.xml}, even for a package with hundreds of releases
+     *  (e.g. commons-io), is a tiny fraction of this. */
+    private static final int MAX_METADATA_RESPONSE_BYTES = 512 * 1024;
+
+    /** Same retry-on-any-failure policy as {@link #solrSearchWithRetry} — see that method's
+     *  javadoc for why a bare single attempt wasn't enough against Maven Central in practice. */
+    private byte[] fetchMetadataXmlWithRetry(String groupId, String artifactId) {
+        Exception lastError = null;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                return fetchMetadataXml(groupId, artifactId);
+            } catch (Exception e) {
+                lastError = e;
+                log.debug("Maven Central maven-metadata.xml request failed (attempt {}/{}): {}:{}",
+                        attempt, MAX_ATTEMPTS, groupId, artifactId, e);
+                if (attempt < MAX_ATTEMPTS) {
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
+                }
+            }
+        }
+        log.debug("Maven Central maven-metadata.xml request failed after {} attempts: {}:{}",
+                MAX_ATTEMPTS, groupId, artifactId, lastError);
+        return null;
+    }
+
+    /** Builds the path directly via the {@code UriBuilder} function form (as {@link #solrSearch}
+     *  already does) rather than a {@code {var}} URI template — a template variable containing a
+     *  {@code /} (groupId converted to a path, e.g. "com/google/guava") would otherwise get
+     *  percent-encoded to {@code %2F} and break the real repository path. */
+    private byte[] fetchMetadataXml(String groupId, String artifactId) {
+        rateLimiter.awaitTurn(ECOSYSTEM);
+        String groupPath = groupId.replace('.', '/');
+        return externalApiRestClient.get()
+                .uri(uriBuilder -> uriBuilder
+                        .scheme("https")
+                        .host("repo1.maven.org")
+                        .path("/maven2/" + groupPath + "/" + artifactId + "/maven-metadata.xml")
+                        .build())
+                .exchange((request, response) -> {
+                    if (!response.getStatusCode().is2xxSuccessful()) {
+                        throw new IllegalStateException(
+                                "maven-metadata.xml request returned " + response.getStatusCode());
+                    }
+                    return readBounded(response.getBody(), MAX_METADATA_RESPONSE_BYTES);
+                });
+    }
+
+    /** Parses every {@code <version>} text under {@code <metadata><versioning><versions>} — the
+     *  authoritative, always-up-to-date list of published versions for this groupId:artifactId
+     *  (unlike the Solr index this fallback exists to cover for — see {@link #versionExists}). */
+    private List<String> parseMetadataVersions(byte[] body) {
+        try {
+            DocumentBuilder builder = newHardenedDocumentBuilder();
+            Document doc = builder.parse(new ByteArrayInputStream(body));
+            NodeList versionNodes = doc.getElementsByTagName("version");
+            List<String> versions = new ArrayList<>();
+            for (int i = 0; i < versionNodes.getLength(); i++) {
+                String text = versionNodes.item(i).getTextContent();
+                if (text != null && !text.isBlank()) {
+                    versions.add(text.trim());
+                }
+            }
+            return versions;
+        } catch (Exception e) {
+            log.debug("maven-metadata.xml parse failed", e);
+            return List.of();
+        }
+    }
+
+    /** XXE-hardened {@link DocumentBuilder}, same settings {@code ChocolateyRegistryClient} uses
+     *  for its own XML feed (DOCTYPE declarations disallowed outright, external general/parameter
+     *  entity resolution disabled) — kept as a small private copy here rather than a shared helper,
+     *  since introducing a new shared registry-client base type for two call sites is out of scope
+     *  for this fix. A fresh instance is built per call since {@code DocumentBuilderFactory}/{@code
+     *  DocumentBuilder} are not documented as thread-safe, and this runs under a concurrent
+     *  item-processing executor. */
+    private DocumentBuilder newHardenedDocumentBuilder() throws ParserConfigurationException {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        factory.setXIncludeAware(false);
+        factory.setExpandEntityReferences(false);
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+        return factory.newDocumentBuilder();
+    }
+
+    /** Reads {@code in} fully into memory, failing fast if it would exceed {@code maxBytes} — same
+     *  defense-in-depth pattern {@code ChocolateyRegistryClient} uses for its own XML feed. */
+    private static byte[] readBounded(InputStream in, int maxBytes) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(8192);
+        byte[] buffer = new byte[8192];
+        int total = 0;
+        int read;
+        while ((read = in.read(buffer)) != -1) {
+            total += read;
+            if (total > maxBytes) {
+                throw new IOException("maven-metadata.xml response exceeded " + maxBytes + " byte cap");
+            }
+            out.write(buffer, 0, read);
+        }
+        return out.toByteArray();
     }
 
     @Override

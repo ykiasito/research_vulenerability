@@ -128,6 +128,11 @@ class MavenCentralRegistryClientTest {
                         artifactDoc("com.example", "some-tool", 5)), MediaType.APPLICATION_JSON));
         server.expect(method(HttpMethod.GET))
                 .andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        // Solr's gav core didn't confirm, so the maven-metadata.xml fallback is also consulted
+        // (see MavenCentralRegistryClient#versionExists) — here it doesn't have "9.9.9" either.
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("repo1.maven.org")))
+                .andRespond(withSuccess(mavenMetadataXml("1.0.0", "2.0.0"), MediaType.APPLICATION_XML));
 
         Optional<RegistryMatch> result = client.lookup("some-tool", "9.9.9");
 
@@ -135,6 +140,34 @@ class MavenCentralRegistryClientTest {
         assertThat(result.get().packageName()).isEqualTo("com.example:some-tool");
         assertThat(result.get().exactVersionConfirmed()).isFalse();
         assertThat(result.get().confidence()).isEqualByComparingTo("0.5");
+        server.verify();
+    }
+
+    @Test
+    void confirmsViaMavenMetadataXmlWhenSolrsIndexLagsBehindANewlyPublishedVersion() {
+        // Real case observed live (golden-300 job191, 2026-08-30): search.maven.org's Solr index
+        // lagged behind the authoritative maven-metadata.xml for a newly-published version (e.g.
+        // org.springframework:spring-core:7.1.0-M1), leaving a real version reported unconfirmed
+        // and confidence stuck at 0.5. The maven-metadata.xml fallback should independently confirm
+        // it, restoring confidence 0.95.
+        server.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(candidateSearchResponse(
+                        artifactDoc("org.springframework", "spring-core", 200)), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("search.maven.org")))
+                .andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.allOf(
+                        Matchers.containsString("repo1.maven.org"),
+                        Matchers.containsString("/maven2/org/springframework/spring-core/maven-metadata.xml"))))
+                .andRespond(withSuccess(mavenMetadataXml("7.0.5", "7.1.0-M1"), MediaType.APPLICATION_XML));
+
+        Optional<RegistryMatch> result = client.lookup("spring-core", "7.1.0-M1");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().packageName()).isEqualTo("org.springframework:spring-core");
+        assertThat(result.get().exactVersionConfirmed()).isTrue();
+        assertThat(result.get().confidence()).isEqualByComparingTo("0.95");
         server.verify();
     }
 
@@ -210,6 +243,11 @@ class MavenCentralRegistryClientTest {
     void fallsBackToAnUnconfirmedCoordinateMatchWhenTheGivenVersionDoesNotExist() {
         server.expect(method(HttpMethod.GET))
                 .andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        // Solr's gav core didn't confirm, so the maven-metadata.xml fallback is also consulted —
+        // here it doesn't have "999.999" either (a genuinely nonexistent version).
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("repo1.maven.org")))
+                .andRespond(withSuccess(mavenMetadataXml("31.1-jre", "32.0.0"), MediaType.APPLICATION_XML));
 
         Optional<RegistryMatch> result = client.lookup("com.google.guava:guava", "999.999");
 
@@ -233,5 +271,14 @@ class MavenCentralRegistryClientTest {
             return "{\"response\":{\"numFound\":0,\"start\":0,\"docs\":[]}}";
         }
         return "{\"response\":{\"numFound\":1,\"start\":0,\"docs\":[{\"g\":\"x\",\"a\":\"y\",\"v\":\"z\"}]}}";
+    }
+
+    private String mavenMetadataXml(String... versions) {
+        StringBuilder versionsXml = new StringBuilder();
+        for (String version : versions) {
+            versionsXml.append("<version>").append(version).append("</version>");
+        }
+        return "<metadata><groupId>x</groupId><artifactId>y</artifactId><versioning>"
+                + "<versions>" + versionsXml + "</versions></versioning></metadata>";
     }
 }
