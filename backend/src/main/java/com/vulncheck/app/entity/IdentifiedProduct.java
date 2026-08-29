@@ -70,4 +70,21 @@ public class IdentifiedProduct {
      *  {@link #verificationStatus} — {@code null} whenever that field is {@code null}. */
     @Column(name = "verification_note")
     private String verificationNote;
+
+    /** Measurement-only (see V30's migration comment and {@code Stage1IdentificationService}'s
+     *  {@code resolveCandidates}): size of the CPE candidate pool that {@link #cpe} was chosen
+     *  from — {@code null} whenever {@link #cpe} is {@code null}. Never shown in the UI or API
+     *  response; exists solely to let a future golden-300 re-measurement split accuracy by
+     *  "single candidate" vs. "chosen among several" for confidence-calibration analysis
+     *  (docs/spec/task-backlog.md item 16). Does not influence confidence calculation. */
+    @Column(name = "cpe_candidate_count")
+    private Integer cpeCandidateCount;
+
+    /** Measurement-only, same purpose as {@link #cpeCandidateCount}: whether the candidate pool
+     *  that {@link #cpe} was chosen from came from the name-variant search (a mechanically-derived
+     *  guess, e.g. "VM Player" -&gt; vlc_media_player) rather than a literal dictionary/live-NVD
+     *  match — {@code null} whenever {@link #cpe} is {@code null}. Never shown in the UI or API
+     *  response. Does not influence confidence calculation. */
+    @Column(name = "cpe_candidate_variant_derived")
+    private Boolean cpeCandidateVariantDerived;
 }
