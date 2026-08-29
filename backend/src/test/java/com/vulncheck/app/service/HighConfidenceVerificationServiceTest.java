@@ -287,6 +287,38 @@ class HighConfidenceVerificationServiceTest {
     }
 
     @Test
+    void incorrectVerdictWithBothAlternativesEmptyStringOmitsStrayColonFromNote() {
+        // Regression guard: the llm-service schema allows alternative_vendor/alternative_product to
+        // come back as "" rather than null (pydantic's str | None accepts an empty string as a valid
+        // str), so joinNonNull must treat blank the same as null -- otherwise the note would end up
+        // "reasoning（AIの推測: :）" instead of just the reasoning.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", "wrong vendor entirely", "", "", List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("wrong vendor entirely");
+    }
+
+    @Test
+    void incorrectVerdictWithOnlyAlternativeVendorEmptyStringOmitsLeadingColonFromNote() {
+        // Same schema quirk as above, but only alternativeVendor is blank ("") while
+        // alternativeProduct is a real value -- must not leave a leading ":" in the hint.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", "wrong vendor entirely", "", "acrobat_reader", List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("wrong vendor entirely（AIの推測: acrobat_reader）");
+    }
+
+    @Test
     void degradesToTrustingTheMatchWhenTheCallItselfFails() {
         IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), null);
         when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
