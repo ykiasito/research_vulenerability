@@ -230,6 +230,13 @@ public class HighConfidenceVerificationService {
             // REVISE item 1 (senior review 2026-08-29, PR #1): same independent-nullability
             // issue as describeIncorrectVerdict above applies to candidate.vendor()/product().
             String candidateLabel = joinNonNull(candidate.vendor(), candidate.product());
+            // Both vendor and product are pydantic-required (non-null) on the wire, but "" is a
+            // distinct, allowed value from null -- if both come back "", candidateLabel is "" too
+            // and there's nothing meaningful to append. Skip the whole candidate (including the
+            // " / " separator) rather than leaving a content-free " / " in verification_note.
+            if (candidateLabel.isEmpty()) {
+                continue;
+            }
             sb.append(" / ").append(candidateLabel);
             if (candidate.note() != null && !candidate.note().isBlank()) {
                 sb.append(" (").append(candidate.note()).append(')');

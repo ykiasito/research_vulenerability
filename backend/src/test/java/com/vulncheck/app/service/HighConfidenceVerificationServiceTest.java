@@ -200,6 +200,27 @@ class HighConfidenceVerificationServiceTest {
     }
 
     @Test
+    void ambiguousVerdictWithCandidateHavingBothVendorAndProductBlankOmitsStrayCandidateFromNote() {
+        // Regression guard: AmbiguousCandidateDto.vendor()/product() are pydantic-required
+        // (non-null) on the wire, but "" is a distinct, allowed value from null -- if a candidate
+        // comes back with both blank, joinNonNull produces "" and the note must not end up with a
+        // content-free " / " for that candidate.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "could be windows or mac build", null, null,
+                        List.of(new AmbiguousCandidateDto("", "", "unusable candidate"),
+                                new AmbiguousCandidateDto("zoom", "zoom_client_for_mac", "Mac版")),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote())
+                .isEqualTo("could be windows or mac build / zoom:zoom_client_for_mac (Mac版)");
+    }
+
+    @Test
     void incorrectVerdictWithRegistryFallbackDropsCpeAndDowngradesConfidence() {
         IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
         when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
