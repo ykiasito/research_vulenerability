@@ -220,6 +220,10 @@ class Stage1IdentificationServiceTest {
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:lodash:lodash:1.0.0:*:*:*:*:*:*:*");
         verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
         verify(userApiKeyService, never()).getClaudeApiKey(any());
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): a lone, literal dictionary
+        // match — exactly the "single candidate" path resolveCandidates records.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -439,6 +443,11 @@ class Stage1IdentificationServiceTest {
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:redislabs:redis:1.0.0:*:*:*:*:*:*:*");
         assertThat(result.get().getEcosystem()).isNull();
         assertThat(result.get().getPackageName()).isNull();
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): the rescue path's own
+        // candidate pool (a fresh live lookup after the registry match was AI-rejected), not the
+        // original (empty) cpeCandidates from before the rescue.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -700,6 +709,10 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:apache_http_server:1.0.0:*:*:*:*:*:*:*");
         verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): no-arbitration path —
+        // multiple candidates, but no AI call at all, so the first is picked without judging between them.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -720,6 +733,10 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:apache_http_server:1.0.0:*:*:*:*:*:*:*");
         verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): same no-arbitration
+        // fallback as the no-API-key case above, just reached via an exhausted job budget instead.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -739,6 +756,10 @@ class Stage1IdentificationServiceTest {
         assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:apache_tomcat:1.0.0:*:*:*:*:*:*:*");
         assertThat(result.get().getConfidence()).isEqualByComparingTo("0.9");
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): the arbitrated path —
+        // an LLM call actually chose among the candidates, but the pool size is still 2.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -1457,6 +1478,32 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void aLoneNameVariantDerivedCpeCandidateIsAcceptedWithProvenanceWhenAiConfirmsIt() {
+        // Same setup as aLoneNameVariantDerivedCpeCandidateIsDroppedRatherThanAutoAcceptedWithNoApiKey
+        // above, but with a Claude key configured and the AI confirming the match — the other side of
+        // resolveSingleCpeCandidate's fork (senior review, 2026-08-25) that the existing provenance
+        // tests never exercise: cpeCandidateVariantDerived=true wired through to the saved
+        // IdentifiedProduct, not just the isFalse() literal-match cases.
+        CpeDictionaryEntry vlcMediaPlayer =
+                cpeEntry("cpe:2.3:a:videolan:vlc_media_player:3.0.0:*:*:*:*:*:*:*", "vlc_media_player");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
+                .thenReturn(List.of(vlcMediaPlayer));
+        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches VLC Media Player", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
     void acronymContractionNeverMatchesAnUnrelatedShortSlugForAnimalSnifferAnnotations() {
         // Measured false positive (senior review, 2026-08-25): the acronym/contraction direction
         // routed through plausibleContainmentOnly's unanchored substring check, which is unsafe for
@@ -1911,6 +1958,155 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("maven");
         assertThat(result.get().getCpe()).isNull();
+    }
+
+    @Test
+    void rejectsAPlatformScopedCpeUnderAChocolateyMatchEvenThoughItsEcosystemHasNoTargetSwMapping() {
+        // Backlog item 15, P1 (senior review 2026-08-30): chocolatey has no ECOSYSTEM_TO_TARGET_SW
+        // mapping, same as hex/maven — but unlike those two (component registries where the
+        // default-allow is defensible), chocolatey is a standalone-desktop-application catalog, so
+        // STANDALONE_APPLICATION_ECOSYSTEMS must make passesTargetSwGate hard-reject here instead of
+        // defaulting to true. Mirrors job191's real Slack false-positive: a sole Chocolatey match
+        // whose only corroborating CPE is actually NVD's "Slack app for WordPress" plugin entry
+        // (target_sw=wordpress), not the Slack desktop app itself.
+        PackageRegistryLookup chocolateyLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("chocolatey", "slack", "pkg:chocolatey/slack@4.36.134",
+                        new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "chocolatey";
+            }
+        };
+        CpeDictionaryEntry wordpressSlack = cpeEntry("cpe:2.3:a:slack:slack:1.0:*:*:*:*:wordpress:*:*", "slack");
+        wordpressSlack.setTitle("Slack App for WordPress 1.0");
+        wordpressSlack.setTargetSwValues(java.util.Set.of("wordpress"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(wordpressSlack));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Slack");
+        item.setVendor("Slack Technologies");
+
+        Optional<IdentifiedProduct> result = service(List.of(chocolateyLookup)).identify(item, USER_ID);
+
+        // The wordpress-scoped CPE is rejected by the gate, and the sole Chocolatey match (already
+        // untrusted as IDENTIFIED on its own — see the golden-300 item 1 fix) has no corroborating
+        // CPE left, so this must end up completely UNIDENTIFIED, matching the pre-existing
+        // "reject a wrong CPE" outcome shape (rejectsAPlatformScopedCpeWhenTheItemHasNoRegistryMatchAtAll)
+        // rather than silently persisting the wrong candidate at 0.95 confidence.
+        assertThat(result).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void stillAcceptsAChocolateyMatchWhoseCpeTargetSwIsWildcardOrWindows() {
+        // Non-regression control for the fix above: golden-300's 18 correct Chocolatey matches are
+        // all target_sw=* (senior review, measured live) — the wildcard/non-scoping short-circuit
+        // in passesTargetSwGate fires before STANDALONE_APPLICATION_ECOSYSTEMS is ever consulted, so
+        // this case must keep resolving to IDENTIFIED at 0.95 exactly as before this fix.
+        PackageRegistryLookup chocolateyLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("chocolatey", "handbrake", "pkg:chocolatey/handbrake@1.9.9",
+                        new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "chocolatey";
+            }
+        };
+        CpeDictionaryEntry handbrake = cpeEntry("cpe:2.3:a:handbrake:handbrake:1.9.9:*:*:*:*:*:*:*", "handbrake");
+        handbrake.setTargetSwValues(java.util.Set.of("*", "windows"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(handbrake));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("HandBrake");
+        item.setVendor("HandBrake Team");
+
+        Optional<IdentifiedProduct> result = service(List.of(chocolateyLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("chocolatey");
+        assertThat(result.get().getCpe()).isNotNull();
+        assertThat(result.get().getConfidence()).isEqualByComparingTo("0.95");
+    }
+
+    @Test
+    void hexAndMavenStillDefaultAllowAnArbitraryScopingTargetSwValue() {
+        // Non-regression control: STANDALONE_APPLICATION_ECOSYSTEMS is deliberately narrow to
+        // chocolatey only — hex/maven's own orElse(true)-shaped default-allow (see
+        // ECOSYSTEM_TO_TARGET_SW's javadoc) for an arbitrary non-wildcard, non-jenkins target_sw
+        // value must be completely unaffected by this fix.
+        PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch(
+                        "maven", "somelib", "pkg:maven/some/somelib@1.0.0", new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "maven";
+            }
+        };
+        CpeDictionaryEntry scopedSomelib = cpeEntry("cpe:2.3:a:somevendor:somelib:1.0.0:*:*:*:*:python:*:*", "somelib");
+        scopedSomelib.setTargetSwValues(java.util.Set.of("python"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(scopedSomelib));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of(mavenLookup)).identify(item("somelib"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("maven");
+        assertThat(result.get().getCpe()).isNotNull();
+    }
+
+    @Test
+    void versionCoverageTieBreakPrefersACandidateWhoseCatalogedVersionsCoverTheItemsVersion() {
+        // Backlog item 15, P2 (senior review 2026-08-30): two same-slug candidates tie on
+        // exactProductSlugMatch/targetSwMatchesEcosystem (no registry match, no ecosystem to gate
+        // on), and item vendor is blank here so vendorAgrees can't discriminate either — the
+        // version-coverage tie-break must be what decides it. Mirrors the real Audacity false
+        // positive this was built for: audacity:audacity is only catalogued up to old 2.x releases,
+        // while audacityteam:audacity is genuinely catalogued at the item's own 3.7.x version.
+        CpeDictionaryEntry oldAudacity = cpeEntry("cpe:2.3:a:audacity:audacity:2.4.2:*:*:*:*:*:*:*", "audacity");
+        oldAudacity.setMaxCatalogedMajor(2);
+        CpeDictionaryEntry realAudacity = cpeEntry("cpe:2.3:a:audacityteam:audacity:3.7.0:*:*:*:*:*:*:*", "audacity");
+        realAudacity.setMaxCatalogedMajor(3);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oldAudacity, realAudacity));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Audacity");
+        item.setVersion("3.7.0");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:audacityteam:audacity:3.7.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void versionCoverageTieBreakDoesNotHardRejectWhenNoCatalogedVersionsExist() {
+        // Non-regression control: absence of evidence (null maxCatalogedMajor, the common
+        // case for a candidate not sourced from findFuzzyMatches) must never turn into a rejection —
+        // this candidate would otherwise have no other tie-break signal to fall back on.
+        CpeDictionaryEntry candidate = cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(candidate));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("widget-tool"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isNotNull();
     }
 
     @Test

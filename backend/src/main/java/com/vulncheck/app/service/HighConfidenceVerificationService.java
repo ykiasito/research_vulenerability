@@ -199,25 +199,58 @@ public class HighConfidenceVerificationService {
         return Optional.of(identifiedProductRepository.save(product));
     }
 
+    // REVISE (senior review 2026-08-30, PR #8): describeAmbiguousCandidates below already
+    // truncates before returning, but this method -- which writes the same identified_products
+    // .verification_note TEXT column for the INCORRECT outcome -- did not. reasoning() is
+    // model-controlled free text with no schema-side maxLength (fixed in llm-service/main.py's
+    // VERIFY_HIGH_CONFIDENCE_SCHEMA alongside this), so this needs the same defense-in-depth cap.
     private String describeIncorrectVerdict(VerifyHighConfidenceResponse verdict) {
         // REVISE item 3 (senior review 2026-08-29, round 1): verdict.reasoning() is an ordinary
         // nullable field on the wire, same as ambiguousCandidates below -- normalize null to "" here
         // rather than either NPE'ing (StringBuilder constructor) or writing the literal string
-        // "null（AIの推測: ...）" into verification_note.
-        String reasoning = verdict.reasoning() == null ? "" : verdict.reasoning();
+        // "null（AIの推測: ...）" into verification_note. A blank-but-non-null reasoning (the
+        // pydantic schema allows "" explicitly) is normalized the same way, since it carries no
+        // more meaning than null does here.
+        //
+        // REVISE (senior review PR #13): stripped here too, matching describeAmbiguousCandidates
+        // below -- a reasoning value with trailing/leading whitespace (e.g. "wrong vendor entirely ")
+        // otherwise survives into the concatenated note as "wrong vendor entirely （AIの推測: ...）",
+        // with a stray space before the parenthesis.
+        String reasoning = verdict.reasoning() == null ? "" : verdict.reasoning().strip();
         // REVISE item 1 (senior review 2026-08-29, PR #1): alternativeVendor and
         // alternativeProduct are independently nullable -- concatenating either one directly would
         // write the literal string "null" into verification_note (e.g. "null:acrobat_reader") when
         // only one of the two is present. Join only the non-null parts instead.
         String hint = joinNonNull(verdict.alternativeVendor(), verdict.alternativeProduct());
-        if (hint.isEmpty()) {
-            return reasoning;
-        }
-        return reasoning + "（AIの推測: " + hint + "）";
+        String note = hint.isEmpty() ? reasoning : reasoning + "（AIの推測: " + hint + "）";
+        return truncate(note, VERIFICATION_NOTE_MAX_LENGTH);
     }
 
+    // Backlog item 9 (senior review 2026-08-29, PR #5): identified_products.verification_note is a
+    // TEXT column with no DB-side length limit, and the llm-service response schema caps
+    // ambiguous_candidates at maxItems=5 / maxLength=100 per string field, and (as of PR #8's REVISE
+    // fix) reasoning/alternative_vendor/alternative_product at maxLength=500/100/100 (see
+    // VERIFY_HIGH_CONFIDENCE_SCHEMA in llm-service/main.py) -- but that schema constraint only binds
+    // the model, not this class's own concatenation. This is the second, defense-in-depth half of
+    // the fix, applied by both describeAmbiguousCandidates and describeIncorrectVerdict below:
+    // truncate the assembled note so a model response that doesn't honor the schema (or a future
+    // change to it) can't still write an unbounded string into this column.
+    private static final int VERIFICATION_NOTE_MAX_LENGTH = 2000;
+
     private String describeAmbiguousCandidates(VerifyHighConfidenceResponse verdict) {
-        StringBuilder sb = new StringBuilder(verdict.reasoning() == null ? "" : verdict.reasoning());
+        // Same null-or-blank normalization as describeIncorrectVerdict: reasoning is allowed to be
+        // "" on the wire (pydantic requires non-null, not non-blank), and initializing the
+        // StringBuilder with it must not leave a phantom non-empty prefix that would then cause the
+        // first candidate's " / " separator below to be appended unconditionally.
+        //
+        // Backlog item 11(a) (senior review 2026-08-29, PR #5 4th review): isBlank() alone doesn't
+        // catch a string like "abc " (trailing whitespace, correctly non-blank) -- left un-stripped,
+        // that trailing space survives into sb, and the unconditional " / " appended below then
+        // produces a visibly doubled space ("abc  / candidate"). Stripping before the blank check
+        // (and using the stripped value everywhere after) removes the stray whitespace at the source
+        // instead of only reclassifying it.
+        String reasoning = verdict.reasoning() == null ? "" : verdict.reasoning().strip();
+        StringBuilder sb = new StringBuilder(reasoning);
         // REVISE item 6 (senior review 2026-08-29, round 1): the llm-service response schema
         // doesn't guarantee ambiguousCandidates is present for an "ambiguous" outcome (it's an
         // ordinary nullable JSON field, not enforced non-null by anything on the wire) — an enhanced
@@ -237,23 +270,55 @@ public class HighConfidenceVerificationService {
             if (candidateLabel.isEmpty()) {
                 continue;
             }
-            sb.append(" / ").append(candidateLabel);
-            if (candidate.note() != null && !candidate.note().isBlank()) {
-                sb.append(" (").append(candidate.note()).append(')');
+            // This is the fix for the bug that survived the previous two REVISE rounds: the " / "
+            // separator must only be appended once sb already holds something (either a non-blank
+            // reasoning or an earlier candidate) -- appending it unconditionally left a stray
+            // leading " / " whenever reasoning was "" and this was the first (or only) candidate,
+            // e.g. " / zoom:zoom_client_for_mac (Mac版)" instead of "zoom:zoom_client_for_mac (Mac版)".
+            if (sb.length() > 0) {
+                sb.append(" / ");
+            }
+            sb.append(candidateLabel);
+            // Same trailing/leading-whitespace fix as reasoning above, applied to the per-candidate
+            // note (e.g. a note of " Mac版 " would otherwise render as " ( Mac版 )" with stray spaces
+            // just inside the parentheses).
+            String note = candidate.note() == null ? null : candidate.note().strip();
+            if (note != null && !note.isEmpty()) {
+                sb.append(" (").append(note).append(')');
             }
         }
-        return sb.toString();
+        return truncate(sb.toString(), VERIFICATION_NOTE_MAX_LENGTH);
+    }
+
+    /** Truncates {@code value} to at most {@code maxLength} characters, defensively, without
+     *  splitting a UTF-16 surrogate pair (same approach as {@code LlmServiceClient#truncate}). */
+    private static String truncate(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) {
+            return value;
+        }
+        int cutIndex = maxLength;
+        if (Character.isLowSurrogate(value.charAt(cutIndex))) {
+            cutIndex--;
+        }
+        return value.substring(0, cutIndex);
     }
 
     /** Joins two independently-nullable strings with {@code ":"}, omitting whichever side is null
      *  or blank rather than rendering it as the literal text {@code "null"} or leaving a stray
-     *  {@code ":"} when the llm-service sends {@code ""} instead of {@code null}. */
+     *  {@code ":"} when the llm-service sends {@code ""} instead of {@code null}.
+     *
+     * <p>Backlog item 11(a) (senior review 2026-08-29, PR #5 4th review): both sides are stripped
+     * before the blank check and the join itself, so a value like {@code "acme "} (trailing
+     * whitespace, correctly non-blank) doesn't leave a stray space next to the {@code ":"}
+     * separator (e.g. {@code "acme :widget"}). */
     private static String joinNonNull(String first, String second) {
-        boolean hasFirst = first != null && !first.isBlank();
-        boolean hasSecond = second != null && !second.isBlank();
+        String trimmedFirst = first == null ? null : first.strip();
+        String trimmedSecond = second == null ? null : second.strip();
+        boolean hasFirst = trimmedFirst != null && !trimmedFirst.isEmpty();
+        boolean hasSecond = trimmedSecond != null && !trimmedSecond.isEmpty();
         if (!hasFirst) {
-            return hasSecond ? second : "";
+            return hasSecond ? trimmedSecond : "";
         }
-        return hasSecond ? first + ":" + second : first;
+        return hasSecond ? trimmedFirst + ":" + trimmedSecond : trimmedFirst;
     }
 }

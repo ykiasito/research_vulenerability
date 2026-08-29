@@ -221,6 +221,81 @@ class HighConfidenceVerificationServiceTest {
     }
 
     @Test
+    void ambiguousVerdictWithBlankReasoningAndSingleCandidateOmitsLeadingSeparatorFromNote() {
+        // Regression guard for the bug that survived the previous two REVISE rounds: verdict.reasoning()
+        // being "" (allowed on the wire, pydantic requires non-null but not non-blank) used to seed the
+        // StringBuilder with an empty-but-non-null value, and the first candidate's " / " separator was
+        // then appended unconditionally -- producing a note like " / zoom:zoom_client_for_mac (Mac版)"
+        // with a stray leading separator instead of starting directly with the candidate.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto("zoom", "zoom_client_for_mac", "Mac版")),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("zoom:zoom_client_for_mac (Mac版)");
+    }
+
+    @Test
+    void ambiguousVerdictWithTrailingWhitespaceInReasoningDoesNotDoubleUpTheSeparator() {
+        // Backlog item 11(a) (senior review 2026-08-29, PR #5 4th review): "could be windows or mac
+        // build " (trailing space) is correctly non-blank per isBlank(), so it used to survive
+        // un-stripped into the StringBuilder -- the unconditional " / " appended for the first
+        // candidate then produced a visibly doubled space ("...build  / zoom:...").
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "could be windows or mac build ", null, null,
+                        List.of(new AmbiguousCandidateDto("zoom", "zoom_client_for_mac", "Mac版")),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote())
+                .isEqualTo("could be windows or mac build / zoom:zoom_client_for_mac (Mac版)");
+    }
+
+    @Test
+    void ambiguousVerdictWithWhitespacePaddedCandidateVendorAndProductOmitsStraySpacesAroundColon() {
+        // Same fix, applied to joinNonNull: a vendor/product with leading or trailing whitespace
+        // (e.g. "zoom " or " zoom_client_for_mac") used to leave a stray space next to the ":"
+        // separator (e.g. "zoom : zoom_client_for_mac") instead of a clean join.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto("zoom ", " zoom_client_for_mac", null)),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("zoom:zoom_client_for_mac");
+    }
+
+    @Test
+    void ambiguousVerdictWithWhitespacePaddedCandidateNoteOmitsStraySpacesInsideParentheses() {
+        // Same fix, applied to the per-candidate note field: a note of " Mac版 " (leading/trailing
+        // whitespace) used to render as " ( Mac版 )" with stray spaces just inside the parentheses.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto("zoom", "zoom_client_for_mac", " Mac版 ")),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("zoom:zoom_client_for_mac (Mac版)");
+    }
+
+    @Test
     void incorrectVerdictWithRegistryFallbackDropsCpeAndDowngradesConfidence() {
         IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
         when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
@@ -337,6 +412,89 @@ class HighConfidenceVerificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getVerificationNote()).isEqualTo("wrong vendor entirely（AIの推測: acrobat_reader）");
+    }
+
+    @Test
+    void incorrectVerdictWithTrailingWhitespaceInReasoningStripsBeforeAppendingHint() {
+        // REVISE (senior review PR #13): reasoning with trailing whitespace must not leave a stray
+        // space before the "（AIの推測: ...）" suffix -- matches the strip() already applied in
+        // describeAmbiguousCandidates.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", "wrong vendor entirely ", null, "acrobat_reader", List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("wrong vendor entirely（AIの推測: acrobat_reader）");
+    }
+
+    // --- Backlog item 9 (senior review 2026-08-29, PR #5; extended to INCORRECT, senior review ----
+    // --- 2026-08-30, PR #8 REVISE): verification_note length guard --------------------------------
+
+    @Test
+    void ambiguousVerdictNoteIsTruncatedTo2000CharsWhenAssembledContentIsOversized() {
+        // Defense-in-depth guard: even though llm-service's schema now caps ambiguous_candidates at
+        // maxItems=5/maxLength=100 per string field, this truncation must independently hold for a
+        // single oversized candidate (e.g. a model response that doesn't honor the schema), not rely
+        // on the schema alone.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        String oversizedVendor = "x".repeat(3000);
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto(oversizedVendor, "", null)),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).hasSize(2000);
+        assertThat(result.get().getVerificationNote()).isEqualTo("x".repeat(2000));
+    }
+
+    @Test
+    void ambiguousVerdictNoteTruncationNeverSplitsASurrogatePair() {
+        // Same surrogate-pair-safety guard as LlmServiceClient#truncate, applied to this class's own
+        // truncate() helper: 1,999 plain chars followed by a surrogate-pair emoji straddling the
+        // 2,000-char cut point must drop the whole (now-incomplete) pair, not just its high surrogate.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        String emoji = "😀"; // U+1F600 GRINNING FACE, a surrogate pair
+        // Assembled note = "a" (candidateLabel) + " (" + note + ")" -- "a (" is 3 chars, so the note
+        // itself needs 1996 plain chars before the emoji to land the high surrogate at absolute
+        // index 1999 and the low surrogate at absolute index 2000.
+        String note = "b".repeat(1996) + emoji + "trailing text past the limit";
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto("a", "", note)),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("a (" + "b".repeat(1996));
+    }
+
+    @Test
+    void incorrectVerdictNoteIsTruncatedTo2000CharsWhenReasoningIsOversized() {
+        // REVISE (senior review 2026-08-30, PR #8): describeAmbiguousCandidates already truncated
+        // its assembled note, but describeIncorrectVerdict -- which writes the same
+        // identified_products.verification_note TEXT column for the INCORRECT outcome -- did not.
+        // This mirrors ambiguousVerdictNoteIsTruncatedTo2000CharsWhenAssembledContentIsOversized
+        // above for that other outcome.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        String oversizedReasoning = "x".repeat(3000);
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", oversizedReasoning, null, null, List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).hasSize(2000);
+        assertThat(result.get().getVerificationNote()).isEqualTo("x".repeat(2000));
     }
 
     @Test
