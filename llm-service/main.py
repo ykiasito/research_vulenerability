@@ -516,9 +516,17 @@ VERIFY_HIGH_CONFIDENCE_SCHEMA = {
                 "given answer is wrong, just that it cannot be confirmed as the specific one meant."
             ),
         },
-        "reasoning": {"type": "string"},
+        # REVISE (senior review 2026-08-30, PR #8): reasoning/alternative_vendor/alternative_product
+        # previously had no maxLength at all -- unlike ambiguous_candidates below, the only bound on
+        # identified_products.verification_note built from these fields (see
+        # HighConfidenceVerificationService#describeIncorrectVerdict) was the model's own max_tokens.
+        # 500/100/100 mirror the existing ambiguous_candidates per-field caps (100 for a
+        # vendor/product name, with reasoning given a larger allowance since it's free-text
+        # explanation, not a short name).
+        "reasoning": {"type": "string", "maxLength": 500},
         "alternative_vendor": {
             "type": ["string", "null"],
+            "maxLength": 100,
             "description": (
                 "Only when outcome='incorrect' and you have a specific, confident guess at the "
                 "real vendor. Null otherwise -- this is informational only, never treated as a "
@@ -527,20 +535,31 @@ VERIFY_HIGH_CONFIDENCE_SCHEMA = {
         },
         "alternative_product": {
             "type": ["string", "null"],
+            "maxLength": 100,
             "description": "Only when outcome='incorrect' and you have a specific, confident guess at the real product. Null otherwise.",
         },
         "ambiguous_candidates": {
             "type": "array",
             "description": (
                 "Only when outcome='ambiguous': the plausible real variants, each with a short "
-                "distinguishing note (e.g. 'Windows版', 'Mac版', '無料版'). Empty array otherwise."
+                "distinguishing note (e.g. 'Windows版', 'Mac版', '無料版'). Empty array otherwise. "
+                "At most 5 -- pick the most plausible variants if there are genuinely more."
             ),
+            # Backlog item 9 (senior review 2026-08-29, PR #5): identified_products.verification_note
+            # (a TEXT column with no DB-side length limit) is built entirely from this field's
+            # contents -- see HighConfidenceVerificationService#describeAmbiguousCandidates. Before
+            # this, the model's own max_tokens was the only thing bounding it. No runaway response has
+            # actually been observed; this is a defensive cap given the project's 10GB DB size cap,
+            # not a fix for an incident. maxItems/maxLength here are the cheap, model-enforced half of
+            # the fix -- the Java side also truncates the assembled note as a second line of defense
+            # in case a model response ever doesn't honor this schema.
+            "maxItems": 5,
             "items": {
                 "type": "object",
                 "properties": {
-                    "vendor": {"type": "string"},
-                    "product": {"type": "string"},
-                    "note": {"type": ["string", "null"]},
+                    "vendor": {"type": "string", "maxLength": 100},
+                    "product": {"type": "string", "maxLength": 100},
+                    "note": {"type": ["string", "null"], "maxLength": 100},
                 },
                 "required": ["vendor", "product", "note"],
                 "additionalProperties": False,

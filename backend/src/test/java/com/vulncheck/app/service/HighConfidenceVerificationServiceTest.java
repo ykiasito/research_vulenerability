@@ -359,6 +359,73 @@ class HighConfidenceVerificationServiceTest {
         assertThat(result.get().getVerificationNote()).isEqualTo("wrong vendor entirely（AIの推測: acrobat_reader）");
     }
 
+    // --- Backlog item 9 (senior review 2026-08-29, PR #5; extended to INCORRECT, senior review ----
+    // --- 2026-08-30, PR #8 REVISE): verification_note length guard --------------------------------
+
+    @Test
+    void ambiguousVerdictNoteIsTruncatedTo2000CharsWhenAssembledContentIsOversized() {
+        // Defense-in-depth guard: even though llm-service's schema now caps ambiguous_candidates at
+        // maxItems=5/maxLength=100 per string field, this truncation must independently hold for a
+        // single oversized candidate (e.g. a model response that doesn't honor the schema), not rely
+        // on the schema alone.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        String oversizedVendor = "x".repeat(3000);
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto(oversizedVendor, "", null)),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).hasSize(2000);
+        assertThat(result.get().getVerificationNote()).isEqualTo("x".repeat(2000));
+    }
+
+    @Test
+    void ambiguousVerdictNoteTruncationNeverSplitsASurrogatePair() {
+        // Same surrogate-pair-safety guard as LlmServiceClient#truncate, applied to this class's own
+        // truncate() helper: 1,999 plain chars followed by a surrogate-pair emoji straddling the
+        // 2,000-char cut point must drop the whole (now-incomplete) pair, not just its high surrogate.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        String emoji = "😀"; // U+1F600 GRINNING FACE, a surrogate pair
+        // Assembled note = "a" (candidateLabel) + " (" + note + ")" -- "a (" is 3 chars, so the note
+        // itself needs 1996 plain chars before the emoji to land the high surrogate at absolute
+        // index 1999 and the low surrogate at absolute index 2000.
+        String note = "b".repeat(1996) + emoji + "trailing text past the limit";
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto("a", "", note)),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("a (" + "b".repeat(1996));
+    }
+
+    @Test
+    void incorrectVerdictNoteIsTruncatedTo2000CharsWhenReasoningIsOversized() {
+        // REVISE (senior review 2026-08-30, PR #8): describeAmbiguousCandidates already truncated
+        // its assembled note, but describeIncorrectVerdict -- which writes the same
+        // identified_products.verification_note TEXT column for the INCORRECT outcome -- did not.
+        // This mirrors ambiguousVerdictNoteIsTruncatedTo2000CharsWhenAssembledContentIsOversized
+        // above for that other outcome.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        String oversizedReasoning = "x".repeat(3000);
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", oversizedReasoning, null, null, List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).hasSize(2000);
+        assertThat(result.get().getVerificationNote()).isEqualTo("x".repeat(2000));
+    }
+
     @Test
     void degradesToTrustingTheMatchWhenTheCallItselfFails() {
         IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), null);
