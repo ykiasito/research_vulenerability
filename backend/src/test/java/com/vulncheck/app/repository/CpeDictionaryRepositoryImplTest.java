@@ -146,4 +146,71 @@ class CpeDictionaryRepositoryImplTest {
         // matched this call's own trigram filter (row1 only), not the whole partition.
         assertThat(entry.getTargetSwValues()).isEqualTo(Set.of("windows"));
     }
+
+    /**
+     * Regression test for a PR #14 REVISE finding: {@code max_cataloged_major} cast its aggregate
+     * to {@code ::integer} <em>outside</em> {@code max()}, so {@code max()} itself compared version
+     * strings lexicographically rather than numerically. A fixture only spanning single-digit major
+     * versions (e.g. "1.0"/"2.0") cannot detect that bug, because lexicographic and numeric order
+     * agree for same-length digit strings — this fixture deliberately crosses the 9/10 digit-count
+     * boundary, where {@code '9' > '10'} as strings but {@code 9 < 10} as integers, so a
+     * regression back to comparing strings would make this test fail with {@code 9} instead of the
+     * correct {@code 10}.
+     *
+     * <p>Both rows share one (vendor, product) pair but the query text ("zzzrevise14digitproduct")
+     * happens to score differently against their two distinct titles ("... Nine" vs "... Ten"), so
+     * the product-column and title-column {@code collect()} calls can each independently pick either
+     * physical row as that pair's {@code DISTINCT ON} representative — both are asserted on here
+     * rather than assuming a specific count, since {@code max_cataloged_major} must come out
+     * correct (10) for the pair regardless of which single row a given {@code collect()} call
+     * happened to keep.
+     */
+    @Test
+    void maxCatalogedMajorComparesVersionsNumericallyNotLexicographically() {
+        insert(
+                "cpe:2.3:a:zzzrevise14digitvendor:zzzrevise14digitproduct:9.0:*:*:*:*:*:*:*",
+                "Zzzrevise14digitproduct Nine",
+                "zzzrevise14digitvendor",
+                "zzzrevise14digitproduct");
+        insert(
+                "cpe:2.3:a:zzzrevise14digitvendor:zzzrevise14digitproduct:10.0:*:*:*:*:*:*:*",
+                "Zzzrevise14digitproduct Ten",
+                "zzzrevise14digitvendor",
+                "zzzrevise14digitproduct");
+
+        List<CpeDictionaryEntry> results = cpeDictionaryRepository.findFuzzyMatches(
+                "zzzrevise14digitproduct", 0.3, 0.3, 10);
+
+        assertThat(results).isNotEmpty();
+        // Lexicographic max() would incorrectly return 9 here, since "9" > "10" as strings.
+        assertThat(results).allMatch(e -> Integer.valueOf(10).equals(e.getMaxCatalogedMajor()));
+    }
+
+    /**
+     * Regression test for a PR #14 REVISE finding: the outer {@code collect()} query had no
+     * {@code ORDER BY}, so the score ordering the inner subquery already computed was not
+     * guaranteed to survive the {@code CROSS JOIN LATERAL} into the final result set. Two products
+     * here score differently against the query (one an exact product match, the other only a
+     * partial/fuzzy one), so a correct implementation must return the exact match first regardless
+     * of how the LATERAL join happens to order its output internally.
+     */
+    @Test
+    void findFuzzyMatchesReturnsResultsSortedByScoreDescending() {
+        insert(
+                "cpe:2.3:a:zzzrevise14ordervendor:zzzrevise14orderproductexact:1.0:*:*:*:*:*:*:*",
+                "Zzzrevise14orderproductexact",
+                "zzzrevise14ordervendor",
+                "zzzrevise14orderproductexact");
+        insert(
+                "cpe:2.3:a:zzzrevise14ordervendor:zzzrevise14orderproductfuzzyish:1.0:*:*:*:*:*:*:*",
+                "Zzzrevise14orderproductfuzzyish",
+                "zzzrevise14ordervendor",
+                "zzzrevise14orderproductfuzzyish");
+
+        List<CpeDictionaryEntry> results = cpeDictionaryRepository.findFuzzyMatches(
+                "zzzrevise14orderproductexact", 0.3, 0.3, 10);
+
+        assertThat(results).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(results.get(0).getProduct()).isEqualTo("zzzrevise14orderproductexact");
+    }
 }
