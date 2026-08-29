@@ -359,7 +359,8 @@ class HighConfidenceVerificationServiceTest {
         assertThat(result.get().getVerificationNote()).isEqualTo("wrong vendor entirely（AIの推測: acrobat_reader）");
     }
 
-    // --- Backlog item 9 (senior review 2026-08-29, PR #5): verification_note length guard ---------
+    // --- Backlog item 9 (senior review 2026-08-29, PR #5; extended to INCORRECT, senior review ----
+    // --- 2026-08-30, PR #8 REVISE): verification_note length guard --------------------------------
 
     @Test
     void ambiguousVerdictNoteIsTruncatedTo2000CharsWhenAssembledContentIsOversized() {
@@ -403,6 +404,26 @@ class HighConfidenceVerificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getVerificationNote()).isEqualTo("a (" + "b".repeat(1996));
+    }
+
+    @Test
+    void incorrectVerdictNoteIsTruncatedTo2000CharsWhenReasoningIsOversized() {
+        // REVISE (senior review 2026-08-30, PR #8): describeAmbiguousCandidates already truncated
+        // its assembled note, but describeIncorrectVerdict -- which writes the same
+        // identified_products.verification_note TEXT column for the INCORRECT outcome -- did not.
+        // This mirrors ambiguousVerdictNoteIsTruncatedTo2000CharsWhenAssembledContentIsOversized
+        // above for that other outcome.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        String oversizedReasoning = "x".repeat(3000);
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", oversizedReasoning, null, null, List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).hasSize(2000);
+        assertThat(result.get().getVerificationNote()).isEqualTo("x".repeat(2000));
     }
 
     @Test
