@@ -36,6 +36,21 @@ services:
       # One-shot: mirrors the full NVD CPE Dictionary on boot (hours). Leave false; flip to true
       # once per environment, then set it back. See CpeDictionaryBootstrapSync.
       CPE_FULL_SYNC_ON_STARTUP: ${CPE_FULL_SYNC_ON_STARTUP:-false}
+      # Off by default (see HighConfidenceVerificationService) — only flip to true for a deliberate,
+      # budget-monitored diagnostic run, then set back to false.
+      HIGH_CONFIDENCE_VERIFICATION_ENABLED: ${HIGH_CONFIDENCE_VERIFICATION_ENABLED:-false}
+      HIGH_CONFIDENCE_VERIFICATION_THRESHOLD: ${HIGH_CONFIDENCE_VERIFICATION_THRESHOLD:-0.95}
+      HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR: ${HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR:-0.5}
+      HIGH_CONFIDENCE_VERIFICATION_DEMOTION_FLOOR: ${HIGH_CONFIDENCE_VERIFICATION_DEMOTION_FLOOR:-0.5}
+      # This feature's OWN per-item cost cap (separate ledger, see
+      # JobCostBudgetService#verificationCostCapPerItemUsd) — defaults to 0 so enabling the feature
+      # above never silently exhausts APP_COST_CAP_PER_ITEM_USD below. Must be set to a real value
+      # alongside HIGH_CONFIDENCE_VERIFICATION_ENABLED for a deliberate, budget-monitored run.
+      HIGH_CONFIDENCE_VERIFICATION_COST_CAP_PER_ITEM_USD: ${HIGH_CONFIDENCE_VERIFICATION_COST_CAP_PER_ITEM_USD:-0}
+      # Per-job AI-spend cap, see JobCostBudgetService#costCapPerItemUsd. Leave at the $5/1,000-item
+      # default; only raise for a throwaway diagnostic job made entirely of AI-eligible items (a
+      # real job's items are mostly free static Tier1 matches, so the default holds there).
+      APP_COST_CAP_PER_ITEM_USD: ${APP_COST_CAP_PER_ITEM_USD:-0.005}
     ports:
       - "8080:8080"
     volumes:

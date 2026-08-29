@@ -1,0 +1,251 @@
+id,product_name,version,status,ecosystem,package_name,cpe,confidence
+6637,lodash,4.18.1,IDENTIFIED,npm,lodash,cpe:2.3:a:lodash:lodash:4.18.1:*:*:*:*:node.js:*:*,0.99
+6638,express,5.2.1,IDENTIFIED,npm,express,cpe:2.3:a:openjsf:express:5.2.1:*:*:*:*:node.js:*:*,0.95
+6639,react,19.2.8,IDENTIFIED,npm,react,cpe:2.3:a:facebook:react:19.2.8:*:*:*:*:*:*:*,0.95
+6640,axios,1.20.0,IDENTIFIED,npm,axios,cpe:2.3:a:axios:axios:1.20.0:*:*:*:*:node.js:*:*,0.95
+6641,chalk,6.0.0,IDENTIFIED,npm,chalk,,0.99
+6642,moment,2.30.1,IDENTIFIED,npm,moment,cpe:2.3:a:momentjs:moment:2.30.1:*:*:*:*:node.js:*:*,0.95
+6643,uuid,14.0.2,IDENTIFIED,npm,uuid,cpe:2.3:a:uuidjs:uuid:14.0.2:*:*:*:*:node.js:*:*,0.95
+6644,dotenv,17.4.2,IDENTIFIED,npm,dotenv,,0.99
+6645,eslint,10.9.1,IDENTIFIED,npm,eslint,cpe:2.3:a:openjsf:eslint:10.9.1:*:*:*:*:node.js:*:*,0.99
+6646,typescript,7.0.2,IDENTIFIED,npm,typescript,cpe:2.3:a:microsoft:typescript:7.0.2:*:*:*:*:*:*:*,0.99
+6647,vue,3.5.42,IDENTIFIED,npm,vue,,0.98
+6648,next,16.3.3,IDENTIFIED,,,cpe:2.3:a:zeit:next.js:16.3.3:*:*:*:*:*:*:*,0.85
+6649,tailwindcss,4.3.3,IDENTIFIED,npm,tailwindcss,,0.99
+6650,prettier,3.9.6,IDENTIFIED,npm,prettier,cpe:2.3:a:prettier:prettier:3.9.6:*:*:*:*:*:*:*,0.95
+6651,socket.io,4.8.3,IDENTIFIED,npm,socket.io,cpe:2.3:a:socket:socket.io:4.8.3:*:*:*:*:node.js:*:*,0.95
+6652,zod,4.5.1,IDENTIFIED,npm,zod,cpe:2.3:a:zod:zod:4.5.1:*:*:*:*:node.js:*:*,0.95
+6653,requests,2.34.2,IDENTIFIED,pypi,requests,cpe:2.3:a:python-requests:requests:2.34.2:*:*:*:*:*:*:*,0.95
+6654,numpy,2.5.2,IDENTIFIED,pypi,numpy,cpe:2.3:a:numpy:numpy:2.5.2:*:*:*:*:*:*:*,0.95
+6655,flask,3.1.3,IDENTIFIED,pypi,Flask,cpe:2.3:a:palletsprojects:flask:3.1.3:*:*:*:*:*:*:*,0.99
+6656,django,6.1,IDENTIFIED,pypi,Django,cpe:2.3:a:djangoproject:django:6.1:*:*:*:*:*:*:*,0.95
+6657,pytest,9.1.1,IDENTIFIED,pypi,pytest,,0.99
+6658,boto3,1.43.83,IDENTIFIED,pypi,boto3,,0.99
+6659,click,8.5.0,IDENTIFIED,pypi,click,cpe:2.3:a:palletsprojects:click:8.5.0:*:*:*:*:*:*:*,0.95
+6660,PyYAML,6.0.3,IDENTIFIED,pypi,PyYAML,cpe:2.3:a:pyyaml_project:pyyaml:6.0.3:*:*:*:*:*:*:*,0.85
+6661,SQLAlchemy,2.0.52,IDENTIFIED,pypi,SQLAlchemy,cpe:2.3:a:sqlalchemy:sqlalchemy:2.0.52:*:*:*:*:*:*:*,0.95
+6662,Pillow,12.3.0,IDENTIFIED,pypi,pillow,cpe:2.3:a:python:pillow:12.3.0:*:*:*:*:*:*:*,0.95
+6663,cryptography,50.0.1,IDENTIFIED,pypi,cryptography,cpe:2.3:a:cryptography.io:cryptography:50.0.1:*:*:*:*:python:*:*,0.95
+6664,celery,5.6.3,IDENTIFIED,pypi,celery,cpe:2.3:a:celeryproject:celery:5.6.3:*:*:*:*:python:*:*,0.95
+6665,gunicorn,26.2.0,IDENTIFIED,pypi,gunicorn,cpe:2.3:a:gunicorn:gunicorn:26.2.0:*:*:*:*:*:*:*,0.95
+6666,fastapi,0.141.1,IDENTIFIED,pypi,fastapi,cpe:2.3:a:tiangolo:fastapi:0.141.1:*:*:*:*:*:*:*,0.95
+6667,Jinja2,3.1.6,IDENTIFIED,pypi,Jinja2,cpe:2.3:a:pocoo:jinja2:3.1.6:*:*:*:*:*:*:*,0.95
+6668,urllib3,2.7.0,IDENTIFIED,pypi,urllib3,cpe:2.3:a:urllib3:urllib3:2.7.0:*:*:*:*:*:*:*,0.95
+6669,scipy,1.18.1,IDENTIFIED,pypi,scipy,cpe:2.3:a:scipy:scipy:1.18.1:*:*:*:*:*:*:*,0.95
+6670,matplotlib,3.11.1,IDENTIFIED,pypi,matplotlib,,0.99
+6671,beautifulsoup4,4.15.0,IDENTIFIED,pypi,beautifulsoup4,,0.99
+6672,org.springframework:spring-core,7.1.0-M1,IDENTIFIED,maven,org.springframework:spring-core,,0.99
+6673,com.google.guava:guava,33.7.1-jre,IDENTIFIED,maven,com.google.guava:guava,,0.99
+6674,org.apache.commons:commons-lang3,3.20.0,IDENTIFIED,maven,org.apache.commons:commons-lang3,,0.99
+6675,com.fasterxml.jackson.core:jackson-databind,2.22.2,IDENTIFIED,maven,com.fasterxml.jackson.core:jackson-databind,,0.98
+6676,junit:junit,4.13.2,IDENTIFIED,maven,junit:junit,,0.99
+6677,org.slf4j:slf4j-api,2.1.0-alpha1,IDENTIFIED,maven,org.slf4j:slf4j-api,,0.99
+6678,ch.qos.logback:logback-classic,1.6.3,IDENTIFIED,maven,ch.qos.logback:logback-classic,,0.99
+6679,org.projectlombok:lombok,1.18.46,IDENTIFIED,maven,org.projectlombok:lombok,,0.99
+6680,com.squareup.okhttp3:okhttp,5.5.0,IDENTIFIED,maven,com.squareup.okhttp3:okhttp,,0.99
+6681,com.squareup.retrofit2:retrofit,3.0.0,IDENTIFIED,maven,com.squareup.retrofit2:retrofit,,0.95
+6682,org.mockito:mockito-core,5.23.0,IDENTIFIED,maven,org.mockito:mockito-core,,0.99
+6683,io.netty:netty-all,5.0.0.Alpha2,IDENTIFIED,maven,io.netty:netty-all,,0.95
+6684,org.apache.kafka:kafka-clients,4.3.1,IDENTIFIED,maven,org.apache.kafka:kafka-clients,,0.95
+6685,com.google.code.gson:gson,2.14.0,IDENTIFIED,maven,com.google.code.gson:gson,,0.95
+6686,org.apache.httpcomponents:httpclient,4.5.14,IDENTIFIED,maven,org.apache.httpcomponents:httpclient,,0.99
+6687,org.springframework.boot:spring-boot-starter-web,4.2.0-M1,IDENTIFIED,maven,org.springframework.boot:spring-boot-starter-web,,0.95
+6688,org.apache.logging.log4j:log4j-core,3.0.0-beta3,IDENTIFIED,maven,org.apache.logging.log4j:log4j-core,,0.99
+6689,com.zaxxer:HikariCP,7.1.0,IDENTIFIED,maven,com.zaxxer:HikariCP,,0.95
+6690,github.com/gin-gonic/gin,v1.12.0,IDENTIFIED,go,github.com/gin-gonic/gin,,0.95
+6691,github.com/gorilla/mux,v1.8.1,IDENTIFIED,go,github.com/gorilla/mux,,0.95
+6692,github.com/spf13/cobra,v1.10.2,IDENTIFIED,go,github.com/spf13/cobra,,0.99
+6693,github.com/stretchr/testify,v1.12.1,IDENTIFIED,go,github.com/stretchr/testify,,0.95
+6694,github.com/pkg/errors,v0.9.1,IDENTIFIED,go,github.com/pkg/errors,,0.95
+6695,golang.org/x/crypto,v0.55.0,IDENTIFIED,go,golang.org/x/crypto,,0.95
+6696,golang.org/x/net,v0.58.0,IDENTIFIED,go,golang.org/x/net,,0.98
+6697,github.com/prometheus/client_golang,v1.24.1,IDENTIFIED,go,github.com/prometheus/client_golang,cpe:2.3:a:prometheus:client_golang:v1.24.1:*:*:*:*:go:*:*,0.95
+6698,github.com/aws/aws-sdk-go,v1.55.8,IDENTIFIED,go,github.com/aws/aws-sdk-go,,0.99
+6699,github.com/go-redis/redis/v8,v8.11.5,IDENTIFIED,go,github.com/go-redis/redis/v8,,0.95
+6700,gorm.io/gorm,v1.31.2,IDENTIFIED,go,gorm.io/gorm,cpe:2.3:a:gorm:gorm:v1.31.2:*:*:*:*:*:*:*,0.95
+6701,github.com/spf13/viper,v1.21.0,IDENTIFIED,go,github.com/spf13/viper,,0.95
+6702,github.com/gofiber/fiber/v2,v2.52.15,IDENTIFIED,go,github.com/gofiber/fiber/v2,,0.99
+6703,github.com/labstack/echo/v4,v4.15.4,IDENTIFIED,go,github.com/labstack/echo/v4,,0.99
+6704,google.golang.org/grpc,v1.83.2,IDENTIFIED,go,google.golang.org/grpc,,0.95
+6705,github.com/miekg/dns,v1.1.73,IDENTIFIED,go,github.com/miekg/dns,,0.95
+6706,github.com/urfave/cli/v2,v2.27.7,IDENTIFIED,go,github.com/urfave/cli/v2,,0.95
+6707,Newtonsoft.Json,13.0.4,IDENTIFIED,nuget,Newtonsoft.Json,cpe:2.3:a:newtonsoft:json.net:13.0.4:*:*:*:*:*:*:*,0.95
+6708,Serilog,4.4.0,IDENTIFIED,nuget,Serilog,,0.95
+6709,AutoMapper,16.2.0,IDENTIFIED,nuget,AutoMapper,cpe:2.3:a:luckypennysoftware:automapper:16.2.0:*:*:*:*:*:*:*,0.95
+6710,Dapper,2.1.79,IDENTIFIED,nuget,Dapper,,0.99
+6711,NUnit,4.6.1,IDENTIFIED,nuget,NUnit,cpe:2.3:a:nunit.org:nunit:4.6.1:*:*:*:*:*:*:*,0.95
+6712,xunit,2.9.3,IDENTIFIED,nuget,xunit,,0.95
+6713,Moq,4.20.72,IDENTIFIED,nuget,Moq,,0.99
+6714,Polly,8.7.0,IDENTIFIED,nuget,Polly,,0.99
+6715,RestSharp,114.0.0,IDENTIFIED,nuget,RestSharp,cpe:2.3:a:restsharp:restsharp:114.0.0:*:*:*:*:*:*:*,0.95
+6716,MediatR,14.2.0,IDENTIFIED,nuget,MediatR,,0.99
+6717,Swashbuckle.AspNetCore,10.2.3,IDENTIFIED,nuget,Swashbuckle.AspNetCore,,0.95
+6718,Microsoft.Extensions.DependencyInjection,10.0.11,IDENTIFIED,nuget,Microsoft.Extensions.DependencyInjection,,0.95
+6719,log4net,3.4.0,IDENTIFIED,nuget,log4net,cpe:2.3:a:apache:log4net:3.4.0:*:*:*:*:*:*:*,0.95
+6720,NLog,6.2.0,IDENTIFIED,nuget,NLog,,0.99
+6721,Microsoft.EntityFrameworkCore,10.0.11,IDENTIFIED,nuget,Microsoft.EntityFrameworkCore,,0.99
+6722,AWSSDK.S3,4.0.102.4,IDENTIFIED,nuget,AWSSDK.S3,,0.99
+6723,rspec,3.13.2,IDENTIFIED,rubygems,rspec,,0.99
+6724,devise,5.0.4,IDENTIFIED,rubygems,devise,cpe:2.3:a:heartcombo:devise:5.0.4:*:*:*:*:ruby:*:*,0.95
+6725,sidekiq,8.1.7,IDENTIFIED,rubygems,sidekiq,cpe:2.3:a:contribsys:sidekiq:8.1.7:*:*:*:*:*:*:*,0.95
+6726,nokogiri,1.19.4,IDENTIFIED,rubygems,nokogiri,cpe:2.3:a:nokogiri:nokogiri:1.19.4:*:*:*:*:*:*:*,0.95
+6727,rack,3.2.7,IDENTIFIED,rubygems,rack,cpe:2.3:a:rack:rack:3.2.7:*:*:*:*:ruby:*:*,0.95
+6728,bundler,4.0.19,IDENTIFIED,rubygems,bundler,cpe:2.3:a:bundler:bundler:4.0.19:*:*:*:*:ruby:*:*,0.95
+6729,faraday,2.14.3,IDENTIFIED,rubygems,faraday,cpe:2.3:a:faraday_project:faraday:2.14.3:*:*:*:*:*:*:*,0.95
+6730,rubocop,1.90.0,IDENTIFIED,rubygems,rubocop,cpe:2.3:a:rubocop_project:rubocop:1.90.0:*:*:*:*:*:*:*,0.95
+6731,capistrano,3.20.1,IDENTIFIED,rubygems,capistrano,,0.95
+6732,sinatra,4.2.1,IDENTIFIED,rubygems,sinatra,cpe:2.3:a:sinatrarb:sinatra:4.2.1:*:*:*:*:*:*:*,0.95
+6733,jekyll,4.4.1,IDENTIFIED,chocolatey,jekyll,cpe:2.3:a:jekyllrb:jekyll:4.4.1:*:*:*:*:*:*:*,0.95
+6734,pundit,2.5.2,IDENTIFIED,rubygems,pundit,,0.95
+6735,kaminari,1.2.2,IDENTIFIED,rubygems,kaminari,cpe:2.3:a:kaminari_project:kaminari:1.2.2:*:*:*:*:*:*:*,0.95
+6736,httparty,0.24.2,IDENTIFIED,rubygems,httparty,cpe:2.3:a:jnunemaker:httparty:0.24.2:*:*:*:*:ruby:*:*,0.95
+6737,aws-sdk,3.3.0,IDENTIFIED,rubygems,aws-sdk,cpe:2.3:a:amazon:aws-sdk-java:3.3.0:*:*:*:*:*:*:*,0.95
+6738,jwt,3.2.0,IDENTIFIED,rubygems,jwt,cpe:2.3:a:lcobucci:jwt:3.2.0:*:*:*:*:*:*:*,0.95
+6739,tokio,1.53.1,IDENTIFIED,crates.io,tokio,cpe:2.3:a:tokio:tokio:1.53.1:*:*:*:*:rust:*:*,0.95
+6740,clap,4.6.6,IDENTIFIED,crates.io,clap,,0.95
+6741,rand,0.8.8,IDENTIFIED,crates.io,rand,cpe:2.3:a:rust-random:rand:0.8.8:*:*:*:*:rust:*:*,0.95
+6742,regex,1.13.1,IDENTIFIED,crates.io,regex,cpe:2.3:a:rust-lang:regex:1.13.1:*:*:*:*:rust:*:*,0.95
+6743,log,0.4.34,IDENTIFIED,crates.io,log,cpe:2.3:a:log-chat_project:log-chat:0.4.34:*:*:*:*:*:*:*,0.95
+6744,anyhow,1.0.104,IDENTIFIED,crates.io,anyhow,,0.95
+6745,thiserror,2.0.20,IDENTIFIED,crates.io,thiserror,,0.95
+6746,rayon,1.12.0,IDENTIFIED,crates.io,rayon,,0.95
+6747,actix-web,4.15.0,IDENTIFIED,crates.io,actix-web,cpe:2.3:a:actix:actix-web:4.15.0:*:*:*:*:rust:*:*,0.95
+6748,hyper,1.11.1,IDENTIFIED,crates.io,hyper,cpe:2.3:a:hyper:hyper:1.11.1:*:*:*:*:*:*:*,0.95
+6749,futures,0.3.34,IDENTIFIED,crates.io,futures,cpe:2.3:a:rust-lang:futures-task:0.3.34:*:*:*:*:rust:*:*,0.95
+6750,tracing,0.1.44,IDENTIFIED,crates.io,tracing,,0.95
+6751,uuid,1.26.0,IDENTIFIED,crates.io,uuid,,0.95
+6752,bytes,1.12.1,IDENTIFIED,crates.io,bytes,cpe:2.3:a:tokio:bytes:1.12.1:*:*:*:*:rust:*:*,0.95
+6753,symfony/console,v8.1.5,IDENTIFIED,packagist,symfony/console,,0.95
+6754,laravel/framework,v13.29.0,IDENTIFIED,packagist,laravel/framework,cpe:2.3:a:laravel:framework:v13.29.0:*:*:*:*:*:*:*,0.95
+6755,doctrine/orm,3.6.8,IDENTIFIED,packagist,doctrine/orm,,0.95
+6756,phpunit/phpunit,13.3.2,IDENTIFIED,packagist,phpunit/phpunit,cpe:2.3:a:phpunit_project:phpunit:13.3.2:*:*:*:*:*:*:*,0.95
+6757,twig/twig,v3.28.0,IDENTIFIED,packagist,twig/twig,,0.95
+6758,symfony/http-foundation,v8.1.5,IDENTIFIED,packagist,symfony/http-foundation,,0.95
+6759,nesbot/carbon,3.13.2,IDENTIFIED,packagist,nesbot/carbon,,0.95
+6760,league/flysystem,3.35.3,IDENTIFIED,packagist,league/flysystem,cpe:2.3:a:thephpleague:flysystem:3.35.3:*:*:*:*:*:*:*,0.95
+6761,symfony/finder,v8.1.5,IDENTIFIED,packagist,symfony/finder,,0.95
+6762,psr/log,3.0.2,IDENTIFIED,packagist,psr/log,,0.95
+6763,ramsey/uuid,4.9.3,IDENTIFIED,packagist,ramsey/uuid,,0.95
+6764,firebase/php-jwt,v7.1.0,IDENTIFIED,packagist,firebase/php-jwt,,0.95
+6765,spatie/laravel-permission,8.3.0,IDENTIFIED,packagist,spatie/laravel-permission,,0.95
+6766,symfony/yaml,v8.1.5,IDENTIFIED,packagist,symfony/yaml,,0.95
+6767,composer/composer,2.10.3,IDENTIFIED,packagist,composer/composer,cpe:2.3:a:getcomposer:composer:2.10.3:*:*:*:*:*:*:*,0.95
+6768,vlucas/phpdotenv,v5.7.0,IDENTIFIED,packagist,vlucas/phpdotenv,,0.95
+6769,symfony/process,v8.1.5,IDENTIFIED,packagist,symfony/process,,0.95
+6770,phoenix,1.8.13,IDENTIFIED,npm,phoenix,cpe:2.3:a:phoenixframework:phoenix:1.8.13:*:*:*:*:*:*:*,0.95
+6771,ecto,3.14.2,IDENTIFIED,hex,ecto,cpe:2.3:a:ecto_project:ecto:3.14.2:*:*:*:*:*:*:*,0.95
+6772,plug,1.20.3,IDENTIFIED,hex,plug,cpe:2.3:a:plug_project:plug:1.20.3:*:*:*:*:*:*:*,0.95
+6773,cowboy,2.18.0,IDENTIFIED,hex,cowboy,,0.95
+6774,jason,1.5.0-alpha.2,IDENTIFIED,hex,jason,,0.95
+6775,ex_doc,0.40.3,IDENTIFIED,hex,ex_doc,,0.95
+6776,dialyxir,1.4.7,IDENTIFIED,hex,dialyxir,,0.95
+6777,absinthe,1.11.0,IDENTIFIED,hex,absinthe,cpe:2.3:a:absinthe-graphql:absinthe:1.11.0:*:*:*:*:*:*:*,0.95
+6778,tesla,1.21.2,IDENTIFIED,hex,tesla,cpe:2.3:a:nvidia:tesla:1.21.2:*:*:*:*:*:*:*,0.95
+6779,poison,6.0.0,IDENTIFIED,hex,poison,,0.95
+6780,comeonin,5.5.1,IDENTIFIED,hex,comeonin,,0.95
+6781,guardian,2.5.0,IDENTIFIED,hex,guardian,cpe:2.3:a:nozominetworks:guardian:2.5.0:*:*:*:*:*:*:*,0.95
+6782,broadway,1.3.0,IDENTIFIED,hex,broadway,,0.95
+6783,telemetry,1.4.2,IDENTIFIED,hex,telemetry,cpe:2.3:a:telemetry_project:telemetry:1.4.2:*:*:*:*:rust:*:*,0.95
+6784,phoenix_live_view,1.2.11,IDENTIFIED,npm,phoenix_live_view,,0.95
+6785,gettext,1.0.2,IDENTIFIED,hex,gettext,cpe:2.3:a:gnu:gettext:1.0.2:*:*:*:*:*:*:*,0.95
+6786,mox,1.3.0,IDENTIFIED,hex,mox,,0.95
+6787,http,1.6.0,IDENTIFIED,maven,com.hexagonkt:http,cpe:2.3:a:ietf:http:1.6.0:*:*:*:*:*:*:*,0.95
+6788,provider,6.1.5+1,IDENTIFIED,pub,provider,cpe:2.3:a:checkpoint:provider-1:6.1.5+1:*:*:*:*:*:*:*,0.95
+6789,dio,5.11.0,IDENTIFIED,pub,dio,cpe:2.3:a:flutterchina:dio:5.11.0:*:*:*:*:dart:*:*,0.95
+6790,riverpod,3.4.2,IDENTIFIED,pub,riverpod,,0.95
+6791,get,4.7.3,IDENTIFIED,pub,get,cpe:2.3:a:get-git-data_project:get-git-data:4.7.3:*:*:*:*:*:*:*,0.95
+6792,shared_preferences,2.5.5,IDENTIFIED,pub,shared_preferences,,0.95
+6793,flutter_bloc,9.1.1,IDENTIFIED,pub,flutter_bloc,,0.95
+6794,path_provider,2.1.6,IDENTIFIED,pub,path_provider,,0.95
+6795,intl,0.20.3,IDENTIFIED,pub,intl,,0.95
+6796,cached_network_image,4.0.0,IDENTIFIED,pub,cached_network_image,,0.95
+6797,google_fonts,8.2.1,IDENTIFIED,pub,google_fonts,,0.95
+6798,url_launcher,6.3.2,IDENTIFIED,pub,url_launcher,,0.95
+6799,image_picker,1.2.3,IDENTIFIED,pub,image_picker,cpe:2.3:a:flutter:image_picker_android:1.2.3:*:*:*:*:*:*:*,0.95
+6800,freezed,4.0.0,IDENTIFIED,pub,freezed,,0.95
+6801,json_annotation,4.12.0,IDENTIFIED,pub,json_annotation,,0.95
+6802,equatable,2.1.0,IDENTIFIED,pub,equatable,,0.95
+6803,flutter_svg,2.3.0,IDENTIFIED,pub,flutter_svg,,0.95
+6804,Cisco IOS XE,17.9.4a,UNIDENTIFIED,,,,
+6805,MikroTik RouterOS,6.49.10,UNIDENTIFIED,,,,
+6806,Android Studio,2023.1.1,UNIDENTIFIED,,,,
+6807,OWASP ZAP,2.14.0,UNIDENTIFIED,,,,
+6808,Metasploit Framework,6.3.55,UNIDENTIFIED,,,,
+6809,Unreal Engine,5.3.2,UNIDENTIFIED,,,,
+6810,Windows Terminal,1.19.10573.0,UNIDENTIFIED,,,,
+6811,Notepad++,8.6.9,IDENTIFIED,,,cpe:2.3:a:don_ho:notepad\+\+:8.6.9:*:*:*:*:*:*:*,0.6
+6812,VLC media player,3.0.20,IDENTIFIED,,,cpe:2.3:a:videolan:vlc_media_player:3.0.20:*:*:*:*:*:*:*,0.6
+6813,Mozilla Firefox,128.0,IDENTIFIED,,,cpe:2.3:a:mozilla:firefox:128.0:*:*:*:*:*:*:*,0.6
+6814,Google Chrome,127.0.6533.100,IDENTIFIED,,,cpe:2.3:a:google:chrome:127.0.6533.100:*:*:*:*:*:*:*,0.6
+6815,VirtualBox,7.0.14,IDENTIFIED,chocolatey,VirtualBox,cpe:2.3:a:oracle:virtualbox:7.0.14:*:*:*:*:*:*:*,0.95
+6816,PuTTY,0.81,IDENTIFIED,chocolatey,PuTTY,cpe:2.3:a:simon_tatham:putty:0.81:*:*:*:*:*:*:*,0.95
+6817,WinRAR,6.24,IDENTIFIED,chocolatey,WinRAR,cpe:2.3:a:rarlab:winrar:6.24:*:*:*:*:*:*:*,0.95
+6818,TeamViewer,15.53.4,IDENTIFIED,,,cpe:2.3:a:teamviewer:teamviewer:15.53.4:*:*:*:*:*:*:*,0.6
+6819,Zoom,5.17.11,IDENTIFIED,chocolatey,Zoom,cpe:2.3:a:zoom:zoom:5.17.11:*:*:*:*:mac_os_x:*:*,0.95
+6820,Skype,8.118.0.209,IDENTIFIED,,,cpe:2.3:a:microsoft:skype:8.118.0.209:*:*:*:*:*:*:*,0.6
+6821,Docker Desktop,4.33.0,IDENTIFIED,,,cpe:2.3:a:docker:docker_desktop:4.33.0:*:*:*:*:*:*:*,0.6
+6822,Postman,11.10.0,IDENTIFIED,chocolatey,Postman,cpe:2.3:a:postman:postman:11.10.0:*:*:*:*:*:*:*,0.95
+6823,IntelliJ IDEA,2024.2,IDENTIFIED,,,cpe:2.3:a:jetbrains:intellij_idea:2024.2:*:*:*:*:*:*:*,0.6
+6824,MySQL Workbench,8.0.37,IDENTIFIED,,,cpe:2.3:a:oracle:mysql_workbench:8.0.37:*:*:*:*:*:*:*,0.6
+6825,GIMP,2.10.38,IDENTIFIED,chocolatey,GIMP,cpe:2.3:a:gimp:gimp:2.10.38:*:*:*:*:*:*:*,0.95
+6826,Adobe Acrobat Reader DC,24.002.21005,IDENTIFIED,,,cpe:2.3:a:adobe:acrobat_reader:24.002.21005:*:*:*:*:*:*:*,0.6
+6827,Git for Windows,2.46.0,IDENTIFIED,,,cpe:2.3:a:git_for_windows_project:git_for_windows:2.46.0:*:*:*:*:*:*:*,0.6
+6828,WinSCP,6.3.3,IDENTIFIED,chocolatey,WinSCP,cpe:2.3:a:winscp:winscp:6.3.3:*:*:*:*:*:*:*,0.95
+6829,KeePass,2.57,IDENTIFIED,,,cpe:2.3:a:keepass:keepass:2.57:*:*:*:*:*:*:*,0.6
+6830,Malwarebytes,5.1.5,IDENTIFIED,,,cpe:2.3:a:malwarebytes:malwarebytes:5.1.5:*:*:*:*:windows:*:*,0.6
+6831,Kaspersky Total Security,21.3,IDENTIFIED,,,cpe:2.3:a:kaspersky:total_security:21.3:*:*:*:*:*:*:*,0.6
+6832,McAfee Total Protection,16.0.51,IDENTIFIED,,,cpe:2.3:a:mcafee:total_protection:16.0.51:*:*:*:*:*:*:*,0.6
+6833,Sophos Endpoint Protection,10.8.20,IDENTIFIED,,,cpe:2.3:a:sophos:endpoint_protection:10.8.20:*:*:*:*:*:*:*,0.6
+6834,Symantec Endpoint Protection,14.3.10148,IDENTIFIED,,,cpe:2.3:a:broadcom:symantec_endpoint_protection:14.3.10148:*:*:*:*:windows:*:*,0.6
+6835,Citrix Workspace App,2405,IDENTIFIED,,,cpe:2.3:a:citrix:workspace_app:2405:*:*:*:*:windows:*:*,0.6
+6836,Microsoft Office,16.0.17628.20006,IDENTIFIED,,,cpe:2.3:a:microsoft:office:16.0.17628.20006:*:*:*:*:*:*:*,0.6
+6837,Node.js,20.16.0,IDENTIFIED,,,cpe:2.3:a:joyent:node.js:20.16.0:*:*:*:*:*:*:*,0.6
+6838,PostgreSQL,16.4,IDENTIFIED,,,cpe:2.3:a:postgresql:postgresql:16.4:*:*:*:*:*:*:*,0.6
+6839,OpenSSL,3.3.1,IDENTIFIED,chocolatey,OpenSSL,cpe:2.3:a:openssl:openssl:3.3.1:*:*:*:*:*:*:*,0.95
+6840,nginx,0.1.27,IDENTIFIED,,,cpe:2.3:a:igor_sysoev:nginx:0.1.27:*:*:*:*:*:*:*,0.6
+6841,Apache HTTP Server,2.4.62,IDENTIFIED,,,cpe:2.3:a:apache:http_server:2.4.62:*:*:*:*:*:*:*,0.6
+6842,MongoDB,7.0.12,IDENTIFIED,chocolatey,MongoDB,cpe:2.3:a:mongodb:mongodb:7.0.12:*:*:*:enterprise:*:*:*,0.95
+6843,RabbitMQ,3.13.6,IDENTIFIED,chocolatey,RabbitMQ,cpe:2.3:a:anynines:rabbitmq:3.13.6:*:*:*:*:pivotal_cloud_foundry:*:*,0.95
+6844,Jenkins,1.437,IDENTIFIED,,,cpe:2.3:a:cloudbees:jenkins:1.437:*:*:*:*:*:*:*,0.6
+6845,Grafana,11.1.3,IDENTIFIED,chocolatey,Grafana,cpe:2.3:a:grafana:grafana:11.1.3:*:*:*:enterprise:*:*:*,0.95
+6846,Kibana,8.14.3,IDENTIFIED,chocolatey,Kibana,cpe:2.3:a:elastic:kibana:8.14.3:*:*:*:*:*:*:*,0.95
+6847,Tableau Desktop,2024.2,IDENTIFIED,,,cpe:2.3:a:schneider_electric:tableau_desktop:2024.2:*:*:*:*:*:*:*,0.6
+6848,Adobe Photoshop,25.10,IDENTIFIED,,,cpe:2.3:a:adobe:photoshop:25.10:*:*:*:*:*:*:*,0.6
+6849,Adobe Illustrator,28.6,IDENTIFIED,,,cpe:2.3:a:adobe:illustrator:28.6:*:*:*:*:*:*:*,0.6
+6850,AutoCAD,2024,IDENTIFIED,chocolatey,AutoCAD,cpe:2.3:a:autodesk:autocad:2024:*:*:*:*:*:*:*,0.95
+6851,SolidWorks,2023,IDENTIFIED,,,cpe:2.3:a:3ds:solidworks:2023:*:*:*:*:*:*:*,0.6
+6852,Ansible,1.1,IDENTIFIED,pypi,ansible,cpe:2.3:a:ansibleworks:ansible:1.1:*:*:*:*:*:*:*,0.95
+6853,Microsoft Visual Studio,17.10,IDENTIFIED,,,cpe:2.3:a:microsoft:visual_studio:17.10:*:*:*:*:*:*:*,0.6
+6854,WinZip,28.0,IDENTIFIED,,,cpe:2.3:a:winzip:winzip:28.0:*:*:*:*:*:*:*,0.6
+6855,Total Commander,11.03,IDENTIFIED,,,cpe:2.3:a:ghisler:total_commander:11.03:*:*:*:*:*:*:*,0.6
+6856,HashiCorp Terraform,1.9.4,IDENTIFIED,,,cpe:2.3:a:hashicorp:terraform:1.9.4:*:*:*:*:-:*:*,0.6
+6857,IrfanView,4.67,IDENTIFIED,chocolatey,IrfanView,cpe:2.3:a:irfanview:irfanview:4.67:*:*:*:*:*:x86:*,0.95
+6858,Everything,1.4.1.1028,IDENTIFIED,,,cpe:2.3:a:voidtools:everything:1.4.1.1028:*:*:*:*:*:*:*,0.6
+6859,ImgBurn,2.5.8.0,IDENTIFIED,chocolatey,ImgBurn,cpe:2.3:a:imgburn:imgburn:2.5.8.0:*:*:*:*:*:*:*,0.95
+6860,PDF-XChange Editor,10.2.1,IDENTIFIED,,,cpe:2.3:a:pdf-xchange:pdf-xchange_editor:10.2.1:*:*:*:*:*:*:*,0.6
+6861,ExifTool,13.00,IDENTIFIED,,,cpe:2.3:a:exiftool_project:exiftool:13.00:*:*:*:*:*:*:*,0.6
+6862,Greenshot,1.3.290,IDENTIFIED,,,cpe:2.3:a:greenshot:greenshot:1.3.290:*:*:*:*:*:*:*,0.6
+6863,QuantumLeap Ledger Suite,2.0.4,UNIDENTIFIED,,,,
+6864,Chronoscribe Desktop,1.4.0,UNIDENTIFIED,,,,
+6865,Vaporlight IDE,0.9.3,UNIDENTIFIED,,,,
+6866,Driftwood Analytics Console,4.1.0,UNIDENTIFIED,,,,
+6867,Palisade VPN Client,5.0.1,UNIDENTIFIED,,,,
+6868,Lumenpost Mail Client,3.3.3,UNIDENTIFIED,,,,
+6869,Cinderloop Automation Studio,1.1.1,UNIDENTIFIED,,,,
+6870,Wraithline Packet Inspector,0.7.2,UNIDENTIFIED,,,,
+6871,Trellisware Config Manager,2.5.0,UNIDENTIFIED,,,,
+6872,Quietstorm Backup Agent,3.0.0,UNIDENTIFIED,,,,
+6873,Bramblecore Compiler,1.0.0,UNIDENTIFIED,,,,
+6874,Glasspine Terminal,4.4.0,UNIDENTIFIED,,,,
+6875,Slack,4.39.95,IDENTIFIED,chocolatey,Slack,cpe:2.3:a:slack-chat_project:slack-chat:4.39.95:*:*:*:*:wordpress:*:*,0.95
+6876,OBS Studio,30.2.3,IDENTIFIED,chocolatey,OBS Studio,,0.95
+6877,WinDirStat,2.2.2,IDENTIFIED,chocolatey,WinDirStat,,0.95
+6878,ExamDiff Pro,13.0.1.9,UNIDENTIFIED,,,,
+6879,Bulk Rename Utility,3.7.0.0,UNIDENTIFIED,,,,
+6880,WizTree,4.19,IDENTIFIED,chocolatey,WizTree,,0.95
+6881,ClipboardFusion,5.5,IDENTIFIED,chocolatey,ClipboardFusion,,0.95
+6882,Q-Dir,11.68,UNIDENTIFIED,,,,
+6883,XYplorer,24.90.0100,IDENTIFIED,chocolatey,XYplorer,,0.95
+6884,Process Hacker,2.39,UNIDENTIFIED,,,,
+6885,Blender,4.2.1,IDENTIFIED,chocolatey,Blender,cpe:2.3:a:blender:blender:4.2.1:*:*:*:*:*:*:*,0.95
+6886,Rufus,4.5,IDENTIFIED,chocolatey,Rufus,cpe:2.3:a:akeo:rufus:4.5:*:*:*:*:*:*:*,0.95

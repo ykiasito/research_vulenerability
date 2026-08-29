@@ -86,6 +86,20 @@
                  style="font-size: 0.85em; color: #888;">
                 バージョンは未検証（製品名のみ照合）
             </div>
+            <div th:if="${identified != null and identified.verificationStatus == 'AMBIGUOUS'}"
+                 style="font-size: 0.85em; color: #7a5c00; font-weight: bold;"
+                 th:title="${identified.verificationNote}">
+                🟡 要確認：複数の妥当な候補があり一意に絞れません（人間による選択が必要）
+            </div>
+            <div th:if="${identified != null and identified.verificationStatus == 'INCORRECT'}"
+                 style="font-size: 0.85em; color: #b00020; font-weight: bold;"
+                 th:title="${identified.verificationNote}">
+                🔴 AI検証で誤りの疑いが指摘されました（確信度を引き下げ済み）
+            </div>
+            <div th:if="${identified != null and identified.verificationStatus == 'CONFIRMED'}"
+                 style="font-size: 0.85em; color: #0a7d2c;">
+                ✓ AI検証済み
+            </div>
         </td>
         <td>
             <span th:if="${vulns != null and !vulns.isEmpty()}" style="color: #b00020; font-weight: bold;" title="既知の脆弱性が見つかりました">🔴 影響あり</span>

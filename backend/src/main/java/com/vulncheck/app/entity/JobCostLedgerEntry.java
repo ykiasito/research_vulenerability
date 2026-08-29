@@ -38,16 +38,33 @@ public class JobCostLedgerEntry {
      *  tryReserveBundledComponent}/{@code reconcileBundledComponent}). */
     public static final String LEDGER_BUNDLED_COMPONENT = "BUNDLED_COMPONENT";
 
+    /** {@link #ledger} value for the separate high-confidence verification backstop budget ({@code
+     *  tryReserveVerification}/{@code reconcileVerification}) — REVISE item 1, senior review
+     *  2026-08-29: split out of {@link #LEDGER_MAIN} because sharing the always-on per-item budget
+     *  let verification silently starve every other AI tier's budget in the same job (see
+     *  {@code JobCostBudgetService#verificationCostCapPerItemUsd}'s javadoc for the job 191 numbers
+     *  behind this). */
+    public static final String LEDGER_VERIFICATION = "VERIFICATION";
+
     /** {@link #callSite} values — one per llm-service endpoint, matching V27's CHECK constraint.
      *  Distinct from {@link #ledger} (which budget a call drew against): {@code TIER2}/{@code
      *  TIER3}/{@code STAGE4} all use {@link #LEDGER_MAIN}; {@code BUNDLED_CHANGELOG}/{@code
-     *  BUNDLED_EXTRACT} both use {@link #LEDGER_BUNDLED_COMPONENT}. */
+     *  BUNDLED_EXTRACT} both use {@link #LEDGER_BUNDLED_COMPONENT}; {@code VERIFICATION} uses
+     *  {@link #LEDGER_VERIFICATION}. */
     public static final String CALL_SITE_TIER2 = "TIER2";
 
     public static final String CALL_SITE_TIER3 = "TIER3";
     public static final String CALL_SITE_STAGE4 = "STAGE4";
     public static final String CALL_SITE_BUNDLED_CHANGELOG = "BUNDLED_CHANGELOG";
     public static final String CALL_SITE_BUNDLED_EXTRACT = "BUNDLED_EXTRACT";
+
+    /** High-confidence AI verification backstop ({@code HighConfidenceVerificationService}) — the
+     *  {@link #callSite} value for its one llm-service endpoint. Originally shared {@link
+     *  #LEDGER_MAIN} (V28); split onto its own {@link #LEDGER_VERIFICATION} ledger (REVISE item 1,
+     *  senior review 2026-08-29) since sharing the always-on per-item budget let this feature starve
+     *  every other AI tier's budget in the same job — see {@code
+     *  JobCostBudgetService#verificationCostCapPerItemUsd}'s javadoc. */
+    public static final String CALL_SITE_VERIFICATION = "VERIFICATION";
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
