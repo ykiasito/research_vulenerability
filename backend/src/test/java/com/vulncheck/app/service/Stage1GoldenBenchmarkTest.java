@@ -132,11 +132,16 @@ class Stage1GoldenBenchmarkTest {
         List<PackageRegistryLookup> lookups =
                 goldenCase.registryEcosystem() == null ? List.of() : List.of(fixedRegistryLookup(goldenCase));
 
+        // enabled defaults to false (never Spring-injected via a plain `new` here) — this benchmark
+        // deliberately never exercises an AI call (see the class javadoc), and the verification
+        // backstop is no exception, so this is always a no-op for every case in this file.
+        HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService(
+                userApiKeyService, llmServiceClient, jobCostBudgetService, identifiedProductRepository);
         Stage1IdentificationService service = new Stage1IdentificationService(
                 lookups, registryRoutingPolicy, new RegistryLookupCache(), cpeDictionaryRepository,
                 new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService, llmServiceClient,
                 nvdCpeSyncService, ecosystemRegistryRepository, researchJobItemRepository, jobCostBudgetService,
-                Runnable::run);
+                highConfidenceVerificationService, Runnable::run);
 
         Optional<IdentifiedProduct> result = service.identify(item, USER_ID);
 

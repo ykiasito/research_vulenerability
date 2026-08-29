@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -172,6 +173,7 @@ public class Stage1IdentificationService {
     private final EcosystemRegistryRepository ecosystemRegistryRepository;
     private final ResearchJobItemRepository researchJobItemRepository;
     private final JobCostBudgetService jobCostBudgetService;
+    private final HighConfidenceVerificationService highConfidenceVerificationService;
     @Qualifier("registryLookupExecutor")
     private final Executor registryLookupExecutor;
 
@@ -208,6 +210,12 @@ public class Stage1IdentificationService {
                 ? tryTier3(item, userId)
                 : resolveCandidates(item, userId, registryResolution, cpeCandidateResult, IdentifiedProduct.METHOD_STATIC,
                         item.getVendor(), item.getProductName());
+
+        // High-confidence verification backstop: only ever reconsiders a match that resolveCandidates
+        // just produced purely via static logic (no Tier2/Tier3 AI review) at high confidence — see
+        // HighConfidenceVerificationService's own javadoc for why this exists and its off-by-default
+        // feature flag. A no-op (returns result unchanged) for every other outcome shape.
+        result = result.flatMap(product -> highConfidenceVerificationService.verifyIfEligible(item, product, userId));
 
         log.info("Stage1 identify item {} ('{}' v{}): registryMatch={}, cpeCandidates={}, result={}",
                 item.getId(), item.getProductName(), item.getVersion(),
@@ -523,12 +531,55 @@ public class Stage1IdentificationService {
         // below — recomputing this after nulling chosenCpe would flip it back to true (chosenCpe ==
         // null is itself one of the conditions that makes a match trustable), silently re-admitting
         // the very registry match this fix rejects, in a different shape.
+        //
+        // golden-300 fix (2026-08-29, item 1 "Chocolatey false sense of security"): Chocolatey is
+        // the one registry client (of 11) with no downstream vulnerability query path at all — it
+        // has no link into the CPE dictionary and none of the app's 10 OSV ecosystems cover it (see
+        // ChocolateyRegistryClient's own javadoc). Trusting a *sole* Chocolatey match (no
+        // independently-corroborating CPE) as IDENTIFIED means the item reaches the UI looking
+        // exactly like "investigated, 0 vulnerabilities found" when in truth nothing was ever
+        // queryable for it — docs/spec/known-limitations.md documents this as the cause of 7
+        // negative-control false positives in golden-300 (Slack, OBS Studio, WinDirStat, WizTree,
+        // ShareX, ClipboardFusion, XYplorer). Deliberately narrow and unconditional on version
+        // confirmation: even a version-confirmed Chocolatey hit still has zero vulnerability-lookup
+        // capability, so it must not become IDENTIFIED on its own either. A Chocolatey match that IS
+        // corroborated by a real CPE (chosenCpe != null) is unaffected — that CPE brings its own
+        // vulnerability-query path with it. Falls through to the same "distrust" path as an
+        // unconfirmed-version registry match below (job-39's isExemptEcosystem static-rejection
+        // exemption above is untouched — it's a different, narrower rule about the no-AI-available
+        // weak-match check, not this final trust decision).
+        boolean isSoleChocolateyMatch = registryMatch.isPresent() && chosenCpe == null
+                && "chocolatey".equals(registryMatch.get().ecosystem());
         boolean trustRegistryMatch = registryMatch.isPresent()
-                && (registryMatch.get().exactVersionConfirmed() || chosenCpe == null);
+                && (registryMatch.get().exactVersionConfirmed() || chosenCpe == null)
+                && !isSoleChocolateyMatch;
         if (registryMatch.isPresent() && !trustRegistryMatch) {
-            log.info("Distrusting unconfirmed-version registry match for item {} (ecosystem={} package={}) — "
-                    + "a CPE match already identifies this product, likely an unrelated same-named package",
-                    item.getId(), registryMatch.get().ecosystem(), registryMatch.get().packageName());
+            if (isSoleChocolateyMatch) {
+                log.info("Not trusting sole Chocolatey match for item {} (package={}) as IDENTIFIED — "
+                        + "Chocolatey has no downstream vulnerability query path (no CPE/OSV linkage) and "
+                        + "no other CPE corroborates it, so treating this as an uncorroborated weak match "
+                        + "instead of a false 'investigated, 0 vulnerabilities' result",
+                        item.getId(), registryMatch.get().packageName());
+                // REVISE item 3 (senior review 2026-08-29): the other two "distrust this registry
+                // match" paths above (static/AI rejection of a weak match, lines ~495/515) both
+                // attempt a live CPE rescue after discarding the registry match — this branch never
+                // did, even though a sole Chocolatey match is discarded for exactly the same reason
+                // (nothing else corroborates it). Same rescue call, same shape: only ever upgrades
+                // this item from "uncorroborated" to "has a real, independently-found CPE" — never
+                // downgrades anything the registry match itself would have provided.
+                registryMatch = Optional.empty();
+                CpeDictionaryEntry rescued = rescueCpeAfterRegistryMatchRejected(
+                        item, userId, vendorForCpeRescue, productNameForCpeRescue);
+                if (rescued != null) {
+                    chosenCpe = rescued;
+                    log.info("Live CPE lookup after sole-Chocolatey-match rejected found a fallback "
+                            + "candidate for item {}: {}", item.getId(), chosenCpe.getCpeString());
+                }
+            } else {
+                log.info("Distrusting unconfirmed-version registry match for item {} (ecosystem={} package={}) — "
+                        + "a CPE match already identifies this product, likely an unrelated same-named package",
+                        item.getId(), registryMatch.get().ecosystem(), registryMatch.get().packageName());
+            }
             // Round-5 fix: the CPE that got this far may only have passed passesTargetSwGate BECAUSE
             // of this registry match's own ecosystem context (e.g. crates.io "slack" admitting
             // slack_morphism_project:slack_morphism, target_sw=rust) — now that the registry match
@@ -862,7 +913,7 @@ public class Stage1IdentificationService {
         boolean withinBudget = apiKey.isPresent()
                 && jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
         if (!withinBudget) {
-            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches)), false, null);
+            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
         }
 
         List<CandidateDto> candidateDtos = matches.stream()
@@ -873,7 +924,7 @@ public class Stage1IdentificationService {
 
         if (result.isEmpty()) {
             // LLM call failed — degrade to the pre-arbitration best-effort behavior.
-            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches)), false, null);
+            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
         }
         if (!result.get().matched()) {
             log.info("AI rejected all {} same-named registry candidates for item {} ('{}') as implausible "
@@ -883,7 +934,7 @@ public class Stage1IdentificationService {
         Integer selectedIndex = result.get().selectedIndex();
         if (selectedIndex == null || selectedIndex < 0 || selectedIndex >= matches.size()) {
             log.warn("LLM registry arbitration returned an invalid selection for item {}: {}", item.getId(), result.get());
-            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches)), false, null);
+            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
         }
         RegistryMatch selected = matches.get(selectedIndex);
         log.info("AI arbitrated {} same-named registry candidates for item {} ('{}') -> selected ecosystem={} package={}",
@@ -891,8 +942,100 @@ public class Stage1IdentificationService {
         return new RegistryResolution(Optional.of(selected), true, BigDecimal.valueOf(result.get().confidence()));
     }
 
-    private RegistryMatch maxConfidenceMatch(List<RegistryMatch> matches) {
-        return matches.stream().max((a, b) -> a.confidence().compareTo(b.confidence())).orElseThrow();
+    /** Margin used by {@link #maxConfidenceMatch} to decide whether several matches are "tied" —
+     *  registry clients only ever emit confidence from a small, discrete set of constants (0.4/0.5
+     *  unconfirmed, 0.95 version-confirmed — see e.g. {@code ChocolateyRegistryClient}'s
+     *  VERSION_CONFIRMED/UNCONFIRMED_CONFIDENCE), so in practice this margin only ever collapses
+     *  exact ties, but is expressed as a small tolerance rather than {@code equals} in case a future
+     *  registry client's confidence is computed rather than a fixed constant. */
+    private static final BigDecimal REGISTRY_MATCH_TIE_MARGIN = new BigDecimal("0.05");
+
+    /**
+     * Maps an OSV/registry ecosystem to the {@code usage_text} keywords that indicate it —
+     * deliberately conservative, multi-character phrases (never a bare "go" or "pub", which occur
+     * as ordinary English substrings, e.g. "go"-inside-"django"/"algorithm") so a hit here is real
+     * signal, not noise. Only consulted by {@link #maxConfidenceMatch} as a tie-break among already-
+     * tied top candidates — see that method's javadoc for why this can never override a single clear
+     * winner.
+     *
+     * <p>REVISE item 2 (senior review 2026-08-29): values are pre-compiled word-boundary {@link
+     * Pattern}s, not plain strings matched via {@link String#contains}. Plain substring containment
+     * let short keywords false-positive inside unrelated words — "JavaScript" contains maven's
+     * "java", "CI pipeline" contains pypi's "pip", "hex editor" contains hex's "hex",
+     * "sourceforge.net" contains nuget's ".net", "Gemini" contains rubygems' "gem" — any of which
+     * could flip a genuine npm/maven (or similar) tie to the wrong ecosystem. {@code
+     * (?<![a-z0-9])keyword(?![a-z0-9])} requires the keyword not be immediately adjacent to another
+     * alphanumeric character on either side, so it only matches a real standalone word/token, not a
+     * substring inside a longer one — {@link Pattern#quote} keeps punctuation-bearing keywords
+     * ({@code .net}, {@code c#}) literal rather than being interpreted as regex metacharacters.
+     */
+    private static final java.util.Map<String, List<Pattern>> ECOSYSTEM_USAGE_TEXT_KEYWORDS =
+            buildEcosystemUsageTextKeywordPatterns();
+
+    private static java.util.Map<String, List<Pattern>> buildEcosystemUsageTextKeywordPatterns() {
+        java.util.Map<String, List<String>> rawKeywords = java.util.Map.ofEntries(
+                java.util.Map.entry("pypi", List.of("pypi", "pip")),
+                java.util.Map.entry("npm", List.of("npm", "node")),
+                java.util.Map.entry("rubygems", List.of("gem", "ruby")),
+                java.util.Map.entry("crates.io", List.of("crate", "rust", "cargo")),
+                java.util.Map.entry("packagist", List.of("packagist", "composer", "php")),
+                java.util.Map.entry("hex", List.of("hex", "elixir")),
+                java.util.Map.entry("pub", List.of("pub.dev", "dart", "flutter")),
+                java.util.Map.entry("maven", List.of("maven", "gradle", "java")),
+                java.util.Map.entry("nuget", List.of("nuget", ".net", "c#")),
+                java.util.Map.entry("go", List.of("go get", "golang")));
+        java.util.Map<String, List<Pattern>> compiled = new java.util.LinkedHashMap<>();
+        rawKeywords.forEach((ecosystem, keywords) -> compiled.put(ecosystem, keywords.stream()
+                .map(keyword -> Pattern.compile("(?<![a-z0-9])" + Pattern.quote(keyword) + "(?![a-z0-9])"))
+                .toList()));
+        return java.util.Map.copyOf(compiled);
+    }
+
+    /**
+     * golden-300 fix (2026-08-29, item 2 "cross-registry same-name collision"): when the AI
+     * disambiguation budget is exhausted (or unavailable), this degrades to picking the
+     * highest-confidence registry match with no other signal — which silently picks whichever
+     * registry happened to be queried/injected first among several equally-confident same-named
+     * matches (numpy, jekyll, redis, phoenix, phoenix_live_view, http all mis-routed this way in
+     * golden-300). {@code item.usage_text} is already stored and available but was never consulted
+     * here at all. Deliberately narrow: only ever consulted when {@code matches} has more than one
+     * candidate within {@link #REGISTRY_MATCH_TIE_MARGIN} of the top confidence — a single clear
+     * leader (the overwhelmingly common case, and the only case reachable when {@code matches} has
+     * exactly one entry in the first place, per this method's only caller) is returned exactly as
+     * before, unaffected by this fallback. Even among tied candidates, this only overrides the
+     * default max-confidence pick when the usage text narrows the tie down to exactly one
+     * ecosystem — 0 or 2+ surviving keyword hits leaves the original (arbitrary but unchanged)
+     * max-confidence behavior in place, so this can only ever narrow an already-ambiguous pick, not
+     * introduce a new wrong one.
+     */
+    private RegistryMatch maxConfidenceMatch(List<RegistryMatch> matches, String usageText) {
+        RegistryMatch best = matches.stream().max((a, b) -> a.confidence().compareTo(b.confidence())).orElseThrow();
+        List<RegistryMatch> tied = matches.stream()
+                .filter(m -> m.confidence().subtract(best.confidence()).abs().compareTo(REGISTRY_MATCH_TIE_MARGIN) <= 0)
+                .toList();
+        if (tied.size() <= 1 || usageText == null || usageText.isBlank()) {
+            return best;
+        }
+        String normalizedUsageText = usageText.toLowerCase(java.util.Locale.ROOT);
+        List<RegistryMatch> usageTextNarrowed = tied.stream()
+                .filter(m -> usageTextMentionsEcosystem(normalizedUsageText, m.ecosystem()))
+                .toList();
+        if (usageTextNarrowed.size() == 1) {
+            log.info("Tie-breaking {} equally-confident same-named registry matches using usage_text -> "
+                    + "ecosystem={} package={}", tied.size(), usageTextNarrowed.get(0).ecosystem(),
+                    usageTextNarrowed.get(0).packageName());
+            return usageTextNarrowed.get(0);
+        }
+        return best;
+    }
+
+    /** @param normalizedUsageText already lower-cased by the caller. */
+    private boolean usageTextMentionsEcosystem(String normalizedUsageText, String ecosystem) {
+        List<Pattern> patterns = ECOSYSTEM_USAGE_TEXT_KEYWORDS.get(ecosystem);
+        if (patterns == null) {
+            return false;
+        }
+        return patterns.stream().anyMatch(p -> p.matcher(normalizedUsageText).find());
     }
 
     /** Routes every registry call through {@link RegistryLookupCache} (keyed on ecosystem+productName,
@@ -1201,10 +1344,28 @@ public class Stage1IdentificationService {
      * first. {@link #passesTargetSwGate}'s hard rejection of a genuinely wrong-platform candidate is
      * unaffected by this reordering — this only changes which of several <em>already-gated-in</em>
      * candidates sorts first.
+     *
+     * <p>golden-300 fix (2026-08-29, item 3 "part=o excluded from the candidate pool"): {@code
+     * part=o} (operating system) candidates are admitted as a fallback, but ONLY when the pool has
+     * zero {@code part=a} candidates at all — see {@link #isApplicationPart}'s javadoc for why this
+     * is safe. The job 37 incident this class's {@code part=a}-only gate was built to fix
+     * (REVISE item 6 below) was a hardware CPE ({@code cpe:2.3:h:corsair:commander_pro}) outscoring
+     * *genuine, present* software candidates on raw text similarity — i.e. the bug was a wrong
+     * candidate crowding out a right one that already existed in the pool, not a right candidate
+     * being altogether absent. This fallback only ever fires in the latter situation (no {@code
+     * part=a} row exists anywhere in the pool), which structurally cannot recreate the former: a
+     * real application CPE, whenever one is present, is always preferred and this fallback never
+     * even runs. It's needed because some real, in-scope products — Cisco IOS XE, PAN-OS, MikroTik
+     * RouterOS — are catalogued by NVD only as {@code part=o}, with no {@code part=a} entry at all,
+     * so the pre-fix gate silently discarded the only candidate that could ever have identified
+     * them. {@code part=h} (hardware) stays excluded unconditionally either way — the job 37
+     * incident was specifically about hardware, and network-device software update advisories are
+     * never filed against hardware CPEs.
      */
     private List<CpeDictionaryEntry> rankCpeCandidates(String vendor, String exactMatchQuery,
             List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit) {
         java.util.LinkedHashMap<String, CpeDictionaryEntry> bestPerProduct = new java.util.LinkedHashMap<>();
+        java.util.LinkedHashMap<String, CpeDictionaryEntry> bestOsPerProductFallback = new java.util.LinkedHashMap<>();
         for (CpeDictionaryEntry entry : candidates) {
             // REVISE item 6 (senior review, job 37 root-cause): a CPE Dictionary row can be for
             // hardware or an operating system just as easily as an application — NVD really does
@@ -1213,12 +1374,22 @@ public class Stage1IdentificationService {
             // legitimate reason to attach a hardware/OS CPE to a software inventory item. Filtered
             // here, the one choke point every candidate-producing path (literal search, live NVD
             // fallback, name-variant search) already funnels through via rankAndGate.
-            if (!isApplicationPart(entry)) {
-                continue;
+            if (isApplicationPart(entry)) {
+                // Candidates arrive in descending trigram-score order, so the first row seen for a
+                // vendor:product pair is already that product's best-scoring row.
+                bestPerProduct.putIfAbsent(identityKey(entry), entry);
+            } else if (isOperatingSystemPart(entry)) {
+                // golden-300 fix (item 3): kept aside, only ever used below if bestPerProduct ends up
+                // empty. Hardware (part=h) and anything else is still dropped outright, exactly as
+                // before this fix.
+                bestOsPerProductFallback.putIfAbsent(identityKey(entry), entry);
             }
-            // Candidates arrive in descending trigram-score order, so the first row seen for a
-            // vendor:product pair is already that product's best-scoring row.
-            bestPerProduct.putIfAbsent(identityKey(entry), entry);
+        }
+        if (bestPerProduct.isEmpty() && !bestOsPerProductFallback.isEmpty()) {
+            log.info("No part=a (application) CPE candidates found — falling back to {} part=o "
+                    + "(operating system) candidate(s) for exactMatchQuery='{}'",
+                    bestOsPerProductFallback.size(), exactMatchQuery);
+            bestPerProduct = bestOsPerProductFallback;
         }
 
         String normalizedVendor = normalizeForContainment(vendor);
@@ -1245,11 +1416,13 @@ public class Stage1IdentificationService {
     }
 
     /** REVISE item 6: whether {@code entry}'s CPE {@code part} segment (index 2, 0-indexed) is
-     *  {@code a} (application) — the only part value that can ever be a software inventory item's
-     *  own identity. A plain split is safe here (never the escape-aware {@link CpeUtils} splitter):
-     *  the part segment always precedes any vendor/product field, so it can never itself contain an
-     *  escaped colon. Defensively permissive (returns true) for a CPE string too short to even have
-     *  a part segment, mirroring this class's other defensive CPE-parsing fallbacks. */
+     *  {@code a} (application) — the primary part value for a software inventory item's own
+     *  identity (see {@link #isOperatingSystemPart} for the narrow {@code part=o} fallback added by
+     *  the golden-300 fix, item 3). A plain split is safe here (never the escape-aware {@link
+     *  CpeUtils} splitter): the part segment always precedes any vendor/product field, so it can
+     *  never itself contain an escaped colon. Defensively permissive (returns true) for a CPE string
+     *  too short to even have a part segment, mirroring this class's other defensive CPE-parsing
+     *  fallbacks. */
     private boolean isApplicationPart(CpeDictionaryEntry entry) {
         String cpeString = entry.getCpeString();
         if (cpeString == null) {
@@ -1257,6 +1430,23 @@ public class Stage1IdentificationService {
         }
         String[] segments = cpeString.split(":", -1);
         return segments.length <= 2 || "a".equals(segments[2]);
+    }
+
+    /** golden-300 fix (2026-08-29, item 3): whether {@code entry}'s CPE {@code part} segment is
+     *  {@code o} (operating system) — used by {@link #rankCpeCandidates} only as a fallback pool for
+     *  when zero {@code part=a} candidates exist at all (see that method's javadoc). Deliberately
+     *  narrower than {@link #isApplicationPart}: a CPE string too short to have a part segment is
+     *  NOT defensively treated as {@code o} here (that permissiveness only ever makes sense for the
+     *  primary, always-checked-first {@code part=a} case), and {@code part=h} (hardware) is never
+     *  included by either method — the job 37 incident this whole gate exists to prevent was
+     *  specifically a hardware CPE. */
+    private boolean isOperatingSystemPart(CpeDictionaryEntry entry) {
+        String cpeString = entry.getCpeString();
+        if (cpeString == null) {
+            return false;
+        }
+        String[] segments = cpeString.split(":", -1);
+        return segments.length > 2 && "o".equals(segments[2]);
     }
 
     /** Derived from the CPE string rather than the entity's own vendor/product columns: the CPE
