@@ -1496,23 +1496,15 @@ public class Stage1IdentificationService {
      * version) defaults to {@code true}.
      */
     private boolean versionCoverageIsPlausible(CpeDictionaryEntry entry, String itemVersion) {
-        java.util.Set<String> catalogedVersions = entry.getCatalogedVersions();
-        if (catalogedVersions == null || catalogedVersions.isEmpty()) {
-            return true;
-        }
-        java.util.OptionalInt maxCatalogedMajor = catalogedVersions.stream()
-                .map(Stage1IdentificationService::leadingMajorVersion)
-                .filter(java.util.OptionalInt::isPresent)
-                .mapToInt(java.util.OptionalInt::getAsInt)
-                .max();
-        if (maxCatalogedMajor.isEmpty()) {
+        Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
+        if (maxCatalogedMajor == null) {
             return true;
         }
         java.util.OptionalInt itemMajor = leadingMajorVersion(itemVersion);
         if (itemMajor.isEmpty()) {
             return true;
         }
-        return itemMajor.getAsInt() <= maxCatalogedMajor.getAsInt();
+        return itemMajor.getAsInt() <= maxCatalogedMajor;
     }
 
     /** Parses the leading run of ASCII digits at the very start of {@code version} as an integer
