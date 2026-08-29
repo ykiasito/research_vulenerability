@@ -376,6 +376,13 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
      * times used to cost 3 wasted requests plus {@code 3x} the shared rate limiter's pacing delay
      * (see {@link ExternalRegistryRateLimiter}, which gates every Maven lookup in the process, not
      * just this one item's) for zero benefit.
+     *
+     * <p>REVISE (senior review 2026-08-30): a response exceeding {@link #MAX_METADATA_RESPONSE_BYTES}
+     * is excluded from the retry policy for the same reason — it's a deterministic rejection of
+     * that specific response, not a transient failure, so retrying it wastes the same 3 requests
+     * and pacing delay for zero benefit. {@link #fetchMetadataXml} likewise returns {@code null}
+     * directly for it instead of letting the underlying {@link ResponseTooLargeException} reach
+     * this loop's generic {@code catch (Exception e)} below.
      */
     private byte[] fetchMetadataXmlWithRetry(String groupId, String artifactId) {
         Exception lastError = null;
@@ -451,7 +458,16 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                         throw new IllegalStateException(
                                 "maven-metadata.xml request returned " + response.getStatusCode());
                     }
-                    return readBounded(response.getBody(), MAX_METADATA_RESPONSE_BYTES);
+                    // A response exceeding the byte cap is likewise a confirmed, deterministic
+                    // answer -- not a transient failure -- so it must not be retried either: see
+                    // ResponseTooLargeException's and fetchMetadataXmlWithRetry's javadoc.
+                    try {
+                        return readBounded(response.getBody(), MAX_METADATA_RESPONSE_BYTES);
+                    } catch (ResponseTooLargeException e) {
+                        log.debug("maven-metadata.xml response exceeded size cap for {}:{}: {}",
+                                groupId, artifactId, e.getMessage());
+                        return null;
+                    }
                 });
     }
 
@@ -512,6 +528,22 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         return factory.newDocumentBuilder();
     }
 
+    /**
+     * REVISE (senior review 2026-08-30): thrown by {@link #readBounded} when a response exceeds
+     * its byte cap. This is deliberately unchecked and distinct from the genuine {@link
+     * IOException}s the same read loop can still throw (e.g. a real connection drop mid-read) —
+     * exceeding the cap is a confirmed, content-based rejection, not a transient I/O failure, so
+     * {@link #fetchMetadataXml} catches this one specifically and returns {@code null} the same
+     * way it already does for a 404 (see {@link #fetchMetadataXmlWithRetry}'s javadoc for why a
+     * deterministic "no" must not be retried), while a genuine {@link IOException} still falls
+     * through to that retry loop unchanged.
+     */
+    private static final class ResponseTooLargeException extends RuntimeException {
+        ResponseTooLargeException(String message) {
+            super(message);
+        }
+    }
+
     /** Reads {@code in} fully into memory, failing fast if it would exceed {@code maxBytes} — same
      *  defense-in-depth pattern {@code ChocolateyRegistryClient} uses for its own XML feed. */
     private static byte[] readBounded(InputStream in, int maxBytes) throws IOException {
@@ -522,7 +554,7 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         while ((read = in.read(buffer)) != -1) {
             total += read;
             if (total > maxBytes) {
-                throw new IOException("maven-metadata.xml response exceeded " + maxBytes + " byte cap");
+                throw new ResponseTooLargeException("maven-metadata.xml response exceeded " + maxBytes + " byte cap");
             }
             out.write(buffer, 0, read);
         }

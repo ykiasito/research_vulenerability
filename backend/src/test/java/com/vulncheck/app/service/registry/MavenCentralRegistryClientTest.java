@@ -201,6 +201,29 @@ class MavenCentralRegistryClientTest {
     }
 
     @Test
+    void treatsAMavenMetadataXmlResponseExceedingTheSizeCapAsAnImmediateNonRetryableAnswer() {
+        // Same category of bug as the 404 case above: a response exceeding the 512KB size cap is
+        // a deterministic, content-based rejection of that response -- not a transient failure --
+        // so it must not be retried either. Only one maven-metadata.xml request is expected here:
+        // if it were retried, MockRestServiceServer would reject the next (unexpected) request
+        // outright and fail this test loudly.
+        server.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(candidateSearchResponse(
+                        artifactDoc("com.example", "some-tool", 5)), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("repo1.maven.org")))
+                .andRespond(withSuccess(oversizedMavenMetadataXml(), MediaType.APPLICATION_XML));
+
+        Optional<RegistryMatch> result = client.lookup("some-tool", "9.9.9");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().exactVersionConfirmed()).isFalse();
+        assertThat(result.get().confidence()).isEqualByComparingTo("0.5");
+        server.verify();
+    }
+
+    @Test
     void onlyChecksTheMavenMetadataXmlFallbackForTheTopFewCandidatesWhenNoneConfirmViaSolr() {
         // 4 candidates, none confirmed by Solr -- the (roughly twice as costly) maven-metadata.xml
         // fallback pass must only run against the top METADATA_FALLBACK_CANDIDATE_LIMIT (3), not
@@ -411,6 +434,15 @@ class MavenCentralRegistryClientTest {
             return "{\"response\":{\"numFound\":0,\"start\":0,\"docs\":[]}}";
         }
         return "{\"response\":{\"numFound\":1,\"start\":0,\"docs\":[{\"g\":\"x\",\"a\":\"y\",\"v\":\"z\"}]}}";
+    }
+
+    /** A well-formed maven-metadata.xml body padded past the 512KB cap {@code
+     *  MavenCentralRegistryClient#MAX_METADATA_RESPONSE_BYTES} enforces on the read. */
+    private String oversizedMavenMetadataXml() {
+        String padding = "x".repeat(600 * 1024);
+        return "<metadata><groupId>x</groupId><artifactId>y</artifactId><versioning>"
+                + "<versions><version>1.0.0</version></versions></versioning>"
+                + "<!--" + padding + "--></metadata>";
     }
 
     private String mavenMetadataXml(String... versions) {
