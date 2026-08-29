@@ -51,4 +51,21 @@ public class CpeDictionaryEntry {
      */
     @Transient
     private Set<String> targetSwValues;
+
+    /**
+     * The highest major version number (leading digit run of CPE 2.3 segment 6, 1-indexed) across
+     * every row sharing this entry's vendor/product pair, not just this one row's own version — a
+     * single scalar rather than the full per-(vendor, product) set of catalogued version strings,
+     * since {@link com.vulncheck.app.service.Stage1IdentificationService}'s {@code
+     * versionCoverageIsPlausible} tie-break only ever needs the highest one and real (vendor,
+     * product) pairs can have thousands of distinct catalogued versions (see {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#findFuzzyMatches} for how this gets
+     * populated and computed). Not a persisted column: populated in Java from a per-query aggregate,
+     * hence {@link Transient}. Null whenever a candidate wasn't sourced from that query (e.g. the
+     * name-variant search) or none of the pair's catalogued versions had a numeric leading run,
+     * which {@link com.vulncheck.app.service.Stage1IdentificationService} treats as "no version
+     * coverage evidence" (never a hard reject — see that class's {@code versionCoverageIsPlausible}).
+     */
+    @Transient
+    private Integer maxCatalogedMajor;
 }

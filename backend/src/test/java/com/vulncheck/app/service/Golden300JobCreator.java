@@ -42,8 +42,9 @@ import org.springframework.test.context.TestPropertySource;
 })
 @Disabled("Run once (2026-08-29, job 191) to create the golden-300 no-cost re-measurement job "
         + "against the real dev DB, verifying the Chocolatey/usage_text-tie-break/part=o accuracy "
-        + "fixes. Left disabled so it can never re-fire (and re-persist) on a routine mvn test run "
-        + "-- see class javadoc.")
+        + "fixes. Re-run once more (2026-08-30, job 193) for the backlog item 15 P1/P2 chocolatey "
+        + "target_sw gate / version-coverage tie-break re-measurement. Left disabled so it can "
+        + "never re-fire (and re-persist) on a routine mvn test run -- see class javadoc.")
 class Golden300JobCreator {
 
     private static final Long REAL_USER_ID = 5L;

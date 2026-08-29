@@ -14,15 +14,30 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * {@code similarity(col, query) > threshold} — the query shape the old {@code @Query}-annotated
+ * {@code similarity(col, query) > threshold} alone — the query shape the old {@code @Query}-annotated
  * method used — cannot use a pg_trgm GIN index at all (confirmed live via {@code EXPLAIN}: even
  * with {@code enable_seqscan} forced off, PostgreSQL has no alternative plan and falls back to a
  * full sequential scan regardless). Only the {@code %} similarity operator is index-accelerated,
- * but its threshold is a session-level setting ({@code pg_trgm.similarity_threshold}), not a query
- * parameter — hence the manual {@code SET LOCAL} + raw JDBC here instead of a declarative
- * {@code @Query}. At the row counts this table had during initial development (a few hundred to
- * ~1,400 rows) the sequential scan was invisibly fast either way; this only becomes a real problem
- * as the dictionary grows, which is exactly the kind of thing worth fixing before it's a surprise.
+ * but its threshold is a session-level setting ({@code pg_trgm.similarity_threshold}), defaulting
+ * to 0.3, not a query parameter.
+ *
+ * <p>An earlier version of {@link #collect} raised that session threshold per call with {@code SET
+ * LOCAL pg_trgm.similarity_threshold = ...}, scoped by wrapping the method in {@code @Transactional}
+ * (since {@code SET LOCAL} only has effect inside a transaction block). A PR #14 review round
+ * suspected this could silently no-op if a caller ever reached this repository outside a
+ * transaction block (e.g. through a different thread/proxy path than the one {@code
+ * @Transactional} wraps), which would leave the {@code %} pre-filter running at its 0.3 session
+ * default instead of the caller's real threshold. That specific failure was never actually
+ * reproduced against the dev DB — the suspected {@code SET LOCAL can only be used in transaction
+ * blocks} warning did not appear in the Postgres log for a real request through this method — but
+ * the concern about depending on exactly which proxying/threading path a given caller happens to go
+ * through (easy to get right by accident today and silently wrong again after an unrelated
+ * refactor) still stands. So {@code SET LOCAL} stays, restricting the GIN-indexed {@code %}
+ * pre-filter to roughly the caller's own threshold (cheap and index-accelerated, but session-scoped
+ * and therefore not fully trustworthy on its own), and {@link #collect} additionally enforces the
+ * real per-call threshold with an explicit {@code AND similarity(col, ?) > ?} predicate that does
+ * not depend on transaction/thread context at all. Belt and braces: {@code SET LOCAL} is the
+ * performance optimization, the explicit predicate is the correctness guarantee.
  */
 @Repository
 @RequiredArgsConstructor
@@ -108,6 +123,24 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
      *  so interpolating it directly into the SQL text is safe. */
     private void collect(String column, String query, double threshold, int limit,
             Map<Long, CpeDictionaryEntry> byId, Map<Long, Double> bestScoreById) {
+        // SET LOCAL restricts the GIN-indexed "%" pre-filter below to roughly the caller's own
+        // threshold instead of the 0.3 session default, because a tighter threshold lets "%" itself
+        // discard more candidates before anything else runs. The magnitude of that effect depends on
+        // how much the query's own trigram score distribution clusters near the session default --
+        // it is not a fixed multiplier. Re-measured 2026-08-30 with EXPLAIN (ANALYZE, BUFFERS) against
+        // the real dictionary, on this method's current CROSS JOIN LATERAL query shape (title column,
+        // limit 40, threshold 0.6 -- CPE_TITLE_SIMILARITY_THRESHOLD): title 'Google Chrome' went from
+        // 363.3ms at the 0.3 session default down to 84.5ms with SET LOCAL 0.6 (~4.3x), while title
+        // 'Linux Kernel' only went from 222.9ms down to 147.0ms (~1.5x) -- Chrome's query text has few
+        // enough close trigram matches that tightening the pre-filter prunes much more aggressively,
+        // where Linux Kernel's more common words leave a larger candidate set at either threshold.
+        // (These absolute numbers also reflect the dev DB not yet having the V31 (vendor, product)
+        // index applied -- see this method's own d.vendor = t.vendor comment below -- so the LATERAL
+        // half of each plan falls back to the product trigram index for that equality join; V31 would
+        // change the absolute totals but not the relative SET LOCAL effect measured here, since it
+        // only touches the LATERAL join, not the "%" pre-filter this comment is about.) See this
+        // class's own javadoc for why the explicit "AND similarity(...) > ?" predicate further down is
+        // kept alongside this rather than relied on alone.
         jdbcTemplate.execute("SET LOCAL pg_trgm.similarity_threshold = " + threshold);
         // DISTINCT ON (vendor, product) before applying the limit: the dictionary holds one row
         // per catalogued version, and 72.7% of the real NVD dictionary's 1.8M rows are such
@@ -119,36 +152,92 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         // which is not the ordering we want the limit applied to.
         //
         // target_sw_values (senior review, job 36 root-cause / REVISE item 4): the set of distinct
-        // target_sw values (CPE segment 11, 1-indexed) across every row sharing a (vendor, product)
-        // pair — needed by Stage1IdentificationService's target_sw gate/ranking preference, which
-        // needs the *set* for the pair, not just whichever single row DISTINCT ON happens to keep.
-        // A window function, not a join/CTE over the whole table: PostgreSQL applies window
-        // functions after the WHERE clause, so this aggregates only over the rows the trigram `%`
-        // filter already matched (a small, index-accelerated result set), never a full 1.8M-row
-        // scan — folded into this same query rather than a separate per-(vendor,product) follow-up
-        // query, which would have no btree index to run on at all (measured and rejected).
-        // No DISTINCT inside the array_agg: PostgreSQL rejects DISTINCT in a window-function
-        // aggregate ("DISTINCT is not implemented for window functions"). Per-(vendor,product)
-        // groups are small (a few hundred rows at most per the comment above), so the array just
-        // carries duplicate target_sw values across; toStringSet() below dedupes on the Java side.
+        // target_sw values (CPE segment 11, 1-indexed) across the rows sharing a (vendor, product)
+        // pair that also matched this call's own trigram filter — needed by
+        // Stage1IdentificationService's target_sw gate/ranking preference, which needs the *set* for
+        // the pair, not just whichever single row DISTINCT ON happens to keep.
         //
-        // regexp_replace(cpe_string, '\\:', '', 'g') (senior review, job 37 root-cause): a plain
+        // max_cataloged_major (docs/spec/task-backlog.md item 15, P2; PR #14 REVISE): a single
+        // nullable scalar rather than the full per-(vendor, product) set of catalogued version
+        // strings. Real (vendor, product) pairs get large — vim:vim has 15,751 distinct catalogued
+        // versions, google:chrome 9,530 — and Stage1IdentificationService#versionCoverageIsPlausible
+        // only ever reduces the set down to its single highest major version anyway, so shipping the
+        // whole set over JDBC and re-parsing every element in Java on every ranking comparison was
+        // pure waste. Computed here as max() over each row's leading digit run of the version
+        // segment (CPE segment 6, 1-indexed), matching
+        // Stage1IdentificationService#leadingMajorVersion's own parsing rule; capped at 9 digits so
+        // the ::integer cast can never overflow regardless of what a pathological version string
+        // contains. NULLIF/max collapse to SQL NULL when nothing in the partition has a numeric
+        // leading run, which versionCoverageIsPlausible treats identically to "no evidence"
+        // (always plausible).
+        //
+        // Both are re-derived via a CROSS JOIN LATERAL against the small (<= limit, currently 40)
+        // row set the trigram-filtered subquery above already narrows down to, rather than as a
+        // window function over that subquery: a window function is evaluated *after* the WHERE
+        // <column> % ? filter, so its partition would silently only ever contain whichever rows of
+        // the group happened to pass this call's own trigram filter. That's the deliberately
+        // preserved gate semantics for target_sw_values (see above), but would be a real bug for
+        // max_cataloged_major, which needs every catalogued version for the pair regardless of
+        // whether that particular row's product/title trigram-matched the query — e.g. a (vendor,
+        // product) group whose title varies a lot release to release could otherwise have some of
+        // its version rows silently excluded depending on which of the two collect() calls
+        // (product-column vs title-column) found it and how well each individual row's title
+        // happened to match.
+        //   - target_sw_values keeps an explicit FILTER reproducing this call's own trigram filter
+        //     exactly — both the "%" pre-filter and the "similarity(...) > ?" predicate, mirroring
+        //     the outer subquery's WHERE clause — so this PR intentionally does not change that
+        //     gate's existing behavior (see docs/spec/task-backlog.md items 24/26, which reason
+        //     about the current gate as-is). Without the similarity(...) predicate here too, this
+        //     FILTER would fall back to the "%" operator's session-level threshold alone, which can
+        //     admit a wider set than the outer query's own explicit threshold.
+        //   - max_cataloged_major has no filter at all and aggregates the whole (vendor, product)
+        //     partition, which is the actual bug fix.
+        //
+        // d.vendor = t.vendor AND d.product = t.product (not IS NOT DISTINCT FROM): a NULL vendor
+        // or product would never equal itself under plain "=", dropping that row out of the LATERAL
+        // aggregate entirely instead of joining back to its own outer row — verified against the
+        // real dictionary that vendor/product are NULL on zero rows today, so this never actually
+        // happens in practice. "=" was chosen over "IS NOT DISTINCT FROM" because it is a plain
+        // btree-indexable equality that the V31 (vendor, product) index (see that migration) can
+        // back directly, where "IS NOT DISTINCT FROM" cannot use a plain btree index scan the same
+        // way. The "cost 8.57 vs 47147" figure from an earlier revision of this comment was written
+        // before V31 had actually been applied to any real database and was never reproduced — as of
+        // 2026-08-30 the dev DB still only has V30 applied (V31 has not been rolled out yet), so that
+        // specific comparison remains unverified pending V31's actual rollout; re-measure with EXPLAIN
+        // once V31 is applied rather than trusting the old figure.
+        //
+        // What has been verified against the real dictionary on this dev DB (2026-08-30, before V31):
+        // product 'chrome' went from 2003.2ms on the pre-LATERAL query shape (a window function over
+        // the whole trigram-filtered set, re-parsed row by row in Java) to 375.0ms on this method's
+        // current CROSS JOIN LATERAL shape, ~5x faster, because the LATERAL join only re-derives
+        // target_sw_values/max_cataloged_major for the <= limit rows the trigram filter already
+        // narrowed down to, rather than for every trigram-filtered row up front.
+        //
+        // regexp_replace(d.cpe_string, '\\:', '', 'g') (senior review, job 37 root-cause): a plain
         // split_part mis-indexes every segment from the first escaped colon onward — CPE 2.3
         // backslash-escapes reserved characters within a segment, and a real dictionary row exercises
         // exactly that (Perl's "HTTP::Session" module: cpe:2.3:a:ktat:http\:\:session:0.01_01:*:*:*:
         // *:perl:*:*). Neutralizing "\:" pairs before splitting realigns every later segment's index
         // without a second round-trip query (an explicit constraint from the round-2 review) — the
-        // product/vendor/title columns are untouched, only this target_sw extraction is affected, and
-        // it's still folded into the same window-function query. Confirmed via EXPLAIN ANALYZE that
-        // this leaves the query plan (bitmap index scan -> window agg -> incremental sort) unchanged.
-        String sql = "SELECT * FROM ("
+        // product/vendor/title columns are untouched, only this target_sw/version extraction is
+        // affected.
+        String sql = "SELECT t.*, a.target_sw_values, a.max_cataloged_major FROM ("
+                + "SELECT * FROM ("
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at, "
-                + "similarity(" + column + ", ?) AS score, "
-                + "array_agg(split_part(regexp_replace(cpe_string, '\\\\:', '', 'g'), ':', 11)) "
-                + "OVER (PARTITION BY vendor, product) AS target_sw_values "
-                + "FROM cpe_dictionary WHERE " + column + " % ? "
+                + "similarity(" + column + ", ?) AS score "
+                + "FROM cpe_dictionary WHERE " + column + " % ? AND similarity(" + column + ", ?) > ? "
                 + "ORDER BY vendor, product, score DESC"
-                + ") deduped ORDER BY score DESC LIMIT ?";
+                + ") deduped ORDER BY score DESC LIMIT ?"
+                + ") t "
+                + "CROSS JOIN LATERAL ("
+                + "SELECT array_agg(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 11)) "
+                + "FILTER (WHERE d." + column + " % ? AND similarity(d." + column + ", ?) > ?) AS target_sw_values, "
+                + "max((NULLIF(substring(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 6) "
+                + "from '^[0-9]{1,9}'), ''))::integer) AS max_cataloged_major "
+                + "FROM cpe_dictionary d "
+                + "WHERE d.vendor = t.vendor AND d.product = t.product"
+                + ") a "
+                + "ORDER BY t.score DESC";
         jdbcTemplate.query(sql, rs -> {
             long id = rs.getLong("id");
             double score = rs.getDouble("score");
@@ -162,10 +251,11 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 OffsetDateTime lastSyncedAt = rs.getObject("last_synced_at", OffsetDateTime.class);
                 entry.setLastSyncedAt(lastSyncedAt);
                 entry.setTargetSwValues(toStringSet(rs.getArray("target_sw_values")));
+                entry.setMaxCatalogedMajor(rs.getObject("max_cataloged_major", Integer.class));
                 byId.put(id, entry);
                 bestScoreById.put(id, score);
             }
-        }, query, query, limit);
+        }, query, query, query, threshold, limit, query, query, threshold);
     }
 
     private Set<String> toStringSet(Array sqlArray) {
