@@ -55,3 +55,34 @@ def test_ambiguous_candidate_items_still_require_vendor_product_and_note(main_mo
 
     assert candidate_item_schema["required"] == ["vendor", "product", "note"]
     assert candidate_item_schema["additionalProperties"] is False
+
+
+# REVISE (senior review 2026-08-30, PR #8): reasoning/alternative_vendor/alternative_product
+# previously had no maxLength at all, unlike ambiguous_candidates above -- the only real bound on
+# identified_products.verification_note built from these fields for the INCORRECT outcome (see
+# HighConfidenceVerificationService#describeIncorrectVerdict) was the model's own max_tokens.
+
+
+def test_reasoning_has_max_length_of_500(main_module):
+    schema = main_module.VERIFY_HIGH_CONFIDENCE_SCHEMA
+    reasoning_schema = schema["properties"]["reasoning"]
+
+    assert reasoning_schema["maxLength"] == 500
+
+
+def test_alternative_vendor_and_alternative_product_have_max_length_of_100(main_module):
+    schema = main_module.VERIFY_HIGH_CONFIDENCE_SCHEMA
+    properties = schema["properties"]
+
+    assert properties["alternative_vendor"]["maxLength"] == 100
+    assert properties["alternative_product"]["maxLength"] == 100
+
+
+def test_alternative_vendor_and_alternative_product_still_allow_null(main_module):
+    # Both are optional (only set when outcome='incorrect' and the model has a confident guess) --
+    # adding maxLength must not accidentally drop the "null" branch of their type union.
+    schema = main_module.VERIFY_HIGH_CONFIDENCE_SCHEMA
+    properties = schema["properties"]
+
+    assert set(properties["alternative_vendor"]["type"]) == {"string", "null"}
+    assert set(properties["alternative_product"]["type"]) == {"string", "null"}
