@@ -413,6 +413,8 @@ public class Stage1IdentificationService {
                     chosenCpe = cpeCandidates.get(0);
                 } else if (!result.get().matched()) {
                     chosenCpe = null;
+                    cpeCandidateCount = null;
+                    cpeCandidateVariantDerived = null;
                     method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
                 } else if (result.get().selectedIndex() != null
                         && result.get().selectedIndex() >= 0
