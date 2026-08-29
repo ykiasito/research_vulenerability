@@ -3,7 +3,9 @@ package com.vulncheck.app.repository;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.vulncheck.app.entity.CpeDictionaryEntry;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
@@ -12,14 +14,29 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * Exercises {@link CpeDictionaryRepositoryImpl#findFuzzyMatches} directly against a real Postgres
- * instance (trgm scoring can't be meaningfully verified against a mock). Regression coverage for
- * docs/spec/task-backlog.md item 27: the pg_trgm session default is 0.3, so a title-only match
- * scoring in the [0.3, 0.6) band is exactly the case the old {@code SET LOCAL
- * pg_trgm.similarity_threshold = ...} approach could silently fail to reject whenever it ran
- * outside a transaction block (confirmed live against the dev DB, senior review, PR #14 final
- * review, 2026-08-30) — {@link CpeDictionaryRepositoryImpl}'s own class javadoc has the full
- * history. {@link #collect} now enforces the threshold with an explicit {@code similarity(...) >
- * ?} predicate instead, which cannot silently no-op the way a session-level setting could.
+ * instance (trgm scoring and the (vendor, product) LATERAL join can't be meaningfully verified
+ * against a mock).
+ *
+ * <p>Covers docs/spec/task-backlog.md item 27: the pg_trgm session default is 0.3, so a title-only
+ * match scoring in the [0.3, 0.6) band is exactly the case a session-level {@code SET LOCAL
+ * pg_trgm.similarity_threshold = ...} alone would be fragile against if it ever silently failed to
+ * apply on some caller's transaction/thread path — {@link CpeDictionaryRepositoryImpl}'s own class
+ * javadoc has the full history of why an explicit {@code similarity(...) > ?} predicate is kept
+ * alongside {@code SET LOCAL} rather than relying on either alone. {@link #collect} enforces the
+ * threshold with that explicit predicate, which cannot silently no-op the way a session-level
+ * setting could.
+ *
+ * <p>Also covers docs/spec/task-backlog.md item 15, P2 (PR #14 REVISE): {@code max_cataloged_major}
+ * must reflect every row sharing a (vendor, product) pair, even rows this particular call's own
+ * trigram filter didn't match, while {@code target_sw_values} must keep aggregating only the rows
+ * that did match (the pre-existing, deliberately-unchanged gate behavior — see {@code
+ * CpeDictionaryRepositoryImpl#collect}'s own comment). Also implicitly covers the {@code collect()}
+ * bind-parameter ordering the CROSS JOIN LATERAL rewrite introduced: a misaligned bind would
+ * surface here as a JDBC type-mismatch exception or the wrong rows/values below, not just a
+ * compile-time issue.
+ *
+ * <p>{@code @DataJpaTest} wraps each test in a transaction rolled back afterward, so nothing
+ * written here is persisted past the test run.
  */
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
@@ -27,6 +44,7 @@ class CpeDictionaryRepositoryImplTest {
 
     @Autowired
     private CpeDictionaryRepository cpeDictionaryRepository;
+
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
@@ -37,6 +55,16 @@ class CpeDictionaryRepositoryImplTest {
         entry.setVendor(vendor);
         entry.setProduct(product);
         return entry;
+    }
+
+    private void insert(String cpeString, String title, String vendor, String product) {
+        CpeDictionaryEntry entry = new CpeDictionaryEntry();
+        entry.setCpeString(cpeString);
+        entry.setTitle(title);
+        entry.setVendor(vendor);
+        entry.setProduct(product);
+        entry.setLastSyncedAt(OffsetDateTime.now());
+        cpeDictionaryRepository.save(entry);
     }
 
     @Test
@@ -74,5 +102,48 @@ class CpeDictionaryRepositoryImplTest {
                 "Microsoft NuGet 4.3.1", 0.3, 0.6, 10);
 
         assertThat(results).anyMatch(e -> "nuget".equals(e.getProduct()));
+    }
+
+    /**
+     * Two rows share one (vendor, product) pair but have very different titles, and the query text
+     * ({@code "AlphaMarkerXQ42 Suite"}) is deliberately unrelated to the shared {@code product}
+     * column value ({@code "zzzrevise14product"}, similarity measured at 0.0), so the product-column
+     * collect() call never matches either row — isolating the title-column call, whose row1 title
+     * contains the query near-verbatim (similarity ~0.58) while row2's is unrelated (similarity
+     * ~0.01), both comfortably on either side of the 0.3 threshold used here. Only row1 survives
+     * that trigram filter, which used to also gate cataloged_versions/max_cataloged_major before
+     * this fix. (Similarity scores measured directly against this test's real Postgres instance
+     * before picking thresholds — pg_trgm's {@code %} operator is {@code similarity >= threshold},
+     * not strictly greater than, so an "unreachable" threshold isn't a reliable way to force zero
+     * matches when a value can legitimately score a perfect 1.0.)
+     */
+    @Test
+    void maxCatalogedMajorCoversWholeVendorProductPartitionEvenWhenTrigramFilterExcludesSomeRows() {
+        insert(
+                "cpe:2.3:a:zzzrevise14vendor:zzzrevise14product:1.0:*:*:*:*:windows:*:*",
+                "AlphaMarkerXQ42 Suite Desktop Edition",
+                "zzzrevise14vendor",
+                "zzzrevise14product");
+        insert(
+                "cpe:2.3:a:zzzrevise14vendor:zzzrevise14product:2.0:*:*:*:*:linux:*:*",
+                "Totally unrelated other title words that share no trigrams",
+                "zzzrevise14vendor",
+                "zzzrevise14product");
+
+        List<CpeDictionaryEntry> results = cpeDictionaryRepository.findFuzzyMatches(
+                "AlphaMarkerXQ42 Suite", 0.3, 0.3, 10);
+
+        assertThat(results).hasSize(1);
+        CpeDictionaryEntry entry = results.get(0);
+        assertThat(entry.getCpeString()).isEqualTo("cpe:2.3:a:zzzrevise14vendor:zzzrevise14product:1.0:*:*:*:*:windows:*:*");
+
+        // Bug fix: max_cataloged_major spans the whole (vendor, product) partition, including
+        // version 2.0's row, which never matched the title trigram filter — if it had silently
+        // excluded that row, this would come back as 1 instead of 2.
+        assertThat(entry.getMaxCatalogedMajor()).isEqualTo(2);
+
+        // Deliberately preserved gate behavior: target_sw_values stays restricted to the rows that
+        // matched this call's own trigram filter (row1 only), not the whole partition.
+        assertThat(entry.getTargetSwValues()).isEqualTo(Set.of("windows"));
     }
 }

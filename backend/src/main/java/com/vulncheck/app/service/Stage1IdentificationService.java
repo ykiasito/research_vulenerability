@@ -178,7 +178,32 @@ public class Stage1IdentificationService {
      * 2026-08-30): three of the five 0.95-confidence errors — Slack ({@code target_sw=wordpress}),
      * RabbitMQ ({@code target_sw=pivotal_cloud_foundry}), and Zoom ({@code target_sw=mac_os_x}) —
      * were sole Chocolatey matches whose corroborating CPE only survived {@link #passesTargetSwGate}
-     * because this fallback let a platform-scoped candidate through unchallenged.
+     * because this fallback let a platform-scoped candidate through unchallenged. Static
+     * re-measurement done alongside this same fix (job193) found this fallback alone does not
+     * resolve all three the same way — this is this fix's own author-run measurement, not a
+     * separate, later-dated review confirmation:
+     * <ul>
+     *   <li><b>RabbitMQ</b> is fixed, but the outcome is column-dependent: whether the corroborating
+     *       candidate's target_sw set actually reflects this fix depends on whether {@link
+     *       com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#findFuzzyMatches} surfaced the
+     *       row via its {@code product}-column trigram match or its {@code title}-column one, since
+     *       {@code target_sw_values} is filtered down to whichever column triggered that particular
+     *       match (see {@link com.vulncheck.app.repository.CpeDictionaryRepositoryImpl} — this is
+     *       deliberately left unchanged by PR #14 to preserve the gate's existing behavior; see
+     *       docs/spec/task-backlog.md items 24/26).</li>
+     *   <li><b>Zoom</b> is <em>not</em> actually fixed by this fallback, despite appearing in the
+     *       original error set: {@code zoom:zoom}'s (vendor, product) partition has 813 catalogued
+     *       rows, two of which (versions 4.6.10 and 5.13.5) carry {@code target_sw=*}. {@code *} is
+     *       in the wildcard/non-scoping short-circuit inside {@link #passesTargetSwGate}, which fires
+     *       and returns {@code true} before this standalone-ecosystem check is ever reached — see
+     *       docs/spec/task-backlog.md item 24's 2026-08-30 addendum.</li>
+     *   <li><b>Slack</b> is whack-a-mole, not fixed: the original bad CPE ({@code
+     *       slack-chat_project:slack-chat}, {@code target_sw=wordpress}) is correctly rejected here,
+     *       but a different bad CPE with {@code target_sw=*} (e.g. {@code
+     *       slack_archivebot_project:slack_archivebot}) simply takes its place as the next-best
+     *       candidate and passes via the same wildcard short-circuit as Zoom above — see
+     *       docs/spec/task-backlog.md item 26.</li>
+     * </ul>
      *
      * <p>Deliberately a separate set rather than an addition to {@link #ECOSYSTEM_TO_TARGET_SW}:
      * {@code windows} is already in {@link #NON_SCOPING_TARGET_SW_VALUES} and so short-circuits
@@ -1494,25 +1519,29 @@ public class Stage1IdentificationService {
      * (vendor, product) pair has ever been catalogued at — every other case (no catalogued versions
      * at all, only {@code "*"}/{@code "-"}/non-numeric catalogued values, or an unparseable item
      * version) defaults to {@code true}.
+     *
+     * <p>That "no evidence means always plausible" invariant has to hold not just for the obvious
+     * null {@link CpeDictionaryEntry#getMaxCatalogedMajor()} case, but also whenever the aggregation
+     * window backing it is merely partial — a {@code max_cataloged_major} that's missing some of the
+     * pair's real catalogued versions looks identical, from here, to "genuinely has no newer
+     * versions", and would wrongly demote a candidate for a version this method never actually saw
+     * evidence against. That's exactly why {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#findFuzzyMatches}'s {@code
+     * max_cataloged_major} aggregate deliberately runs with no per-column trigram filter, unlike
+     * {@code target_sw_values} above — it aggregates every row in the (vendor, product) partition,
+     * not just whichever subset happened to trigram-match this particular query column (see that
+     * method's own comment).
      */
     private boolean versionCoverageIsPlausible(CpeDictionaryEntry entry, String itemVersion) {
-        java.util.Set<String> catalogedVersions = entry.getCatalogedVersions();
-        if (catalogedVersions == null || catalogedVersions.isEmpty()) {
-            return true;
-        }
-        java.util.OptionalInt maxCatalogedMajor = catalogedVersions.stream()
-                .map(Stage1IdentificationService::leadingMajorVersion)
-                .filter(java.util.OptionalInt::isPresent)
-                .mapToInt(java.util.OptionalInt::getAsInt)
-                .max();
-        if (maxCatalogedMajor.isEmpty()) {
+        Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
+        if (maxCatalogedMajor == null) {
             return true;
         }
         java.util.OptionalInt itemMajor = leadingMajorVersion(itemVersion);
         if (itemMajor.isEmpty()) {
             return true;
         }
-        return itemMajor.getAsInt() <= maxCatalogedMajor.getAsInt();
+        return itemMajor.getAsInt() <= maxCatalogedMajor;
     }
 
     /** Parses the leading run of ASCII digits at the very start of {@code version} as an integer
