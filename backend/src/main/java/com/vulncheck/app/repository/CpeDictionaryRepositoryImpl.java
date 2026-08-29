@@ -14,15 +14,30 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * {@code similarity(col, query) > threshold} — the query shape the old {@code @Query}-annotated
+ * {@code similarity(col, query) > threshold} alone — the query shape the old {@code @Query}-annotated
  * method used — cannot use a pg_trgm GIN index at all (confirmed live via {@code EXPLAIN}: even
  * with {@code enable_seqscan} forced off, PostgreSQL has no alternative plan and falls back to a
  * full sequential scan regardless). Only the {@code %} similarity operator is index-accelerated,
- * but its threshold is a session-level setting ({@code pg_trgm.similarity_threshold}), not a query
- * parameter — hence the manual {@code SET LOCAL} + raw JDBC here instead of a declarative
- * {@code @Query}. At the row counts this table had during initial development (a few hundred to
- * ~1,400 rows) the sequential scan was invisibly fast either way; this only becomes a real problem
- * as the dictionary grows, which is exactly the kind of thing worth fixing before it's a surprise.
+ * but its threshold is a session-level setting ({@code pg_trgm.similarity_threshold}), defaulting
+ * to 0.3, not a query parameter.
+ *
+ * <p>An earlier version of {@link #collect} tried to raise that session threshold per call with
+ * {@code SET LOCAL pg_trgm.similarity_threshold = ...}, scoped by wrapping the method in
+ * {@code @Transactional} (since {@code SET LOCAL} only has effect inside a transaction block).
+ * Senior review (2026-08-30, PR #14 final review) confirmed live against the dev DB that this
+ * silently did nothing on {@code Stage1IdentificationService#localCpeLookup}'s hottest path —
+ * PostgreSQL logged {@code WARNING: SET LOCAL can only be used in transaction blocks} and left the
+ * threshold at its 0.3 default — for a request that reaches this repository through {@code
+ * localCpeLookup}'s {@code CompletableFuture.supplyAsync} call. Rather than depend on exactly
+ * reproducing that transaction-propagation failure (inherently fragile: it depends on the specific
+ * proxying/threading path a given caller happens to go through, which is easy to get right by
+ * accident and silently wrong again after an unrelated refactor), this drops the session-mutating
+ * approach entirely. Since {@link com.vulncheck.app.service.Stage1IdentificationService}'s title threshold (0.6) is
+ * strictly higher than that default, the {@code %} pre-filter (still using the untouched 0.3
+ * session default) never excludes anything a correctly-thresholded query would have kept — so
+ * {@code %} stays as a cheap, index-accelerated pre-filter, and the actual per-call threshold is now
+ * enforced with an explicit {@code AND similarity(col, ?) > ?} condition alongside it instead of
+ * mutating session state at all.
  */
 @Repository
 @RequiredArgsConstructor
@@ -108,7 +123,6 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
      *  so interpolating it directly into the SQL text is safe. */
     private void collect(String column, String query, double threshold, int limit,
             Map<Long, CpeDictionaryEntry> byId, Map<Long, Double> bestScoreById) {
-        jdbcTemplate.execute("SET LOCAL pg_trgm.similarity_threshold = " + threshold);
         // DISTINCT ON (vendor, product) before applying the limit: the dictionary holds one row
         // per catalogued version, and 72.7% of the real NVD dictionary's 1.8M rows are such
         // version duplicates (TeamViewer alone has dozens). All rows of one product share the same
@@ -149,6 +163,11 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         // exact same already-filtered window, so this adds no extra scan; confirmed via EXPLAIN
         // ANALYZE against the real dictionary that the plan shape (bitmap index scan -> window agg
         // -> incremental sort) is unchanged by adding this second array_agg.
+        // The "AND similarity(col, ?) > ?" clause is what actually enforces the caller's threshold
+        // now (see this class's javadoc for why SET LOCAL was dropped): the "% ?" clause is kept
+        // purely as an index-accelerated pre-filter at the untouched 0.3 session default, which
+        // never rejects a row the stricter explicit similarity() check below would have kept, since
+        // every threshold this repository is called with is >= 0.3.
         String sql = "SELECT * FROM ("
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at, "
                 + "similarity(" + column + ", ?) AS score, "
@@ -156,7 +175,7 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "OVER (PARTITION BY vendor, product) AS target_sw_values, "
                 + "array_agg(split_part(regexp_replace(cpe_string, '\\\\:', '', 'g'), ':', 6)) "
                 + "OVER (PARTITION BY vendor, product) AS cataloged_versions "
-                + "FROM cpe_dictionary WHERE " + column + " % ? "
+                + "FROM cpe_dictionary WHERE " + column + " % ? AND similarity(" + column + ", ?) > ? "
                 + "ORDER BY vendor, product, score DESC"
                 + ") deduped ORDER BY score DESC LIMIT ?";
         jdbcTemplate.query(sql, rs -> {
@@ -176,7 +195,7 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 byId.put(id, entry);
                 bestScoreById.put(id, score);
             }
-        }, query, query, limit);
+        }, query, query, query, threshold, limit);
     }
 
     private Set<String> toStringSet(Array sqlArray) {
