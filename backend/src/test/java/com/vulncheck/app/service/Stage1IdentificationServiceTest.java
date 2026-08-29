@@ -1478,6 +1478,32 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void aLoneNameVariantDerivedCpeCandidateIsAcceptedWithProvenanceWhenAiConfirmsIt() {
+        // Same setup as aLoneNameVariantDerivedCpeCandidateIsDroppedRatherThanAutoAcceptedWithNoApiKey
+        // above, but with a Claude key configured and the AI confirming the match — the other side of
+        // resolveSingleCpeCandidate's fork (senior review, 2026-08-25) that the existing provenance
+        // tests never exercise: cpeCandidateVariantDerived=true wired through to the saved
+        // IdentifiedProduct, not just the isFalse() literal-match cases.
+        CpeDictionaryEntry vlcMediaPlayer =
+                cpeEntry("cpe:2.3:a:videolan:vlc_media_player:3.0.0:*:*:*:*:*:*:*", "vlc_media_player");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
+                .thenReturn(List.of(vlcMediaPlayer));
+        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches VLC Media Player", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
     void acronymContractionNeverMatchesAnUnrelatedShortSlugForAnimalSnifferAnnotations() {
         // Measured false positive (senior review, 2026-08-25): the acronym/contraction direction
         // routed through plausibleContainmentOnly's unanchored substring check, which is unsafe for
