@@ -1024,7 +1024,7 @@ class Stage1IdentificationServiceTest {
 
     @Test
     void usageTextTieBreakDoesNotMisfireOnJavaScriptSubstringMatchingJava() {
-        // REVISE item 2 (senior review 2026-08-29): ECOSYSTEM_USAGE_TEXT_KEYWORDS used plain
+        // REVISE item 2 (senior review 2026-08-29, round 1): ECOSYSTEM_USAGE_TEXT_KEYWORDS used plain
         // String::contains, so maven's "java" keyword substring-matched inside "javascript",
         // falsely tagging an npm/Node usage_text as also mentioning maven. That pollutes the
         // usage-text-narrowed set to more than one ecosystem (npm genuinely, maven only via the

@@ -200,33 +200,50 @@ public class HighConfidenceVerificationService {
     }
 
     private String describeIncorrectVerdict(VerifyHighConfidenceResponse verdict) {
-        // REVISE item 3 (senior review 2026-08-29, PR #1): verdict.reasoning() is an ordinary
+        // REVISE item 3 (senior review 2026-08-29, round 1): verdict.reasoning() is an ordinary
         // nullable field on the wire, same as ambiguousCandidates below -- normalize null to "" here
         // rather than either NPE'ing (StringBuilder constructor) or writing the literal string
         // "null（AIの推測: ...）" into verification_note.
         String reasoning = verdict.reasoning() == null ? "" : verdict.reasoning();
-        if (verdict.alternativeVendor() == null && verdict.alternativeProduct() == null) {
+        // REVISE item 1 (senior review 2026-08-29, PR #1): alternativeVendor and
+        // alternativeProduct are independently nullable -- concatenating either one directly would
+        // write the literal string "null" into verification_note (e.g. "null:acrobat_reader") when
+        // only one of the two is present. Join only the non-null parts instead.
+        String hint = joinNonNull(verdict.alternativeVendor(), verdict.alternativeProduct());
+        if (hint.isEmpty()) {
             return reasoning;
         }
-        return reasoning + "（AIの推測: " + verdict.alternativeVendor() + ":" + verdict.alternativeProduct() + "）";
+        return reasoning + "（AIの推測: " + hint + "）";
     }
 
     private String describeAmbiguousCandidates(VerifyHighConfidenceResponse verdict) {
         StringBuilder sb = new StringBuilder(verdict.reasoning() == null ? "" : verdict.reasoning());
-        // REVISE item 6 (senior review 2026-08-29): the llm-service response schema doesn't
-        // guarantee ambiguousCandidates is present for an "ambiguous" outcome (it's an ordinary
-        // nullable JSON field, not enforced non-null by anything on the wire) — an enhanced for loop
-        // over a null list throws NPE, which would otherwise crash this AI-tier call site instead of
-        // degrading gracefully like every other one in this app.
+        // REVISE item 6 (senior review 2026-08-29, round 1): the llm-service response schema
+        // doesn't guarantee ambiguousCandidates is present for an "ambiguous" outcome (it's an
+        // ordinary nullable JSON field, not enforced non-null by anything on the wire) — an enhanced
+        // for loop over a null list throws NPE, which would otherwise crash this AI-tier call site
+        // instead of degrading gracefully like every other one in this app.
         if (verdict.ambiguousCandidates() == null || verdict.ambiguousCandidates().isEmpty()) {
             return sb.toString();
         }
         for (AmbiguousCandidateDto candidate : verdict.ambiguousCandidates()) {
-            sb.append(" / ").append(candidate.vendor()).append(':').append(candidate.product());
+            // REVISE item 1 (senior review 2026-08-29, PR #1): same independent-nullability
+            // issue as describeIncorrectVerdict above applies to candidate.vendor()/product().
+            String candidateLabel = joinNonNull(candidate.vendor(), candidate.product());
+            sb.append(" / ").append(candidateLabel);
             if (candidate.note() != null && !candidate.note().isBlank()) {
                 sb.append(" (").append(candidate.note()).append(')');
             }
         }
         return sb.toString();
+    }
+
+    /** Joins two independently-nullable strings with {@code ":"}, omitting whichever side is null
+     *  rather than rendering it as the literal text {@code "null"}. */
+    private static String joinNonNull(String first, String second) {
+        if (first == null) {
+            return second == null ? "" : second;
+        }
+        return second == null ? first : first + ":" + second;
     }
 }

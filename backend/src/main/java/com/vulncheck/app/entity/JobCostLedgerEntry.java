@@ -61,7 +61,7 @@ public class JobCostLedgerEntry {
     /** High-confidence AI verification backstop ({@code HighConfidenceVerificationService}) — the
      *  {@link #callSite} value for its one llm-service endpoint. Originally shared {@link
      *  #LEDGER_MAIN} (V28); split onto its own {@link #LEDGER_VERIFICATION} ledger (REVISE item 1,
-     *  senior review 2026-08-29) since sharing the always-on per-item budget let this feature starve
+     *  senior review 2026-08-29, round 1) since sharing the always-on per-item budget let this feature starve
      *  every other AI tier's budget in the same job — see {@code
      *  JobCostBudgetService#verificationCostCapPerItemUsd}'s javadoc. */
     public static final String CALL_SITE_VERIFICATION = "VERIFICATION";

@@ -156,7 +156,7 @@ public class ResearchJobProcessingService {
         if (job.isBundledComponentCheckEnabled()) {
             jobCostBudgetService.startBundledComponentBudget(jobId, items.size());
         }
-        // High-confidence verification (REVISE item 1, senior review 2026-08-29) is a single
+        // High-confidence verification (REVISE item 1, senior review 2026-08-29, round 1) is a single
         // app-wide toggle (app.high-confidence-verification.enabled), not a per-job opt-in field
         // like bundled-component detection above — started unconditionally for every job, same as
         // the always-on MAIN budget. Its cost-cap-per-item-usd defaults to 0 (see
