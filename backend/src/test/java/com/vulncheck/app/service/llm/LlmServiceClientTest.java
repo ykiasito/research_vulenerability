@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
@@ -174,6 +175,77 @@ class LlmServiceClientTest {
         verify(jobCostBudgetService).reconcileBundledComponent(
                 eq(1L), eq(9L), eq(JobCostLedgerEntry.CALL_SITE_BUNDLED_EXTRACT),
                 eq(RESERVED_COST_USD), eq(ACTUAL_COST_USD), eq(90), eq(30), eq(0));
+    }
+
+    // --- REVISE item 5 (senior review 2026-08-29, PR #1): truncation guard coverage ---------------
+
+    @Test
+    void usageTextLongerThan2000CharsIsTruncatedInTheRequestBody() {
+        when(jobCostBudgetService.computeActualCost(100, 50, 0)).thenReturn(ACTUAL_COST_USD);
+        String oversizedUsageText = "a".repeat(2500);
+        String expectedTruncated = oversizedUsageText.substring(0, 2000);
+        server.expect(requestTo(BASE_URL + "/v1/identify/disambiguate"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.usage_text").value(expectedTruncated))
+                .andRespond(withSuccess(
+                        "{\"matched\":true,\"selected_index\":1,\"confidence\":0.9,\"reasoning\":\"why\","
+                                + "\"usage\":{\"input_tokens\":100,\"output_tokens\":50,\"web_search_requests\":0}}",
+                        MediaType.APPLICATION_JSON));
+
+        ResearchJobItem item = item();
+        item.setUsageText(oversizedUsageText);
+
+        client.disambiguate(
+                API_KEY, item, List.of(new CandidateDto("npm", "some-tool", null, null, "registry")), RESERVED_COST_USD);
+
+        server.verify();
+    }
+
+    @Test
+    void truncationNeverSplitsASurrogatePair() {
+        // 1,999 plain chars followed by a surrogate-pair emoji (2 chars) straddling the 2,000-char
+        // cut point: char index 1999 is the high surrogate, index 2000 is the low surrogate. A naive
+        // substring(0, 2000) would keep the high surrogate and drop its low surrogate partner,
+        // producing an unpaired surrogate in the request body.
+        when(jobCostBudgetService.computeActualCost(100, 50, 0)).thenReturn(ACTUAL_COST_USD);
+        String plainPrefix = "a".repeat(1999);
+        String emoji = "😀"; // U+1F600 GRINNING FACE, a surrogate pair
+        String oversizedUsageText = plainPrefix + emoji + "trailing text past the limit";
+        server.expect(requestTo(BASE_URL + "/v1/identify/disambiguate"))
+                .andExpect(method(HttpMethod.POST))
+                // Backs off one more character so the whole (now-incomplete) surrogate pair is
+                // dropped, rather than emitting a lone, invalid high surrogate.
+                .andExpect(jsonPath("$.usage_text").value(plainPrefix))
+                .andRespond(withSuccess(
+                        "{\"matched\":true,\"selected_index\":1,\"confidence\":0.9,\"reasoning\":\"why\","
+                                + "\"usage\":{\"input_tokens\":100,\"output_tokens\":50,\"web_search_requests\":0}}",
+                        MediaType.APPLICATION_JSON));
+
+        ResearchJobItem item = item();
+        item.setUsageText(oversizedUsageText);
+
+        client.disambiguate(
+                API_KEY, item, List.of(new CandidateDto("npm", "some-tool", null, null, "registry")), RESERVED_COST_USD);
+
+        server.verify();
+    }
+
+    @Test
+    void changelogTextAroundEightThousandCharsIsNotTruncated() {
+        // Regression guard for the item 1 fix: changelogText is Claude-generated output already
+        // bounded by llm-service's max_tokens=2048 (~8,000 chars), not raw CSV usage_text -- it must
+        // NOT be clipped down to usage_text's 2,000-character limit.
+        String changelogText = "release notes ".repeat(550); // ~8,250 chars
+        server.expect(requestTo(BASE_URL + "/v1/bundled-components/extract"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.changelog_text").value(changelogText))
+                .andRespond(withSuccess(
+                        "{\"bundled_components\":[],\"usage\":{\"input_tokens\":90,\"output_tokens\":30,\"web_search_requests\":0}}",
+                        MediaType.APPLICATION_JSON));
+
+        client.extractBundledComponents(API_KEY, item(), changelogText, RESERVED_COST_USD);
+
+        server.verify();
     }
 
     @Test

@@ -14,6 +14,7 @@ import java.math.BigDecimal;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class JobCostBudgetServiceTest {
 
@@ -22,7 +23,17 @@ class JobCostBudgetServiceTest {
     }
 
     private JobCostBudgetService newService(JobCostLedgerRepository repository) {
-        return new JobCostBudgetService(repository);
+        JobCostBudgetService service = new JobCostBudgetService(repository);
+        // costCapPerItemUsd is @Value-injected in production (application.yml's
+        // app.cost-cap-per-item-usd, default 0.005) — this constructor call bypasses Spring, so set
+        // it directly to that same default, matching HighConfidenceVerificationServiceTest's
+        // ReflectionTestUtils pattern for its own @Value fields.
+        ReflectionTestUtils.setField(service, "costCapPerItemUsd", new BigDecimal("0.005"));
+        // verificationCostCapPerItemUsd is likewise @Value-injected in production
+        // (app.high-confidence-verification.cost-cap-per-item-usd, default 0) — set to that same
+        // default here; tests that need a real (non-zero) cap override it explicitly.
+        ReflectionTestUtils.setField(service, "verificationCostCapPerItemUsd", BigDecimal.ZERO);
+        return service;
     }
 
     @Test
@@ -147,6 +158,103 @@ class JobCostBudgetServiceTest {
 
         // The bundled-component ledger is a completely separate ledger and still has its own full budget.
         assertThat(service.tryReserveBundledComponent(9L, new BigDecimal("1.00"))).isTrue();
+    }
+
+    // --- REVISE item 1 (senior review 2026-08-29): the high-confidence verification backstop's own
+    // ledger, split out of the always-on MAIN ledger so enabling that feature can never silently
+    // starve every other AI tier's budget in the same job (job 191: 108/300 eligible items, $3.78
+    // demand vs. a $1.50 MAIN cap) — same fail-closed/tombstone/cap-isolation shape as the bundled-
+    // component ledger above -----------------------------------------------------------------------
+
+    @Test
+    void verificationReservationFailsClosedForANeverStartedJobIdUnlikeTheAlwaysOnLedger() {
+        JobCostBudgetService service = newService();
+
+        assertThat(service.tryReserveVerification(999L, new BigDecimal("0.035"))).isFalse();
+    }
+
+    @Test
+    void verificationReservationFailsClosedAfterEndVerificationBudget() {
+        JobCostBudgetService service = newService();
+        ReflectionTestUtils.setField(service, "verificationCostCapPerItemUsd", new BigDecimal("0.05"));
+        service.startVerificationBudget(19L, 100);
+        service.endVerificationBudget(19L);
+
+        assertThat(service.tryReserveVerification(19L, new BigDecimal("0.035"))).isFalse();
+    }
+
+    @Test
+    void startVerificationBudgetClearsTheTombstoneOnAResumedJobId() {
+        JobCostBudgetService service = newService();
+        ReflectionTestUtils.setField(service, "verificationCostCapPerItemUsd", new BigDecimal("0.05"));
+        service.startVerificationBudget(20L, 100);
+        service.endVerificationBudget(20L);
+        assertThat(service.tryReserveVerification(20L, new BigDecimal("0.001"))).isFalse();
+
+        service.startVerificationBudget(20L, 100);
+
+        assertThat(service.tryReserveVerification(20L, new BigDecimal("0.001"))).isTrue();
+    }
+
+    @Test
+    void verificationBudgetDefaultsToZeroSoItIsANoOpUntilExplicitlyConfigured() {
+        // verificationCostCapPerItemUsd defaults to 0 (see its own javadoc) — even a single
+        // near-zero reservation must fail until an operator explicitly sets a real cap alongside
+        // app.high-confidence-verification.enabled.
+        JobCostBudgetService service = newService();
+        service.startVerificationBudget(21L, 1000);
+
+        assertThat(service.tryReserveVerification(21L, new BigDecimal("0.001"))).isFalse();
+    }
+
+    @Test
+    void exhaustingTheVerificationBudgetLeavesTheAlwaysOnLedgerUnaffected() {
+        JobCostBudgetService service = newService();
+        ReflectionTestUtils.setField(service, "verificationCostCapPerItemUsd", new BigDecimal("0.035"));
+        service.startJobBudget(22L, 100); // always-on cap = 100 * 0.005 = 0.50
+        service.startVerificationBudget(22L, 1); // verification cap = 1 * 0.035 = 0.035
+
+        assertThat(service.tryReserveVerification(22L, new BigDecimal("0.035"))).isTrue();
+        assertThat(service.tryReserveVerification(22L, new BigDecimal("0.001"))).isFalse(); // verification exhausted
+
+        // The always-on ledger is a completely separate ledger and still has its own full budget —
+        // this is exactly the job 191 scenario the split fixes: verification running out must never
+        // block Tier2/Tier3's own reservations against MAIN.
+        assertThat(service.tryReserve(22L, new BigDecimal("0.30"))).isTrue();
+    }
+
+    @Test
+    void exhaustingTheAlwaysOnBudgetLeavesTheVerificationLedgerUnaffected() {
+        JobCostBudgetService service = newService();
+        ReflectionTestUtils.setField(service, "verificationCostCapPerItemUsd", new BigDecimal("0.035"));
+        service.startJobBudget(23L, 1); // always-on cap = 1 * 0.005 = 0.005
+        service.startVerificationBudget(23L, 100); // verification cap = 100 * 0.035 = 3.50
+
+        assertThat(service.tryReserve(23L, new BigDecimal("0.005"))).isTrue();
+        assertThat(service.tryReserve(23L, new BigDecimal("0.001"))).isFalse(); // always-on exhausted
+
+        // The verification ledger is a completely separate ledger and still has its own full budget.
+        assertThat(service.tryReserveVerification(23L, new BigDecimal("1.00"))).isTrue();
+    }
+
+    @Test
+    void reconcileVerificationPersistsALedgerEntryTaggedWithTheVerificationLedger() {
+        JobCostLedgerRepository repository = mock(JobCostLedgerRepository.class);
+        JobCostBudgetService service = newService(repository);
+        ReflectionTestUtils.setField(service, "verificationCostCapPerItemUsd", new BigDecimal("0.035"));
+        service.startVerificationBudget(24L, 10);
+        service.tryReserveVerification(24L, new BigDecimal("0.035"));
+
+        service.reconcileVerification(24L, 93L, new BigDecimal("0.035"), new BigDecimal("0.0233"));
+
+        ArgumentCaptor<JobCostLedgerEntry> captor = ArgumentCaptor.forClass(JobCostLedgerEntry.class);
+        verify(repository, times(1)).save(captor.capture());
+        JobCostLedgerEntry saved = captor.getValue();
+        assertThat(saved.getJobId()).isEqualTo(24L);
+        assertThat(saved.getJobItemId()).isEqualTo(93L);
+        assertThat(saved.getLedger()).isEqualTo(JobCostLedgerEntry.LEDGER_VERIFICATION);
+        assertThat(saved.getReservedCostUsd()).isEqualByComparingTo("0.035");
+        assertThat(saved.getActualCostUsd()).isEqualByComparingTo("0.0233");
     }
 
     // --- Cost persistence (docs/spec/infra-rollout-plan.md item 5): reconcile now writes a

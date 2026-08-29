@@ -107,11 +107,17 @@ class Stage1IdentificationServiceTest {
         // A fresh cache per test/service instance — no cross-test pollution, and every test here
         // only exercises one identify() call per item anyway, so the cache is never the thing
         // under test in this file (see RegistryLookupCacheTest / CpeNameVariantCacheTest for that).
+        // enabled defaults to false (HighConfidenceVerificationService's @Value field is never
+        // injected by Spring in a plain `new` here), so this is a no-op for every test in this
+        // file unless a test explicitly flips it on — see HighConfidenceVerificationServiceTest for
+        // that service's own dedicated coverage.
+        HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService(
+                userApiKeyService, llmServiceClient, jobCostBudgetService, identifiedProductRepository);
         return new Stage1IdentificationService(
                 lookups, registryRoutingPolicy, new RegistryLookupCache(), cpeDictionaryRepository, new CpeNameVariantCache(),
                 identifiedProductRepository, userApiKeyService,
                 llmServiceClient, nvdCpeSyncService, ecosystemRegistryRepository, researchJobItemRepository,
-                jobCostBudgetService, Runnable::run);
+                jobCostBudgetService, highConfidenceVerificationService, Runnable::run);
     }
 
     private void stubSaveReturnsArgument() {
@@ -273,11 +279,19 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
-    void chocolateyEcosystemIsExemptFromTheStaticWeakRegistryMatchRejectionRuleEvenWithANonBlankVendor() {
+    void chocolateyEcosystemIsExemptFromTheStaticWeakRegistryMatchRejectionRuleButStillNotTrustedAsIdentifiedAlone() {
         // REVISE item 5 (senior review 2026-08-26, job 39): unlike the npm/pypi/crates.io cases
         // the 14/14-wrong static rule was calibrated on, every one of job 39's 32 target items has
         // a non-blank vendor — without this exemption the static rule would reject every single
-        // unconfirmed-version Chocolatey match this existence-fallback fix produces.
+        // unconfirmed-version Chocolatey match this existence-fallback fix produces, i.e. this
+        // exemption still applies and registryMatch is not statically rejected here.
+        //
+        // golden-300 fix (2026-08-29, item 1): but surviving that static-rejection rule is no longer
+        // enough on its own to become IDENTIFIED — a *sole* Chocolatey match (no corroborating CPE)
+        // has no downstream vulnerability query path at all, so it must not be trusted as IDENTIFIED
+        // either (see Stage1IdentificationService's "golden-300 fix (item 1)" comment and
+        // docs/spec/known-limitations.md). This test's outcome changed from present/IDENTIFIED to
+        // empty/UNIDENTIFIED as part of that fix.
         PackageRegistryLookup chocolateyLookup = new PackageRegistryLookup() {
             @Override
             public Optional<RegistryMatch> lookup(String name, String version) {
@@ -291,6 +305,38 @@ class Stage1IdentificationServiceTest {
             }
         };
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
+
+        ResearchJobItem item = item("HandBrake");
+        item.setVendor("HandBrake Team");
+
+        Optional<IdentifiedProduct> result = service(List.of(chocolateyLookup)).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void chocolateyMatchCorroboratedByARealCpeIsStillTrustedAsIdentified() {
+        // Control for the golden-300 item 1 fix above: a Chocolatey match that IS independently
+        // corroborated by a real CPE candidate is unaffected — that CPE brings its own
+        // vulnerability-query path with it, so this is not the "no verification path at all" case
+        // the fix targets. Version-confirmed (unlike the sole-match test above) so trustRegistryMatch
+        // is true on its own original terms too, same shape as the existing npm/gson corroboration
+        // test (keepsACpeThatIndependentlyCorroboratesTheTrustedRegistryMatchsOwnPackageName).
+        PackageRegistryLookup chocolateyLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("chocolatey", "handbrake", "pkg:chocolatey/handbrake@1.9.9",
+                        new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "chocolatey";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(cpeEntry("cpe:2.3:a:handbrake:handbrake:1.9.9:*:*:*:*:*:*:*", "handbrake")));
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("HandBrake");
@@ -301,6 +347,7 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("chocolatey");
         assertThat(result.get().getPackageName()).isEqualTo("handbrake");
+        assertThat(result.get().getCpe()).isNotNull();
     }
 
     @Test
@@ -976,6 +1023,54 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void usageTextTieBreakDoesNotMisfireOnJavaScriptSubstringMatchingJava() {
+        // REVISE item 2 (senior review 2026-08-29): ECOSYSTEM_USAGE_TEXT_KEYWORDS used plain
+        // String::contains, so maven's "java" keyword substring-matched inside "javascript",
+        // falsely tagging an npm/Node usage_text as also mentioning maven. That pollutes the
+        // usage-text-narrowed set to more than one ecosystem (npm genuinely, maven only via the
+        // substring bug), which defeats maxConfidenceMatch's tie-break (it only overrides the
+        // default pick when usage_text narrows a tie down to EXACTLY one ecosystem) and falls back
+        // to whichever tied registry match happened to be listed/queried first — maven here, since
+        // it's registered before npm below. With word-boundary-aware matching, "javascript" no
+        // longer falsely matches "java", so only npm's real "node" keyword hit narrows the tie, and
+        // npm — the actually correct ecosystem for this usage_text — wins deterministically instead
+        // of by accidental list order.
+        PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("maven", "widget:widget", "pkg:maven/widget/widget@1.0.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "maven";
+            }
+        };
+        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("npm", "widget", "pkg:npm/widget@1.0.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("widget");
+        item.setUsageText("used as a JavaScript library in a Node project");
+
+        Optional<IdentifiedProduct> result = service(List.of(mavenLookup, npmLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("npm");
+    }
+
+    @Test
     void ambiguousRegistryCandidatesAreArbitratedByLlm() {
         // The real fix: with a Claude key configured, multiple same-named registry hits go through
         // the same disambiguate endpoint CPE Tier2 already used, instead of a blind max-confidence
@@ -1089,6 +1184,92 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("maven");
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+    }
+
+    @Test
+    void tiedRegistryCandidatesWithNoApiKeyAreTieBrokenByUsageTextEcosystemKeyword() {
+        // golden-300 fix (2026-08-29, item 2 "cross-registry same-name collision"): with no AI
+        // arbitration available, two equally-confident same-named registry matches used to fall
+        // back to a blind max-confidence pick with no other signal — item.usage_text was already
+        // stored but never consulted. numpy/jekyll/redis/phoenix/phoenix_live_view/http were all
+        // mis-routed this way in golden-300. Both candidates here are unconfirmed at the same 0.5
+        // confidence (a genuine tie), and usage_text unambiguously names pypi.
+        PackageRegistryLookup pypiLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("pypi", "widget", "pkg:pypi/widget@1.0.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "pypi";
+            }
+        };
+        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("npm", "widget", "pkg:npm/widget@1.0.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("widget");
+        item.setUsageText("installed via pip install widget for our Python data pipeline");
+
+        Optional<IdentifiedProduct> result = service(List.of(pypiLookup, npmLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("pypi");
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+    }
+
+    @Test
+    void tiedRegistryCandidatesWithNoUsageTextEcosystemSignalKeepTheOriginalMaxConfidencePick() {
+        // Control for the fix above: usage_text mentioning no configured ecosystem keyword (or
+        // mentioning more than one) must leave the original, unchanged degrade-to-max-confidence
+        // behavior in place — this is a narrow tie-break, not a general re-ranking of registry
+        // matches by usage_text.
+        PackageRegistryLookup pypiLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("pypi", "widget", "pkg:pypi/widget@1.0.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "pypi";
+            }
+        };
+        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("npm", "widget", "pkg:npm/widget@1.0.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("widget");
+        item.setUsageText("a small internal utility, no further detail recorded");
+
+        Optional<IdentifiedProduct> result = service(List.of(pypiLookup, npmLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("pypi");
         verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
     }
 
@@ -1744,6 +1925,72 @@ class Stage1IdentificationServiceTest {
         when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("commander"), USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void fallsBackToAnOperatingSystemPartCpeWhenNoApplicationPartCandidateExistsAtAll() {
+        // golden-300 fix (2026-08-29, item 3): Cisco IOS XE / PAN-OS / MikroTik RouterOS are
+        // catalogued by NVD only as part=o (operating system), with no part=a entry at all — the
+        // pre-fix part=a-only gate silently discarded the only candidate that could ever have
+        // identified them. Safe because the fallback only ever engages when the pool has zero
+        // part=a rows (see the control test below for the case where one does exist).
+        CpeDictionaryEntry ciscoIosXe = cpeEntry("cpe:2.3:o:cisco:ios_xe:17.3:*:*:*:*:*:*:*", "ios_xe");
+        ciscoIosXe.setTitle("Cisco IOS XE 17.3");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(ciscoIosXe));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Cisco IOS XE"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:o:cisco:ios_xe:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void neverFallsBackToAnOperatingSystemPartCpeWhenAnApplicationPartCandidateIsAlreadyPresent() {
+        // Control for the fix above: the part=o fallback must never engage merely because an OS CPE
+        // scores well — only because the pool has NO part=a candidate at all. Here a genuine part=a
+        // candidate for the same query is present alongside a part=o one; the part=a candidate must
+        // win and the part=o one must not surface at all (this is exactly the shape of the job 37
+        // hardware incident the original gate was built to prevent, just with an OS part instead of
+        // a hardware one).
+        CpeDictionaryEntry commanderApp = cpeEntry("cpe:2.3:a:commander:commander_one:3.0:*:*:*:*:*:*:*", "commander_one");
+        commanderApp.setTitle("Commander One 3.0");
+        CpeDictionaryEntry commanderOs = cpeEntry("cpe:2.3:o:somevendor:commander_os:1.0:*:*:*:*:*:*:*", "commander_os");
+        commanderOs.setTitle("Commander OS 1.0");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(commanderApp, commanderOs));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("commander"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:commander:commander_one:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void neverAdmitsAnyCpeWhenCandidatePoolIsHardwarePartOnlyAndNoApplicationPartExistsAtAll() {
+        // REVISE item 4 (senior review 2026-08-29): explicit regression guard for the job 37
+        // hardware-CPE incident, written specifically alongside the part=o fallback added right
+        // above (golden-300 fix, item 3). That fallback only ever kicks in when bestPerProduct
+        // (part=a) is empty AND bestOsPerProductFallback (part=o) is non-empty — this test locks in
+        // that a part=h (hardware)-only pool leaves BOTH of those empty, so the fallback must never
+        // fire for hardware and the item must end up completely unidentified, not just "not
+        // preferred". Distinct from rejectsAHardwarePartCpeEvenWhenTextMatchingWouldOtherwiseAccept
+        // above (which predates the part=o fallback and only asserts the part=a gate itself);
+        // this test instead guards the fallback's own boundary now that a second, adjacent
+        // "no part=a candidates" fallback path exists that could accidentally be widened to include
+        // part=h too.
+        CpeDictionaryEntry commanderPro = cpeEntry("cpe:2.3:h:corsair:commander_pro:-:*:*:*:*:*:*:*", "commander_pro");
+        commanderPro.setTitle("Corsair Commander Pro");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(commanderPro));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("commander"), USER_ID);
+
+        assertThat(result).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
     }
 

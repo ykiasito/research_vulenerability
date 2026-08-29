@@ -459,6 +459,163 @@ def web_search_identify(req: WebSearchIdentifyRequest) -> WebSearchIdentifyRespo
     return result
 
 
+# --- High-confidence verification backstop --------------------------------------
+#
+# Fix for the known-limitations gap: "a registry match's confidence is lent to an
+# independently-derived CPE" -- a Stage1 item can reach IDENTIFIED_CPE status purely via Tier1
+# static logic (registry lookup + CPE dictionary fuzzy match) at high confidence (typically 0.95,
+# the registry's own version-confirmed constant) without the CPE vendor/product itself ever having
+# been reviewed by an AI disambiguation step. This endpoint is that missing review, called only for
+# items that never went through Tier2/Tier3 (see Stage1IdentificationService's
+# HighConfidenceVerificationService integration) and gated behind its own feature flag
+# (app.high-confidence-verification.enabled, off by default).
+
+class VerifyHighConfidenceRequest(BaseModel):
+    api_key: str
+    product_name: str
+    version: str
+    vendor: str | None = None
+    usage_text: str
+    cpe_vendor: str
+    cpe_product: str
+
+
+class AmbiguousCandidate(BaseModel):
+    vendor: str
+    product: str
+    note: str | None = None
+
+
+class VerifyHighConfidenceResponse(BaseModel):
+    outcome: str  # "correct" | "incorrect" | "ambiguous"
+    reasoning: str
+    alternative_vendor: str | None = None
+    alternative_product: str | None = None
+    ambiguous_candidates: list[AmbiguousCandidate] = []
+    usage: UsageInfo
+
+
+VERIFY_HIGH_CONFIDENCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "outcome": {
+            "type": "string",
+            "enum": ["correct", "incorrect", "ambiguous"],
+            "description": (
+                "'correct' if cpe_vendor/cpe_product genuinely and specifically identifies this "
+                "exact product. 'incorrect' only when you are reasonably confident this specific "
+                "vendor/product is simply wrong for this product (whether or not you know the real "
+                "answer). 'ambiguous' when the product name/version/usage text alone do not "
+                "uniquely determine which of two or more real variants of the same product line "
+                "this should be -- for example an OS-specific build (a Windows vs. a Mac release of "
+                "the same application), or an edition/component variant (free vs. paid, client vs. "
+                "server) -- i.e. multiple different CPE entries could each plausibly be the right "
+                "one and cpe_vendor/cpe_product might be any of them. Prefer 'ambiguous' over "
+                "'incorrect' whenever the real issue is 'more than one plausible right answer "
+                "exists', not 'this one is simply wrong' -- an ambiguous case is not evidence the "
+                "given answer is wrong, just that it cannot be confirmed as the specific one meant."
+            ),
+        },
+        "reasoning": {"type": "string"},
+        "alternative_vendor": {
+            "type": ["string", "null"],
+            "description": (
+                "Only when outcome='incorrect' and you have a specific, confident guess at the "
+                "real vendor. Null otherwise -- this is informational only, never treated as a "
+                "verified replacement, so do not guess weakly just to fill this in."
+            ),
+        },
+        "alternative_product": {
+            "type": ["string", "null"],
+            "description": "Only when outcome='incorrect' and you have a specific, confident guess at the real product. Null otherwise.",
+        },
+        "ambiguous_candidates": {
+            "type": "array",
+            "description": (
+                "Only when outcome='ambiguous': the plausible real variants, each with a short "
+                "distinguishing note (e.g. 'Windows版', 'Mac版', '無料版'). Empty array otherwise."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vendor": {"type": "string"},
+                    "product": {"type": "string"},
+                    "note": {"type": ["string", "null"]},
+                },
+                "required": ["vendor", "product", "note"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["outcome", "reasoning", "alternative_vendor", "alternative_product", "ambiguous_candidates"],
+    "additionalProperties": False,
+}
+
+
+@app.post("/v1/identify/verify-high-confidence", response_model=VerifyHighConfidenceResponse)
+def verify_high_confidence(req: VerifyHighConfidenceRequest) -> VerifyHighConfidenceResponse:
+    """Double-checks a single already-selected CPE vendor:product that static (non-AI) Tier1 logic
+    picked, and that no AI tier has ever reviewed. Narrow scope: confirm/reject/flag-as-ambiguous
+    this one answer -- never asked to search from scratch the way Tier3 is, since a specific
+    candidate to evaluate is already in hand.
+    """
+    user_content = (
+        f"Product name (as entered by the user): {req.product_name}\n"
+        f"Version: {req.version}\n"
+        f"Vendor (as entered, may be blank): {req.vendor or '(not provided)'}\n"
+        f"Usage / context text: {req.usage_text}\n\n"
+        f"A static (non-AI) matching process selected this CPE vendor:product, WITHOUT any AI "
+        f"review: {req.cpe_vendor}:{req.cpe_product}\n\n"
+        "Verify whether this is genuinely the correct, specific identification for this product. "
+        "If the product could plausibly be one of several real variants (e.g. an OS-specific "
+        "build, or a free/paid edition) and you cannot tell which one is meant from the "
+        "information given, respond with outcome='ambiguous' and list the plausible variants in "
+        "ambiguous_candidates rather than guessing one as if it were certain. Only use "
+        "outcome='incorrect' when you are confident this specific vendor:product is simply the "
+        "wrong software. Use web search if it helps confirm. Respond only via the JSON schema."
+    )
+
+    try:
+        response = _client(req.api_key).messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=(
+                "You are a narrow fact-checker for a single already-made software identification "
+                "decision. A separate, non-AI process has already picked a CPE vendor:product for a "
+                "product name/version pair, without any AI review -- your only job is to confirm it, "
+                "reject it, or flag it as genuinely ambiguous between multiple real variants. You "
+                "never invent a confident replacement identifier when you are not sure; ambiguity "
+                "between real variants (e.g. Windows vs. Mac builds) is common and must be reported "
+                "as 'ambiguous', not silently resolved by guessing one."
+            ),
+            messages=[{"role": "user", "content": user_content}],
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}],
+            output_config={"format": {"type": "json_schema", "schema": VERIFY_HIGH_CONFIDENCE_SCHEMA}},
+        )
+    except Exception as e:
+        _raise_for_anthropic_error(e)
+
+    text = _final_text_block(response.content)
+    if text is None:
+        raise HTTPException(status_code=502, detail="Claude API returned no text content")
+
+    data = json.loads(text)
+    usage = UsageInfo(
+        input_tokens=response.usage.input_tokens,
+        output_tokens=response.usage.output_tokens,
+        web_search_requests=_count_web_searches(response.usage, response.content),
+    )
+    result = VerifyHighConfidenceResponse(**data, usage=usage)
+    logger.info(
+        "verify_high_confidence product=%r version=%r cpe=%s:%s -> outcome=%s alternative=%s:%s "
+        "ambiguous_candidates=%s usage=%s",
+        req.product_name, req.version, req.cpe_vendor, req.cpe_product, result.outcome,
+        result.alternative_vendor, result.alternative_product,
+        [(c.vendor, c.product) for c in result.ambiguous_candidates], usage,
+    )
+    return result
+
+
 # --- Stage4: LLM + web_search final fallback for vulnerability research --------
 
 class WebSearchVulnFinding(BaseModel):

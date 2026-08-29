@@ -11,6 +11,8 @@ import com.vulncheck.app.service.llm.LlmServiceModels.CandidateDto;
 import com.vulncheck.app.service.llm.LlmServiceModels.DisambiguateRequest;
 import com.vulncheck.app.service.llm.LlmServiceModels.DisambiguateResponse;
 import com.vulncheck.app.service.llm.LlmServiceModels.UsageDto;
+import com.vulncheck.app.service.llm.LlmServiceModels.VerifyHighConfidenceRequest;
+import com.vulncheck.app.service.llm.LlmServiceModels.VerifyHighConfidenceResponse;
 import com.vulncheck.app.service.llm.LlmServiceModels.WebSearchIdentifyRequest;
 import com.vulncheck.app.service.llm.LlmServiceModels.WebSearchIdentifyResponse;
 import com.vulncheck.app.service.llm.LlmServiceModels.WebSearchResearchRequest;
@@ -48,7 +50,12 @@ public class LlmServiceClient {
     public Optional<DisambiguateResponse> disambiguate(
             String apiKey, ResearchJobItem item, List<CandidateDto> candidates, BigDecimal reservedCostUsd) {
         DisambiguateRequest request = new DisambiguateRequest(
-                apiKey, item.getProductName(), item.getVersion(), item.getVendor(), item.getUsageText(), candidates);
+                apiKey,
+                truncate(item.getProductName(), SHORT_FIELD_MAX_LENGTH, "productName"),
+                truncate(item.getVersion(), SHORT_FIELD_MAX_LENGTH, "version"),
+                truncate(item.getVendor(), SHORT_FIELD_MAX_LENGTH, "vendor"),
+                truncate(item.getUsageText(), USAGE_TEXT_MAX_LENGTH, "usageText"),
+                candidates);
         UsageDto usage = null;
         try {
             DisambiguateResponse response = llmServiceRestClient.post()
@@ -72,7 +79,12 @@ public class LlmServiceClient {
     public Optional<WebSearchIdentifyResponse> webSearchIdentify(
             String apiKey, ResearchJobItem item, List<String> enabledEcosystems, BigDecimal reservedCostUsd) {
         WebSearchIdentifyRequest request = new WebSearchIdentifyRequest(
-                apiKey, item.getProductName(), item.getVersion(), item.getVendor(), item.getUsageText(), enabledEcosystems);
+                apiKey,
+                truncate(item.getProductName(), SHORT_FIELD_MAX_LENGTH, "productName"),
+                truncate(item.getVersion(), SHORT_FIELD_MAX_LENGTH, "version"),
+                truncate(item.getVendor(), SHORT_FIELD_MAX_LENGTH, "vendor"),
+                truncate(item.getUsageText(), USAGE_TEXT_MAX_LENGTH, "usageText"),
+                enabledEcosystems);
         UsageDto usage = null;
         try {
             WebSearchIdentifyResponse response = llmServiceRestClient.post()
@@ -96,7 +108,11 @@ public class LlmServiceClient {
     public List<WebSearchVulnFindingDto> webSearchResearch(
             String apiKey, ResearchJobItem item, String ecosystem, String packageName, BigDecimal reservedCostUsd) {
         WebSearchResearchRequest request = new WebSearchResearchRequest(
-                apiKey, item.getProductName(), item.getVersion(), item.getVendor(), ecosystem, packageName);
+                apiKey,
+                truncate(item.getProductName(), SHORT_FIELD_MAX_LENGTH, "productName"),
+                truncate(item.getVersion(), SHORT_FIELD_MAX_LENGTH, "version"),
+                truncate(item.getVendor(), SHORT_FIELD_MAX_LENGTH, "vendor"),
+                ecosystem, packageName);
         UsageDto usage = null;
         try {
             WebSearchResearchResponse response = llmServiceRestClient.post()
@@ -118,6 +134,41 @@ public class LlmServiceClient {
     }
 
     /**
+     * High-confidence verification backstop ({@code HighConfidenceVerificationService}): double-checks
+     * a Tier1-only, never-AI-reviewed static CPE match at (or above) the configured confidence
+     * threshold. Same best-effort-degrade contract as every other method here — {@code Optional.empty()}
+     * on any failure, which the caller treats as "leave the static match as-is".
+     */
+    public Optional<VerifyHighConfidenceResponse> verifyHighConfidence(
+            String apiKey, ResearchJobItem item, String cpeVendor, String cpeProduct, BigDecimal reservedCostUsd) {
+        VerifyHighConfidenceRequest request = new VerifyHighConfidenceRequest(
+                apiKey,
+                truncate(item.getProductName(), SHORT_FIELD_MAX_LENGTH, "productName"),
+                truncate(item.getVersion(), SHORT_FIELD_MAX_LENGTH, "version"),
+                truncate(item.getVendor(), SHORT_FIELD_MAX_LENGTH, "vendor"),
+                truncate(item.getUsageText(), USAGE_TEXT_MAX_LENGTH, "usageText"),
+                cpeVendor, cpeProduct);
+        UsageDto usage = null;
+        try {
+            VerifyHighConfidenceResponse response = llmServiceRestClient.post()
+                    .uri("/v1/identify/verify-high-confidence")
+                    .body(request)
+                    .retrieve()
+                    .body(VerifyHighConfidenceResponse.class);
+            usage = response == null ? null : response.usage();
+            return Optional.ofNullable(response);
+        } catch (RestClientException e) {
+            log.warn("LLM high-confidence verification call failed for item {}", item.getId(), e);
+            return Optional.empty();
+        } catch (RuntimeException e) {
+            log.error("LLM high-confidence verification call failed unexpectedly for item {}", item.getId(), e);
+            return Optional.empty();
+        } finally {
+            reconcileVerification(item, JobCostLedgerEntry.CALL_SITE_VERIFICATION, reservedCostUsd, usage);
+        }
+    }
+
+    /**
      * Bundled-package (formerly "Stage 3.5") detection, step 1: web_search-based changelog/
      * release-note discovery (Stage4-shaped — see the plan's §2/§3-2). Reconciles against the
      * separate {@link JobCostBudgetService#reconcileBundledComponent} ledger, not {@link
@@ -126,7 +177,11 @@ public class LlmServiceClient {
      */
     public Optional<BundledChangelogResponse> discoverBundledComponentChangelog(
             String apiKey, ResearchJobItem item, BigDecimal reservedCostUsd) {
-        BundledChangelogRequest request = new BundledChangelogRequest(apiKey, item.getProductName(), item.getVersion(), item.getVendor());
+        BundledChangelogRequest request = new BundledChangelogRequest(
+                apiKey,
+                truncate(item.getProductName(), SHORT_FIELD_MAX_LENGTH, "productName"),
+                truncate(item.getVersion(), SHORT_FIELD_MAX_LENGTH, "version"),
+                truncate(item.getVendor(), SHORT_FIELD_MAX_LENGTH, "vendor"));
         UsageDto usage = null;
         try {
             BundledChangelogResponse response = llmServiceRestClient.post()
@@ -151,10 +206,22 @@ public class LlmServiceClient {
      * Bundled-package detection, step 2: text-only {@code (component, version)} extraction from
      * the changelog text step 1 found — no web_search tool attached (see the plan's §3-2), which is
      * exactly why this is a separate, cheaper call from step 1 rather than one combined request.
+     *
+     * <p>REVISE item 1 (senior review 2026-08-29, PR #1): {@code changelogText} is truncated against
+     * {@link #CHANGELOG_TEXT_MAX_LENGTH}, not {@link #USAGE_TEXT_MAX_LENGTH} — unlike {@code
+     * usageText}, it is not raw CSV user input but the generated output of the immediately preceding
+     * {@code /v1/bundled-components/discover-changelog} call, which {@code llm-service/main.py}
+     * already bounds via {@code max_tokens=2048} (roughly 8,000 characters). Truncating it to
+     * {@code usageText}'s 2,000-character limit would silently drop up to three-quarters of the
+     * changelog before it ever reaches this extraction call, degrading bundled-component recall.
      */
     public Optional<BundledExtractResponse> extractBundledComponents(
             String apiKey, ResearchJobItem item, String changelogText, BigDecimal reservedCostUsd) {
-        BundledExtractRequest request = new BundledExtractRequest(apiKey, item.getProductName(), item.getVersion(), changelogText);
+        BundledExtractRequest request = new BundledExtractRequest(
+                apiKey,
+                truncate(item.getProductName(), SHORT_FIELD_MAX_LENGTH, "productName"),
+                truncate(item.getVersion(), SHORT_FIELD_MAX_LENGTH, "version"),
+                truncate(changelogText, CHANGELOG_TEXT_MAX_LENGTH, "changelogText"));
         UsageDto usage = null;
         try {
             BundledExtractResponse response = llmServiceRestClient.post()
@@ -203,5 +270,61 @@ public class LlmServiceClient {
                 usage == null ? null : usage.inputTokens(),
                 usage == null ? null : usage.outputTokens(),
                 usage == null ? null : usage.webSearchRequests());
+    }
+
+    /** Mirrors {@link #reconcile}/{@link #reconcileBundled}, against {@code
+     *  HighConfidenceVerificationService}'s own separate budget ledger (REVISE item 1, senior review
+     *  2026-08-29 — see {@code JobCostBudgetService#verificationCostCapPerItemUsd}'s javadoc). */
+    private void reconcileVerification(ResearchJobItem item, String callSite, BigDecimal reservedCostUsd, UsageDto usage) {
+        BigDecimal actualCostUsd = usage == null
+                ? BigDecimal.ZERO
+                : jobCostBudgetService.computeActualCost(usage.inputTokens(), usage.outputTokens(), usage.webSearchRequests());
+        jobCostBudgetService.reconcileVerification(
+                item.getJobId(),
+                item.getId(),
+                callSite,
+                reservedCostUsd,
+                actualCostUsd,
+                usage == null ? null : usage.inputTokens(),
+                usage == null ? null : usage.outputTokens(),
+                usage == null ? null : usage.webSearchRequests());
+    }
+
+    // --- Prompt-field length guard (REVISE item 5, senior review 2026-08-29) ----------------------
+    //
+    // ResearchJobItem.usageText is a TEXT column with no length validation anywhere upstream, and
+    // every method above embeds it (plus the short productName/version/vendor fields) directly into
+    // a Claude prompt. JobCostBudgetService's reservations are fixed, size-independent worst-case
+    // dollar estimates per call, not scaled to real token counts — so a single CSV row with a
+    // deliberately huge usage_text cell could inflate one call's *real* token count (and therefore
+    // real dollar cost) far past its reservation, without tripping the pre-flight budget check at
+    // all. Truncating every item-derived string field here, at the one place every Claude-calling
+    // method already funnels its request body through, closes that gap regardless of which endpoint
+    // is called.
+
+    private static final int USAGE_TEXT_MAX_LENGTH = 2000;
+    private static final int SHORT_FIELD_MAX_LENGTH = 200;
+
+    // REVISE item 1 (senior review 2026-08-29, PR #1): changelogText is a Claude-generated response
+    // (see extractBundledComponents' javadoc), not raw CSV input, and llm-service already bounds it
+    // at ~8,000 characters via max_tokens=2048 -- this limit only needs to comfortably clear that
+    // upstream bound as a defensive backstop, not actually constrain normal responses.
+    private static final int CHANGELOG_TEXT_MAX_LENGTH = 20000;
+
+    private String truncate(String value, int maxLength, String fieldName) {
+        if (value == null || value.length() <= maxLength) {
+            return value;
+        }
+        log.debug("Truncating field '{}' from {} to {} characters before sending to llm-service",
+                fieldName, value.length(), maxLength);
+        int cutIndex = maxLength;
+        // REVISE item 5 (senior review 2026-08-29, PR #1): a plain substring(0, maxLength) can land
+        // mid-surrogate-pair (e.g. inside an emoji in usageText), producing an unpaired low surrogate
+        // in the truncated string sent to llm-service. Back off by one more character when that would
+        // happen, so we always cut on a whole-character boundary.
+        if (Character.isLowSurrogate(value.charAt(cutIndex))) {
+            cutIndex--;
+        }
+        return value.substring(0, cutIndex);
     }
 }

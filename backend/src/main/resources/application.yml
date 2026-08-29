@@ -49,6 +49,32 @@ app:
   # One-shot full NVD CPE Dictionary mirror (~1.8M entries) on startup. Off by default: it runs for
   # hours and only needs to happen once per environment. See CpeDictionaryBootstrapSync.
   cpe-full-sync-on-startup: ${CPE_FULL_SYNC_ON_STARTUP:false}
+  # High-confidence AI verification backstop (see HighConfidenceVerificationService) — an extra
+  # AI+web_search check for Stage1 items that reached a high-confidence CPE match purely via static
+  # (Tier1) logic, never reviewed by Tier2/Tier3's AI disambiguation. Off by default so this never
+  # changes existing behavior/cost for a job unless explicitly turned on. Note (REVISE item 7,
+  # senior review 2026-08-29, PR #1): this check runs synchronously on the item-processing thread
+  # (itemProcessingExecutor, max 8 parallel) like every other AI tier — enabling it can plausibly add
+  # on the order of 7-8 minutes of wall-clock throughput to a 1,000-item job.
+  high-confidence-verification:
+    enabled: ${HIGH_CONFIDENCE_VERIFICATION_ENABLED:false}
+    # Only a static match at or above this confidence is eligible.
+    confidence-threshold: ${HIGH_CONFIDENCE_VERIFICATION_THRESHOLD:0.95}
+    # Multiplier applied to confidence when the AI verdict is "incorrect". An INCORRECT verdict with
+    # no surviving registry-based fallback signal is always demoted fully to UNIDENTIFIED regardless
+    # of this factor (REVISE item 4, senior review 2026-08-29, PR #1 — see
+    # HighConfidenceVerificationService#applyIncorrectVerdict's javadoc for why a configurable
+    # demotion floor was removed).
+    downgrade-factor: ${HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR:0.5}
+    # Per-job AI-spend cap per item for this feature's OWN ledger (see
+    # JobCostBudgetService#verificationCostCapPerItemUsd) — deliberately separate from, and not
+    # counted against, app.cost-cap-per-item-usd below. Defaults to 0 (verification effectively
+    # never affordable) so simply flipping `enabled` above to true never silently exhausts a job's
+    # always-on AI budget for every other tier — must be set to a real value alongside `enabled`.
+    cost-cap-per-item-usd: ${HIGH_CONFIDENCE_VERIFICATION_COST_CAP_PER_ITEM_USD:0}
+  # Per-job AI-spend cap per item (see JobCostBudgetService#costCapPerItemUsd) — $5/1,000 items by
+  # default. Only override for a throwaway diagnostic job deliberately made of AI-eligible items.
+  cost-cap-per-item-usd: ${APP_COST_CAP_PER_ITEM_USD:0.005}
 
 server:
   port: 8080

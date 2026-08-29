@@ -2,20 +2,22 @@ package com.vulncheck.app.service;
 
 import com.vulncheck.app.entity.JobCostLedgerEntry;
 import com.vulncheck.app.repository.JobCostLedgerRepository;
+import jakarta.annotation.PostConstruct;
 import java.math.BigDecimal;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 /**
  * In-memory, per-job hard cap on estimated Claude API spend, enforced across every AI call site
  * (Tier2 CPE/registry disambiguation, Tier3 web-search identify, Stage4 web-search research).
- * Target: keep expected cost at or under $5 per 1,000 items — {@link #COST_CAP_PER_ITEM_USD}
- * ($0.005/item) is exactly that ratio, scaled to each job's own item count so it holds regardless
- * of job size. (Retuned 2026-08-25 from an earlier $20/1,000-item, $0.02/item cap per the
+ * Target: keep expected cost at or under $5 per 1,000 items — {@link #costCapPerItemUsd}
+ * ($0.005/item by default) is exactly that ratio, scaled to each job's own item count so it holds
+ * regardless of job size. (Retuned 2026-08-25 from an earlier $20/1,000-item, $0.02/item cap per the
  * senior-engineer cost review — see {@link #TIER3_WEB_SEARCH_IDENTIFY_COST_USD}/{@link
  * #STAGE4_WEB_SEARCH_RESEARCH_COST_USD}'s own comment for why their reservation estimates had to
  * be recomputed in the same change, not left at the old, now-too-high figures.)
@@ -61,7 +63,39 @@ public class JobCostBudgetService {
 
     private final JobCostLedgerRepository jobCostLedgerRepository;
 
-    private static final BigDecimal COST_CAP_PER_ITEM_USD = new BigDecimal("0.005");
+    /**
+     * Configurable (default unchanged at $0.005/item, matching the $5/1,000-item target) so a
+     * throwaway diagnostic job can safely raise its own job's cap via a Spring property override
+     * (e.g. {@code @TestPropertySource}) instead of the previous convention of padding a CSV with
+     * "should be free" rows to inflate {@code itemCount} — see {@code
+     * HighConfidenceVerificationRealAiJobCreator}'s own javadoc for why: {@code
+     * Stage4DiagnosticJobCreator}'s padding rows unexpectedly still billed Tier2 43/43 times (see
+     * that class's own javadoc), so padding is not actually a reliable zero-cost lever. A property
+     * override gives an exact, predictable cap instead.
+     */
+    /** Matches the {@code @Value} default immediately below — kept as its own constant purely so
+     *  {@link #warnIfCostCapOverridden} can compare the resolved property value against "the
+     *  well-known default" without hardcoding the literal twice. */
+    private static final BigDecimal DEFAULT_COST_CAP_PER_ITEM_USD = new BigDecimal("0.005");
+
+    @Value("${app.cost-cap-per-item-usd:0.005}")
+    private BigDecimal costCapPerItemUsd;
+
+    /**
+     * REVISE item 7 (senior review 2026-08-29): a non-default {@code app.cost-cap-per-item-usd} is
+     * exactly the kind of environment override that's easy to leave in place by accident after a
+     * throwaway diagnostic job (see {@link #costCapPerItemUsd}'s own javadoc on that convention) —
+     * logging it once at startup makes a silently-raised/lowered cost cap visible in the ordinary
+     * startup log instead of only discoverable by reading application.yml/docker-compose.yml.
+     */
+    @PostConstruct
+    void warnIfCostCapOverridden() {
+        if (costCapPerItemUsd.compareTo(DEFAULT_COST_CAP_PER_ITEM_USD) != 0) {
+            log.warn("app.cost-cap-per-item-usd is overridden to {} (default {}) — every job's AI "
+                            + "spend cap will use this non-default value until it is changed back",
+                    costCapPerItemUsd, DEFAULT_COST_CAP_PER_ITEM_USD);
+        }
+    }
 
     // Claude Haiku 4.5 list pricing ($1.00 / $5.00 per MTok input/output) and the Claude API web
     // search server tool ($10.00 per 1,000 calls) — used by computeActualCost to reconcile real
@@ -130,6 +164,37 @@ public class JobCostBudgetService {
     public static final BigDecimal STAGE4_WEB_SEARCH_RESEARCH_COST_USD = new BigDecimal("0.035");
 
     /**
+     * High-confidence AI verification backstop ({@code HighConfidenceVerificationService}, 2026-08-29
+     * — the fix for the "a registry match's confidence is lent to an independently-derived CPE"
+     * known-limitations gap). No real usage data exists yet for this brand-new endpoint, so this is
+     * not re-derived from {@code job_cost_ledger} the way the two constants above were — instead it's
+     * set conservatively at Stage4's own retuned estimate ($0.035), on the basis that the two calls
+     * are the same shape (single Haiku call, {@code web_search_20250305} with {@code max_uses=1},
+     * structured JSON output, similarly short prompt) and Stage4's own measured mean/p95
+     * ($0.0233/$0.035, see that constant's comment) is therefore the best available reference point.
+     * Re-derive this from real {@code job_cost_ledger} data (filter {@code call_site = 'VERIFICATION'})
+     * once enough rows accumulate, per this class's standing re-derivation guidance above.
+     */
+    public static final BigDecimal HIGH_CONFIDENCE_VERIFICATION_COST_USD = new BigDecimal("0.035");
+
+    /**
+     * Per-item cap for the high-confidence verification ledger below ({@link
+     * #verificationCapByJobId} et al.) — REVISE item 1 (senior review 2026-08-29): job 191 real data
+     * found 108/300 items (36%) eligible for verification, whose demand ($3.78 at {@link
+     * #HIGH_CONFIDENCE_VERIFICATION_COST_USD} x 108) was 2.5x a 300-item job's own always-on {@link
+     * #costCapPerItemUsd} budget ($1.50) — sharing that budget meant enabling this feature could burn
+     * through the whole job's AI allowance from the first CSV rows alone, silently starving every
+     * later item's Tier2/Tier3 calls. Defaults to {@code 0} (verification effectively never affordable
+     * until an operator explicitly sets this alongside {@code
+     * app.high-confidence-verification.enabled=true}) rather than mirroring {@link #costCapPerItemUsd}'s
+     * $0.005 default, since this is a brand-new, still-being-measured feature — see this class's
+     * standing re-derivation guidance above once real {@code call_site = 'VERIFICATION'} rows
+     * accumulate.
+     */
+    @Value("${app.high-confidence-verification.cost-cap-per-item-usd:0}")
+    private BigDecimal verificationCostCapPerItemUsd;
+
+    /**
      * Bundled-package (formerly "Stage 3.5") detection cost constants — see
      * {@code docs/spec/bundled-package-detection-plan.md} §4 for the derivation (same web_search
      * max_uses=1 pricing shape as Stage4 for the changelog-discovery call, plus a text-only
@@ -137,7 +202,7 @@ public class JobCostBudgetService {
      * one's derivation). These are tracked against a completely separate ledger ({@link
      * #bundledCapByJobId}/{@link #bundledSpentByJobId}, below) from every other constant on this
      * class — this feature is opt-in per job (see {@code ResearchJob#bundledComponentCheckEnabled})
-     * specifically so it can never silently draw down the always-on {@link #COST_CAP_PER_ITEM_USD}
+     * specifically so it can never silently draw down the always-on {@link #costCapPerItemUsd}
      * budget every other job relies on.
      */
     public static final BigDecimal BUNDLED_COMPONENT_CHANGELOG_DISCOVERY_COST_USD = new BigDecimal("0.015");
@@ -171,12 +236,20 @@ public class JobCostBudgetService {
     private final Map<Long, BigDecimal> bundledSpentByJobId = new ConcurrentHashMap<>();
     private final Set<Long> bundledEndedJobIds = ConcurrentHashMap.newKeySet();
 
+    // Third, independent ledger for the high-confidence verification backstop's own budget (see
+    // #verificationCostCapPerItemUsd's javadoc above) — same reasoning as the bundled-component
+    // ledger's own comment: a separate set of maps so this feature's spend can never be commingled
+    // with, or silently borrow from, the always-on per-item budget every job already relies on.
+    private final Map<Long, BigDecimal> verificationCapByJobId = new ConcurrentHashMap<>();
+    private final Map<Long, BigDecimal> verificationSpentByJobId = new ConcurrentHashMap<>();
+    private final Set<Long> verificationEndedJobIds = ConcurrentHashMap.newKeySet();
+
     public void startJobBudget(Long jobId, int itemCount) {
         // A job id can legitimately be started again after having previously ended (e.g.
         // StuckJobResumer re-running processJobAsync for a job resumed after a crash/redeploy) —
         // clear any stale tombstone so this fresh budget isn't immediately treated as ended.
         endedJobIds.remove(jobId);
-        capByJobId.put(jobId, COST_CAP_PER_ITEM_USD.multiply(BigDecimal.valueOf(itemCount)));
+        capByJobId.put(jobId, costCapPerItemUsd.multiply(BigDecimal.valueOf(itemCount)));
         spentByJobId.put(jobId, BigDecimal.ZERO);
     }
 
@@ -440,6 +513,87 @@ public class JobCostBudgetService {
                 jobId,
                 jobItemId,
                 JobCostLedgerEntry.LEDGER_BUNDLED_COMPONENT,
+                callSite,
+                reservedEstimateUsd,
+                actualCostUsd,
+                inputTokens,
+                outputTokens,
+                webSearchRequests);
+    }
+
+    // --- High-confidence verification's own budget ledger (REVISE item 1, senior review 2026-08-29,
+    // see #verificationCostCapPerItemUsd's javadoc above) -----------------------------------------
+
+    /** Mirrors {@link #startBundledComponentBudget}, against the separate {@link
+     *  #verificationCapByJobId} ledger. Unlike the bundled-component budget (opt-in per job via
+     *  {@code ResearchJob#bundledComponentCheckEnabled}), the verification feature is a single
+     *  app-wide toggle ({@code app.high-confidence-verification.enabled}), not a per-job field —
+     *  callers therefore start this budget unconditionally for every job, same as {@link
+     *  #startJobBudget}; the {@code cost-cap-per-item-usd} default of {@code 0} (see {@link
+     *  #verificationCostCapPerItemUsd}) is what actually keeps this a no-op for every job when the
+     *  operator hasn't explicitly configured a real cap. */
+    public void startVerificationBudget(Long jobId, int itemCount) {
+        verificationEndedJobIds.remove(jobId);
+        verificationCapByJobId.put(jobId, verificationCostCapPerItemUsd.multiply(BigDecimal.valueOf(itemCount)));
+        verificationSpentByJobId.put(jobId, BigDecimal.ZERO);
+    }
+
+    /** Mirrors {@link #endBundledComponentBudget}, against the separate verification ledger. */
+    public void endVerificationBudget(Long jobId) {
+        verificationCapByJobId.remove(jobId);
+        verificationSpentByJobId.remove(jobId);
+        verificationEndedJobIds.add(jobId);
+    }
+
+    /** Same admission-check shape as {@link #tryReserveBundledComponent} — fails <b>closed</b> for a
+     *  job id with no cap entry at all, same reasoning as that method (this ledger's budget must
+     *  never be silently unlimited just because a caller forgot to start it). */
+    public synchronized boolean tryReserveVerification(Long jobId, BigDecimal estimatedCostUsd) {
+        if (verificationEndedJobIds.contains(jobId)) {
+            return false;
+        }
+        BigDecimal cap = verificationCapByJobId.get(jobId);
+        if (cap == null) {
+            return false;
+        }
+        BigDecimal spent = verificationSpentByJobId.getOrDefault(jobId, BigDecimal.ZERO);
+        if (spent.add(estimatedCostUsd).compareTo(cap) > 0) {
+            return false;
+        }
+        verificationSpentByJobId.put(jobId, spent.add(estimatedCostUsd));
+        return true;
+    }
+
+    /** Mirrors {@link #reconcileBundledComponent}, against the separate verification ledger —
+     *  including persisting its {@link JobCostLedgerEntry} row unconditionally, tagged {@link
+     *  JobCostLedgerEntry#LEDGER_VERIFICATION} so it stays distinguishable from the always-on and
+     *  bundled-component ledgers' rows. */
+    public synchronized void reconcileVerification(
+            Long jobId, Long jobItemId, BigDecimal reservedEstimateUsd, BigDecimal actualCostUsd) {
+        reconcileVerification(jobId, jobItemId, null, reservedEstimateUsd, actualCostUsd, null, null, null);
+    }
+
+    /** Same as {@link #reconcileVerification(Long, Long, BigDecimal, BigDecimal)}, additionally
+     *  recording the raw usage breakdown (V27) — see {@link #reconcile(Long, Long, String,
+     *  BigDecimal, BigDecimal, Integer, Integer, Integer)}'s javadoc for why. */
+    public synchronized void reconcileVerification(
+            Long jobId,
+            Long jobItemId,
+            String callSite,
+            BigDecimal reservedEstimateUsd,
+            BigDecimal actualCostUsd,
+            Integer inputTokens,
+            Integer outputTokens,
+            Integer webSearchRequests) {
+        if (verificationCapByJobId.containsKey(jobId)) {
+            BigDecimal spent = verificationSpentByJobId.getOrDefault(jobId, BigDecimal.ZERO);
+            BigDecimal adjusted = spent.subtract(reservedEstimateUsd).add(actualCostUsd);
+            verificationSpentByJobId.put(jobId, adjusted.max(BigDecimal.ZERO));
+        }
+        persistLedgerEntry(
+                jobId,
+                jobItemId,
+                JobCostLedgerEntry.LEDGER_VERIFICATION,
                 callSite,
                 reservedEstimateUsd,
                 actualCostUsd,

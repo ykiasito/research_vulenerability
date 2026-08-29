@@ -105,6 +105,37 @@ public final class LlmServiceModels {
     public record WebSearchResearchResponse(List<WebSearchVulnFindingDto> findings, UsageDto usage) {
     }
 
+    // --- High-confidence verification backstop --------------------------------------------------
+
+    public record VerifyHighConfidenceRequest(
+            @JsonProperty("api_key") String apiKey,
+            @JsonProperty("product_name") String productName,
+            String version,
+            String vendor,
+            @JsonProperty("usage_text") String usageText,
+            @JsonProperty("cpe_vendor") String cpeVendor,
+            @JsonProperty("cpe_product") String cpeProduct) {
+    }
+
+    /** One plausible variant when the static match is genuinely ambiguous (e.g. a Windows vs. Mac
+     *  build of the same product) — informational only, never auto-applied; a human decides. */
+    public record AmbiguousCandidateDto(String vendor, String product, String note) {
+    }
+
+    /** {@code outcome} is one of {@code "correct"}/{@code "incorrect"}/{@code "ambiguous"} — see
+     *  {@code HighConfidenceVerificationService} for how each is handled. {@code alternativeVendor}/
+     *  {@code alternativeProduct} are only ever non-null for {@code "incorrect"} (informational —
+     *  never auto-substituted for the rejected CPE, same anti-hallucination stance as every other
+     *  LLM tier in this app); {@code ambiguousCandidates} only for {@code "ambiguous"}. */
+    public record VerifyHighConfidenceResponse(
+            String outcome,
+            String reasoning,
+            @JsonProperty("alternative_vendor") String alternativeVendor,
+            @JsonProperty("alternative_product") String alternativeProduct,
+            @JsonProperty("ambiguous_candidates") List<AmbiguousCandidateDto> ambiguousCandidates,
+            UsageDto usage) {
+    }
+
     // --- Bundled-package (formerly "Stage 3.5") detection --------------------------------------
 
     public record BundledChangelogRequest(
