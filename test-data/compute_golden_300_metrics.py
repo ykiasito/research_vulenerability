@@ -27,6 +27,15 @@ correctness-rate metrics, which are unaffected by this fix. NOTE: recall as defi
 a different base population than job 167's previously-reported 93.94% ("identified real
 products" / 990 real-product rows, no control rows subtracted the same way) -- the two numbers
 are not directly comparable; see docs/spec/nfr-status-2026-08.md for the full discussion.
+
+Future re-measurement note (2026-08-30, docs/spec/task-backlog.md item 16): V30 added two
+measurement-only columns to identified_products, cpe_candidate_count and
+cpe_candidate_variant_derived, so a future golden-300 re-run can split the confidence bucket
+analysis by "CPE chosen from a single candidate" vs. "chosen among several". The next `\\COPY`
+export used to produce a results CSV for this script should include both columns (this script
+itself needs no change to keep working either way -- extra CSV columns are simply unused dict
+keys via csv.DictReader -- but the future bucket-split analysis will need them present in the
+export to read).
 """
 import csv
 
