@@ -221,6 +221,26 @@ class HighConfidenceVerificationServiceTest {
     }
 
     @Test
+    void ambiguousVerdictWithBlankReasoningAndSingleCandidateOmitsLeadingSeparatorFromNote() {
+        // Regression guard for the bug that survived the previous two REVISE rounds: verdict.reasoning()
+        // being "" (allowed on the wire, pydantic requires non-null but not non-blank) used to seed the
+        // StringBuilder with an empty-but-non-null value, and the first candidate's " / " separator was
+        // then appended unconditionally -- producing a note like " / zoom:zoom_client_for_mac (Mac版)"
+        // with a stray leading separator instead of starting directly with the candidate.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto("zoom", "zoom_client_for_mac", "Mac版")),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("zoom:zoom_client_for_mac (Mac版)");
+    }
+
+    @Test
     void incorrectVerdictWithRegistryFallbackDropsCpeAndDowngradesConfidence() {
         IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
         when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))

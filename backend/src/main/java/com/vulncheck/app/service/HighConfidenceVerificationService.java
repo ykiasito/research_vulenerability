@@ -203,8 +203,10 @@ public class HighConfidenceVerificationService {
         // REVISE item 3 (senior review 2026-08-29, round 1): verdict.reasoning() is an ordinary
         // nullable field on the wire, same as ambiguousCandidates below -- normalize null to "" here
         // rather than either NPE'ing (StringBuilder constructor) or writing the literal string
-        // "null（AIの推測: ...）" into verification_note.
-        String reasoning = verdict.reasoning() == null ? "" : verdict.reasoning();
+        // "null（AIの推測: ...）" into verification_note. A blank-but-non-null reasoning (the
+        // pydantic schema allows "" explicitly) is normalized the same way, since it carries no
+        // more meaning than null does here.
+        String reasoning = (verdict.reasoning() == null || verdict.reasoning().isBlank()) ? "" : verdict.reasoning();
         // REVISE item 1 (senior review 2026-08-29, PR #1): alternativeVendor and
         // alternativeProduct are independently nullable -- concatenating either one directly would
         // write the literal string "null" into verification_note (e.g. "null:acrobat_reader") when
@@ -217,7 +219,12 @@ public class HighConfidenceVerificationService {
     }
 
     private String describeAmbiguousCandidates(VerifyHighConfidenceResponse verdict) {
-        StringBuilder sb = new StringBuilder(verdict.reasoning() == null ? "" : verdict.reasoning());
+        // Same null-or-blank normalization as describeIncorrectVerdict: reasoning is allowed to be
+        // "" on the wire (pydantic requires non-null, not non-blank), and initializing the
+        // StringBuilder with it must not leave a phantom non-empty prefix that would then cause the
+        // first candidate's " / " separator below to be appended unconditionally.
+        String reasoning = (verdict.reasoning() == null || verdict.reasoning().isBlank()) ? "" : verdict.reasoning();
+        StringBuilder sb = new StringBuilder(reasoning);
         // REVISE item 6 (senior review 2026-08-29, round 1): the llm-service response schema
         // doesn't guarantee ambiguousCandidates is present for an "ambiguous" outcome (it's an
         // ordinary nullable JSON field, not enforced non-null by anything on the wire) — an enhanced
@@ -237,7 +244,15 @@ public class HighConfidenceVerificationService {
             if (candidateLabel.isEmpty()) {
                 continue;
             }
-            sb.append(" / ").append(candidateLabel);
+            // This is the fix for the bug that survived the previous two REVISE rounds: the " / "
+            // separator must only be appended once sb already holds something (either a non-blank
+            // reasoning or an earlier candidate) -- appending it unconditionally left a stray
+            // leading " / " whenever reasoning was "" and this was the first (or only) candidate,
+            // e.g. " / zoom:zoom_client_for_mac (Mac版)" instead of "zoom:zoom_client_for_mac (Mac版)".
+            if (sb.length() > 0) {
+                sb.append(" / ");
+            }
+            sb.append(candidateLabel);
             if (candidate.note() != null && !candidate.note().isBlank()) {
                 sb.append(" (").append(candidate.note()).append(')');
             }
