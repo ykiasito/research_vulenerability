@@ -337,11 +337,18 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
      * quoted {@code q} clause (e.g. {@code a:"..."}) — mirrors {@code
      * org.apache.lucene.queryparser.classic.QueryParser#escape}. Without this, a CSV-supplied
      * {@code productName}/groupId/artifactId/version containing a literal {@code "} could close
-     * the quoted phrase early and append arbitrary Solr query syntax of its own choosing — e.g. a
-     * fabricated version query that always matches ({@code numFound > 0}) regardless of whether
-     * that version was ever actually published, which {@link #toMatch} then reports as a
-     * confirmed, confidence-0.95 result. CSV input is untrusted, so every value reaching a {@code
-     * q} parameter here goes through this first, not just the ones that look adversarial today.
+     * the quoted phrase early and append arbitrary Solr query syntax of its own choosing.
+     * Confirmed live against search.maven.org: an unescaped {@code productName} reaching {@link
+     * #findCandidateArtifacts}'s default-core {@code a:"..."} query can be broadened this way into
+     * matching artifacts that have nothing to do with the real product — a crafted product name
+     * pulled back 13 unrelated candidate artifacts in one live test — so the wrong package is what
+     * ends up sorted to the front and returned as the identified match. (A similar-looking attempt
+     * to spoof {@link #versionExists}'s {@code gav}-core confirmation query — forging a nonexistent
+     * version into a confidence-0.95 "confirmed" result via an injected {@code v:} clause — did
+     * not reproduce live: search.maven.org returned HTTP 400 for an injected {@code OR v:*} and
+     * {@code numFound: 0} for an injected OR'd literal version.) CSV input is untrusted, so every
+     * value reaching a {@code q} parameter here goes through this first, not just the ones that
+     * look adversarial today, and not just the ones with a live-confirmed exploit.
      */
     private static String escapeLuceneQueryValue(String value) {
         StringBuilder escaped = new StringBuilder(value.length());

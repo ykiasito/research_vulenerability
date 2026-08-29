@@ -295,9 +295,11 @@ class MavenCentralRegistryClientTest {
     void escapesLuceneSpecialCharactersInTheProductNameBeforeBuildingTheCandidateSearchQuery() {
         // productName is untrusted CSV input -- without escaping, a literal '"' would close the
         // quoted a: phrase early and let the rest of the value append arbitrary Solr query syntax
-        // (e.g. an OR'd v: clause that always matches, turning a nonexistent version into a
-        // confidence-0.95 confirmed match). The escaped backslash-quote must reach Solr as a
-        // literal quote character inside the phrase, not a phrase terminator.
+        // to this default-core candidate search, broadening it into matching artifacts unrelated
+        // to the real product (confirmed live: a crafted product name pulled back 13 unrelated
+        // candidates), so the wrong package gets sorted to the front and returned as the match.
+        // The escaped backslash-quote must reach Solr as a literal quote character inside the
+        // phrase, not a phrase terminator.
         server.expect(method(HttpMethod.GET))
                 .andExpect(requestTo(Matchers.allOf(
                         Matchers.containsString("a:%22evil%5C%22%22"),
@@ -312,10 +314,12 @@ class MavenCentralRegistryClientTest {
 
     @Test
     void escapesLuceneSpecialCharactersInTheVersionBeforeBuildingTheGavConfirmationQuery() {
-        // The version column is likewise untrusted CSV input. A crafted value containing an
-        // unescaped '"' could close the v: phrase early and append arbitrary Solr syntax (e.g.
-        // `OR v:*`) that makes numFound > 0 for a version that was never actually published --
-        // exactly the confidence-0.95 spoofing this escaping prevents.
+        // The version column is likewise untrusted CSV input, so it gets the same escaping as
+        // productName on general principle -- but unlike productName's candidate-search injection
+        // (see MavenCentralRegistryClient#escapeLuceneQueryValue's javadoc), an attempt to spoof
+        // this gav-core confirmation query itself (an injected `OR v:*` or an OR'd literal version,
+        // to fabricate numFound > 0 for a version that was never published) did not reproduce live:
+        // search.maven.org returned HTTP 400 for `OR v:*` and numFound 0 for the OR'd literal.
         server.expect(method(HttpMethod.GET))
                 .andExpect(requestTo(Matchers.allOf(
                         Matchers.containsString("v:%22evil%5C%22%22"),
