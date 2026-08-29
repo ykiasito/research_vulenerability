@@ -414,6 +414,22 @@ class HighConfidenceVerificationServiceTest {
         assertThat(result.get().getVerificationNote()).isEqualTo("wrong vendor entirely（AIの推測: acrobat_reader）");
     }
 
+    @Test
+    void incorrectVerdictWithTrailingWhitespaceInReasoningStripsBeforeAppendingHint() {
+        // REVISE (senior review PR #13): reasoning with trailing whitespace must not leave a stray
+        // space before the "（AIの推測: ...）" suffix -- matches the strip() already applied in
+        // describeAmbiguousCandidates.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", "wrong vendor entirely ", null, "acrobat_reader", List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("wrong vendor entirely（AIの推測: acrobat_reader）");
+    }
+
     // --- Backlog item 9 (senior review 2026-08-29, PR #5; extended to INCORRECT, senior review ----
     // --- 2026-08-30, PR #8 REVISE): verification_note length guard --------------------------------
 

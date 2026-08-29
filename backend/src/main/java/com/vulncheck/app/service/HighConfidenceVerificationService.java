@@ -211,7 +211,12 @@ public class HighConfidenceVerificationService {
         // "null（AIの推測: ...）" into verification_note. A blank-but-non-null reasoning (the
         // pydantic schema allows "" explicitly) is normalized the same way, since it carries no
         // more meaning than null does here.
-        String reasoning = (verdict.reasoning() == null || verdict.reasoning().isBlank()) ? "" : verdict.reasoning();
+        //
+        // REVISE (senior review PR #13): stripped here too, matching describeAmbiguousCandidates
+        // below -- a reasoning value with trailing/leading whitespace (e.g. "wrong vendor entirely ")
+        // otherwise survives into the concatenated note as "wrong vendor entirely （AIの推測: ...）",
+        // with a stray space before the parenthesis.
+        String reasoning = verdict.reasoning() == null ? "" : verdict.reasoning().strip();
         // REVISE item 1 (senior review 2026-08-29, PR #1): alternativeVendor and
         // alternativeProduct are independently nullable -- concatenating either one directly would
         // write the literal string "null" into verification_note (e.g. "null:acrobat_reader") when
