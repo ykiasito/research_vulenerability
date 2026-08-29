@@ -220,6 +220,10 @@ class Stage1IdentificationServiceTest {
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:lodash:lodash:1.0.0:*:*:*:*:*:*:*");
         verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
         verify(userApiKeyService, never()).getClaudeApiKey(any());
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): a lone, literal dictionary
+        // match — exactly the "single candidate" path resolveCandidates records.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -439,6 +443,11 @@ class Stage1IdentificationServiceTest {
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:redislabs:redis:1.0.0:*:*:*:*:*:*:*");
         assertThat(result.get().getEcosystem()).isNull();
         assertThat(result.get().getPackageName()).isNull();
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): the rescue path's own
+        // candidate pool (a fresh live lookup after the registry match was AI-rejected), not the
+        // original (empty) cpeCandidates from before the rescue.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -700,6 +709,10 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:apache_http_server:1.0.0:*:*:*:*:*:*:*");
         verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): no-arbitration path —
+        // multiple candidates, but no AI call at all, so the first is picked without judging between them.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -720,6 +733,10 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:apache_http_server:1.0.0:*:*:*:*:*:*:*");
         verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): same no-arbitration
+        // fallback as the no-API-key case above, just reached via an exhausted job budget instead.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -739,6 +756,10 @@ class Stage1IdentificationServiceTest {
         assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:apache_tomcat:1.0.0:*:*:*:*:*:*:*");
         assertThat(result.get().getConfidence()).isEqualByComparingTo("0.9");
+        // Measurement-only provenance (docs/spec/task-backlog.md item 16): the arbitrated path —
+        // an LLM call actually chose among the candidates, but the pool size is still 2.
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
 
     @Test
@@ -1454,6 +1475,32 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void aLoneNameVariantDerivedCpeCandidateIsAcceptedWithProvenanceWhenAiConfirmsIt() {
+        // Same setup as aLoneNameVariantDerivedCpeCandidateIsDroppedRatherThanAutoAcceptedWithNoApiKey
+        // above, but with a Claude key configured and the AI confirming the match — the other side of
+        // resolveSingleCpeCandidate's fork (senior review, 2026-08-25) that the existing provenance
+        // tests never exercise: cpeCandidateVariantDerived=true wired through to the saved
+        // IdentifiedProduct, not just the isFalse() literal-match cases.
+        CpeDictionaryEntry vlcMediaPlayer =
+                cpeEntry("cpe:2.3:a:videolan:vlc_media_player:3.0.0:*:*:*:*:*:*:*", "vlc_media_player");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
+                .thenReturn(List.of(vlcMediaPlayer));
+        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches VLC Media Player", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
     }
 
     @Test
