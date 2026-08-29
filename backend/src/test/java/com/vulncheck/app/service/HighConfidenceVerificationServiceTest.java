@@ -241,6 +241,61 @@ class HighConfidenceVerificationServiceTest {
     }
 
     @Test
+    void ambiguousVerdictWithTrailingWhitespaceInReasoningDoesNotDoubleUpTheSeparator() {
+        // Backlog item 11(a) (senior review 2026-08-29, PR #5 4th review): "could be windows or mac
+        // build " (trailing space) is correctly non-blank per isBlank(), so it used to survive
+        // un-stripped into the StringBuilder -- the unconditional " / " appended for the first
+        // candidate then produced a visibly doubled space ("...build  / zoom:...").
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "could be windows or mac build ", null, null,
+                        List.of(new AmbiguousCandidateDto("zoom", "zoom_client_for_mac", "Mac版")),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote())
+                .isEqualTo("could be windows or mac build / zoom:zoom_client_for_mac (Mac版)");
+    }
+
+    @Test
+    void ambiguousVerdictWithWhitespacePaddedCandidateVendorAndProductOmitsStraySpacesAroundColon() {
+        // Same fix, applied to joinNonNull: a vendor/product with leading or trailing whitespace
+        // (e.g. "zoom " or " zoom_client_for_mac") used to leave a stray space next to the ":"
+        // separator (e.g. "zoom : zoom_client_for_mac") instead of a clean join.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto("zoom ", " zoom_client_for_mac", null)),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("zoom:zoom_client_for_mac");
+    }
+
+    @Test
+    void ambiguousVerdictWithWhitespacePaddedCandidateNoteOmitsStraySpacesInsideParentheses() {
+        // Same fix, applied to the per-candidate note field: a note of " Mac版 " (leading/trailing
+        // whitespace) used to render as " ( Mac版 )" with stray spaces just inside the parentheses.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "ambiguous", "", null, null,
+                        List.of(new AmbiguousCandidateDto("zoom", "zoom_client_for_mac", " Mac版 ")),
+                        TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("zoom:zoom_client_for_mac (Mac版)");
+    }
+
+    @Test
     void incorrectVerdictWithRegistryFallbackDropsCpeAndDowngradesConfidence() {
         IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
         when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
@@ -352,6 +407,22 @@ class HighConfidenceVerificationServiceTest {
         when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
                 .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
                         "incorrect", "wrong vendor entirely", "", "acrobat_reader", List.of(), TEST_USAGE)));
+
+        Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getVerificationNote()).isEqualTo("wrong vendor entirely（AIの推測: acrobat_reader）");
+    }
+
+    @Test
+    void incorrectVerdictWithTrailingWhitespaceInReasoningStripsBeforeAppendingHint() {
+        // REVISE (senior review PR #13): reasoning with trailing whitespace must not leave a stray
+        // space before the "（AIの推測: ...）" suffix -- matches the strip() already applied in
+        // describeAmbiguousCandidates.
+        IdentifiedProduct product = staticProductWithCpe(new BigDecimal("0.95"), "npm");
+        when(llmServiceClient.verifyHighConfidence(eq("sk-ant-test"), any(), eq("zoom"), eq("zoom"), any()))
+                .thenReturn(Optional.of(new VerifyHighConfidenceResponse(
+                        "incorrect", "wrong vendor entirely ", null, "acrobat_reader", List.of(), TEST_USAGE)));
 
         Optional<IdentifiedProduct> result = service(true).verifyIfEligible(item(), product, USER_ID);
 
