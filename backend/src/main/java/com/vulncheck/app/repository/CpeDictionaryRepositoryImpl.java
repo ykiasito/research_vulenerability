@@ -259,7 +259,22 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "FROM cpe_dictionary d "
                 + "WHERE d.vendor = t.vendor AND d.product = t.product"
                 + ") a "
-                + "ORDER BY t.score DESC";
+                // The outermost ORDER BY also carries an id tiebreak for the same reason as the
+                // inner two levels above (deduped ORDER BY and the DISTINCT ON's own inner ORDER
+                // BY): ties on t.score alone would otherwise leave the return order unspecified.
+                // On this query's current shape, the planner picks a Nested Loop for the CROSS
+                // JOIN LATERAL, which walks its outer side (t) in whatever order it was produced
+                // in rather than re-sorting it — confirmed no Sort node appears for this outer
+                // ORDER BY in the query plan — so in practice this outer ORDER BY is eliminated by
+                // the planner entirely, because the Nested Loop already preserves the inner
+                // "deduped ORDER BY score DESC, id LIMIT ?" subquery's order as-is. But that is an
+                // artifact of today's plan shape, not something this ORDER BY clause can rely on:
+                // if a future change to this query (e.g. swapping the LATERAL join for something
+                // that forces materialization/re-sorting of t) makes the planner actually realize
+                // this outer ORDER BY as a real Sort node, PostgreSQL's sort is not stable, so
+                // without "t.id" here the tied t.score rows would be shuffled again on every plan
+                // change.
+                + "ORDER BY t.score DESC, t.id";
         jdbcTemplate.query(sql, rs -> {
             long id = rs.getLong("id");
             double score = rs.getDouble("score");
