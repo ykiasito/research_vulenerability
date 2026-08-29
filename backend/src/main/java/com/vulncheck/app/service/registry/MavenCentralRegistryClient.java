@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -21,6 +22,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.w3c.dom.Document;
+import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
 /**
@@ -89,6 +91,24 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
      */
     private static final long CANDIDATE_LOOP_BUDGET_MILLIS = 20_000;
 
+    /**
+     * REVISE (senior review 2026-08-30, PR #8): {@link #lookup}'s candidate loop used to call the
+     * OR'd {@link #versionExists} (Solr, then — only if that didn't confirm — the costlier
+     * maven-metadata.xml fetch) per candidate. That doubles the per-candidate cost of the loop
+     * whenever nothing confirms via Solr, halving how many of the {@value #CANDIDATE_GROUP_LIMIT}
+     * candidates fit in {@value #CANDIDATE_LOOP_BUDGET_MILLIS} compared to before the
+     * maven-metadata.xml fallback existed. {@link #lookup} now runs two explicit passes instead:
+     * every candidate against {@link #solrVersionExists} alone first (unchanged cost/depth from
+     * before the fallback existed), then — only if none of them confirmed — the maven-metadata.xml
+     * fallback against just the top few. This constant is that second pass's cap: the fallback only
+     * exists to cover Solr's index lag for a genuinely real, recently-published version (see {@link
+     * #versionExists}'s javadoc), which is already near the front of the versionCount-sorted
+     * candidate list by definition — a stale squatter/wrapper package far down the list isn't the
+     * one that just published a brand-new version. 3 is a pragmatic small number to bound the
+     * doubled cost to a handful of candidates rather than the whole pool.
+     */
+    private static final int METADATA_FALLBACK_CANDIDATE_LIMIT = 3;
+
     @Override
     public Optional<RegistryMatch> lookup(String productName, String version) {
         // A full Maven coordinate ("groupId:artifactId", e.g. "com.google.guava:guava") is already
@@ -108,6 +128,10 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         }
 
         long deadline = System.currentTimeMillis() + CANDIDATE_LOOP_BUDGET_MILLIS;
+        // Pass 1: every candidate against Solr alone — same per-candidate cost and search depth as
+        // before the maven-metadata.xml fallback existed. See METADATA_FALLBACK_CANDIDATE_LIMIT's
+        // javadoc for why the costlier fallback below is deliberately NOT applied here to every
+        // candidate.
         for (CanonicalArtifact candidate : candidates) {
             if (System.currentTimeMillis() > deadline) {
                 log.debug("Maven Central version-check loop for productName={} exceeded its time budget "
@@ -115,7 +139,24 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                         productName, candidates.size());
                 break;
             }
-            if (versionExists(candidate, version)) {
+            if (solrVersionExists(candidate, version)) {
+                return Optional.of(toMatch(candidate, version, true));
+            }
+        }
+
+        // Pass 2: none of the candidates confirmed via Solr — only now consult the
+        // maven-metadata.xml fallback (see #versionExists's javadoc for why it exists), and only
+        // for the top METADATA_FALLBACK_CANDIDATE_LIMIT candidates, to avoid doubling the
+        // per-candidate cost across the whole candidate pool.
+        int metadataFallbackLimit = Math.min(METADATA_FALLBACK_CANDIDATE_LIMIT, candidates.size());
+        for (int i = 0; i < metadataFallbackLimit; i++) {
+            if (System.currentTimeMillis() > deadline) {
+                log.debug("Maven Central maven-metadata.xml fallback pass for productName={} exceeded its "
+                        + "time budget — falling back to the top candidate unconfirmed", productName);
+                break;
+            }
+            CanonicalArtifact candidate = candidates.get(i);
+            if (metadataXmlHasVersion(candidate, version)) {
                 return Optional.of(toMatch(candidate, version, true));
             }
         }
@@ -192,6 +233,15 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
      * short-circuiting {@code ||} keeps the common case (Solr already confirms) at exactly one
      * extra HTTP call, same as before this fix — {@code maven-metadata.xml} is only ever fetched
      * when Solr didn't confirm.
+     *
+     * <p>This method itself is only used by {@link #lookupByCoordinate}, which has exactly one
+     * candidate to check and so pays this OR's worst case (two calls) rarely enough not to matter.
+     * {@link #lookup}'s own multi-candidate loop does <em>not</em> call this method — it implements
+     * the same OR logic as two explicit passes across the candidate list instead (Solr for every
+     * candidate, then the metadata.xml fallback for only the top {@value
+     * #METADATA_FALLBACK_CANDIDATE_LIMIT}), so that the fallback's added cost is bounded to a
+     * handful of candidates rather than doubling the cost of the whole candidate pool — see {@link
+     * #METADATA_FALLBACK_CANDIDATE_LIMIT}'s javadoc.
      */
     private boolean versionExists(CanonicalArtifact artifact, String version) {
         return solrVersionExists(artifact, version) || metadataXmlHasVersion(artifact, version);
@@ -287,8 +337,20 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
      *  (e.g. commons-io), is a tiny fraction of this. */
     private static final int MAX_METADATA_RESPONSE_BYTES = 512 * 1024;
 
-    /** Same retry-on-any-failure policy as {@link #solrSearchWithRetry} — see that method's
-     *  javadoc for why a bare single attempt wasn't enough against Maven Central in practice. */
+    /**
+     * Same retry-on-transient-failure policy as {@link #solrSearchWithRetry} (5xx / timeout /
+     * {@link IOException}) — see that method's javadoc for why a bare single attempt wasn't enough
+     * against Maven Central in practice.
+     *
+     * <p>REVISE (senior review 2026-08-30, PR #8): a 404 is deliberately excluded from that policy.
+     * It's {@link #fetchMetadataXml}'s confirmed, deterministic answer that the coordinate/version
+     * doesn't exist — not a transient failure — so {@link #fetchMetadataXml} returns {@code null}
+     * directly instead of throwing for any 4xx, and this loop's first attempt simply returns that
+     * {@code null} without retrying. Retrying a definitive "not found" up to {@value #MAX_ATTEMPTS}
+     * times used to cost 3 wasted requests plus {@code 3x} the shared rate limiter's pacing delay
+     * (see {@link ExternalRegistryRateLimiter}, which gates every Maven lookup in the process, not
+     * just this one item's) for zero benefit.
+     */
     private byte[] fetchMetadataXmlWithRetry(String groupId, String artifactId) {
         Exception lastError = null;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -313,11 +375,33 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         return null;
     }
 
+    /**
+     * groupId/artifactId path segments are restricted to this character set — a defensive check
+     * against path traversal, since {@link #fetchMetadataXml} builds a {@code /maven2/...} URL path
+     * directly from these values with no framework-level normalization/rejection in between.
+     * {@link #lookup}'s own candidate search always supplies these from Maven Central's own {@code
+     * g}/{@code a} response fields, but {@link #lookupByCoordinate} takes them straight from a
+     * {@code ':'}-split CSV {@code product_name} column with no upstream validation at all — a
+     * value like {@code groupId="../../../etc"} would otherwise walk the resulting path outside
+     * {@code /maven2/} (repo1.maven.org itself would very likely reject or 404 such a request, but
+     * this is defense in depth, not a bet on that).
+     */
+    private static final Pattern VALID_COORDINATE_SEGMENT = Pattern.compile("[A-Za-z0-9._-]+");
+
+    private static boolean isValidCoordinateSegment(String value) {
+        return value != null && !value.isBlank() && !value.contains("..") && VALID_COORDINATE_SEGMENT.matcher(value).matches();
+    }
+
     /** Builds the path directly via the {@code UriBuilder} function form (as {@link #solrSearch}
      *  already does) rather than a {@code {var}} URI template — a template variable containing a
      *  {@code /} (groupId converted to a path, e.g. "com/google/guava") would otherwise get
      *  percent-encoded to {@code %2F} and break the real repository path. */
     private byte[] fetchMetadataXml(String groupId, String artifactId) {
+        if (!isValidCoordinateSegment(groupId) || !isValidCoordinateSegment(artifactId)) {
+            log.debug("Refusing maven-metadata.xml lookup for invalid coordinate groupId={} artifactId={}",
+                    groupId, artifactId);
+            return null;
+        }
         rateLimiter.awaitTurn(ECOSYSTEM);
         String groupPath = groupId.replace('.', '/');
         return externalApiRestClient.get()
@@ -327,6 +411,16 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                         .path("/maven2/" + groupPath + "/" + artifactId + "/maven-metadata.xml")
                         .build())
                 .exchange((request, response) -> {
+                    // REVISE (senior review 2026-08-30, PR #8): a 404 (or any other 4xx) is a
+                    // confirmed, deterministic answer — this coordinate/version genuinely doesn't
+                    // exist — not a transient failure, so it must not be retried the way a 5xx is.
+                    // Returning null here (rather than throwing) makes that the case: see
+                    // fetchMetadataXmlWithRetry's javadoc.
+                    if (response.getStatusCode().is4xxClientError()) {
+                        log.debug("maven-metadata.xml not found for {}:{} status={}", groupId, artifactId,
+                                response.getStatusCode());
+                        return null;
+                    }
                     if (!response.getStatusCode().is2xxSuccessful()) {
                         throw new IllegalStateException(
                                 "maven-metadata.xml request returned " + response.getStatusCode());
@@ -342,7 +436,12 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         try {
             DocumentBuilder builder = newHardenedDocumentBuilder();
             Document doc = builder.parse(new ByteArrayInputStream(body));
-            NodeList versionNodes = doc.getElementsByTagName("version");
+            Element versioning = firstElement(doc.getDocumentElement(), "versioning");
+            Element versionsElement = versioning == null ? null : firstElement(versioning, "versions");
+            if (versionsElement == null) {
+                return List.of();
+            }
+            NodeList versionNodes = versionsElement.getElementsByTagName("version");
             List<String> versions = new ArrayList<>();
             for (int i = 0; i < versionNodes.getLength(); i++) {
                 String text = versionNodes.item(i).getTextContent();
@@ -355,6 +454,17 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
             log.debug("maven-metadata.xml parse failed", e);
             return List.of();
         }
+    }
+
+    /** Returns the first {@code <tagName>} element under {@code parent} (searching all
+     *  descendants via {@link Element#getElementsByTagName}, acceptable here since
+     *  maven-metadata.xml's structure is flat and controlled), or {@code null} if absent. */
+    private static Element firstElement(Element parent, String tagName) {
+        if (parent == null) {
+            return null;
+        }
+        NodeList nodes = parent.getElementsByTagName(tagName);
+        return nodes.getLength() > 0 ? (Element) nodes.item(0) : null;
     }
 
     /** XXE-hardened {@link DocumentBuilder}, same settings {@code ChocolateyRegistryClient} uses

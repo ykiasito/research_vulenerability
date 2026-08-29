@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import java.util.Optional;
@@ -11,6 +12,7 @@ import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
@@ -20,8 +22,11 @@ import org.springframework.web.client.RestClient;
  * response shapes captured live from search.maven.org during 2026-08-23 testing. Expectations are
  * declared in call order rather than matched by exact query string (Solr query encoding isn't
  * worth pinning down precisely here) — {@link MavenCentralRegistryClient#lookup} always issues
- * exactly one relevance-ranked "candidate" search followed by zero or more version-scoped
- * {@code gav}-core checks, so declaration order reliably corresponds to call order.
+ * exactly one relevance-ranked "candidate" search, followed by zero or more version-scoped
+ * {@code gav}-core checks (one pass over every candidate), followed by zero or more
+ * {@code maven-metadata.xml} fallback checks (a second pass over only the top few candidates, run
+ * only if none of them confirmed via Solr) — so declaration order reliably corresponds to call
+ * order.
  */
 class MavenCentralRegistryClientTest {
 
@@ -168,6 +173,98 @@ class MavenCentralRegistryClientTest {
         assertThat(result.get().packageName()).isEqualTo("org.springframework:spring-core");
         assertThat(result.get().exactVersionConfirmed()).isTrue();
         assertThat(result.get().confidence()).isEqualByComparingTo("0.95");
+        server.verify();
+    }
+
+    @Test
+    void treatsA404FromTheMavenMetadataXmlFallbackAsAnImmediateNonRetryableAnswer() {
+        // REVISE (senior review 2026-08-30, PR #8): fetchMetadataXml used to throw for ANY
+        // non-2xx status, including 404 -- a confirmed, deterministic "this coordinate/version
+        // doesn't exist" answer, not a transient failure -- and the retry loop caught that
+        // IllegalStateException like it would any other failure, retrying up to 3 times. Only one
+        // maven-metadata.xml request is expected here: if it were retried, MockRestServiceServer
+        // would reject the next (unexpected) request outright and fail this test loudly.
+        server.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(candidateSearchResponse(
+                        artifactDoc("com.example", "some-tool", 5)), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("repo1.maven.org")))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND));
+
+        Optional<RegistryMatch> result = client.lookup("some-tool", "9.9.9");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().exactVersionConfirmed()).isFalse();
+        assertThat(result.get().confidence()).isEqualByComparingTo("0.5");
+        server.verify();
+    }
+
+    @Test
+    void onlyChecksTheMavenMetadataXmlFallbackForTheTopFewCandidatesWhenNoneConfirmViaSolr() {
+        // 4 candidates, none confirmed by Solr -- the (roughly twice as costly) maven-metadata.xml
+        // fallback pass must only run against the top METADATA_FALLBACK_CANDIDATE_LIMIT (3), not
+        // all 4, so the fallback's added cost doesn't double the cost of the whole candidate pool.
+        server.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(candidateSearchResponse(
+                        artifactDoc("com.example", "tool-a", 40),
+                        artifactDoc("com.example", "tool-b", 30),
+                        artifactDoc("com.example", "tool-c", 20),
+                        artifactDoc("com.example", "tool-d", 10)), MediaType.APPLICATION_JSON));
+        // Pass 1: Solr checked for all 4 candidates, none confirm.
+        server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+        // Pass 2: only the top 3 (by versionCount) get the maven-metadata.xml fallback -- tool-d is
+        // never checked. If it were, MockRestServiceServer would reject that 8th request outright
+        // (no matching expectation left) and fail this test loudly.
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("/maven2/com/example/tool-a/maven-metadata.xml")))
+                .andRespond(withSuccess(mavenMetadataXml("1.0.0"), MediaType.APPLICATION_XML));
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("/maven2/com/example/tool-b/maven-metadata.xml")))
+                .andRespond(withSuccess(mavenMetadataXml("1.0.0"), MediaType.APPLICATION_XML));
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("/maven2/com/example/tool-c/maven-metadata.xml")))
+                .andRespond(withSuccess(mavenMetadataXml("1.0.0"), MediaType.APPLICATION_XML));
+
+        Optional<RegistryMatch> result = client.lookup("tool", "9.9.9");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().packageName()).isEqualTo("com.example:tool-a");
+        assertThat(result.get().exactVersionConfirmed()).isFalse();
+        server.verify();
+    }
+
+    @Test
+    void refusesToFetchMavenMetadataXmlWhenTheCoordinateContainsADotDotSegment() {
+        // groupId/artifactId reaching fetchMetadataXml via lookupByCoordinate come straight from a
+        // ':'-split CSV product_name column with no upstream validation. "com.example..evil" is
+        // built entirely from otherwise-allowed characters (letters and dots), so this specifically
+        // exercises the dedicated ".." rejection rather than the general character-set check below.
+        // Only the Solr gav check is expected: if fetchMetadataXml didn't reject this, the
+        // unexpected repo1.maven.org request would fail this test loudly.
+        server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+
+        Optional<RegistryMatch> result = client.lookup("com.example..evil:some-tool", "9.9.9");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().exactVersionConfirmed()).isFalse();
+        server.verify();
+    }
+
+    @Test
+    void refusesToFetchMavenMetadataXmlWhenTheCoordinateContainsAnInvalidCharacter() {
+        // A product_name column value with a slash or blank space in it (e.g. free-text CSV data,
+        // not a real Maven coordinate) must never reach repo1.maven.org at all -- only the Solr gav
+        // check is expected here, same reasoning as the ".." test above.
+        server.expect(method(HttpMethod.GET)).andRespond(withSuccess(gavResponse(0), MediaType.APPLICATION_JSON));
+
+        Optional<RegistryMatch> result = client.lookup("com/example:some tool", "9.9.9");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().exactVersionConfirmed()).isFalse();
         server.verify();
     }
 
