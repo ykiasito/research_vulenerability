@@ -88,8 +88,15 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         String sql = "SELECT * FROM ("
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at "
                 + "FROM cpe_dictionary WHERE product ~ ? "
-                + "ORDER BY vendor, product"
-                + ") deduped ORDER BY length(product) ASC LIMIT ?";
+                + "ORDER BY vendor, product, id"
+                // id tiebreaks at both levels for the same reason as collect() below: without "id"
+                // trailing the inner ORDER BY, DISTINCT ON's own representative-row choice per
+                // (vendor, product) group is unspecified, and without it trailing the outer
+                // "length(product) ASC" (ties are common -- many products share the same slug
+                // length), which row survives the LIMIT is unspecified too. Both matter here because
+                // Stage1's initialism matching ("vs code" -> visual_studio_code) reads directly off
+                // whichever row this query returns.
+                + ") deduped ORDER BY length(product) ASC, id LIMIT ?";
         List<CpeDictionaryEntry> results = new java.util.ArrayList<>();
         jdbcTemplate.query(sql, rs -> {
             CpeDictionaryEntry entry = new CpeDictionaryEntry();
@@ -230,11 +237,18 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at, "
                 + "similarity(" + column + ", ?) AS score "
                 + "FROM cpe_dictionary WHERE " + column + " % ? AND similarity(" + column + ", ?) > ? "
-                + "ORDER BY vendor, product, score DESC"
-                // id as a secondary sort key breaks ties between (vendor, product) groups that score
-                // identically, so which rows land in the top-`limit` candidate pool no longer depends
-                // on Postgres's otherwise-unspecified return order for equal ORDER BY keys
-                // (docs/spec/task-backlog.md item 33) -- important for golden-benchmark reproducibility.
+                + "ORDER BY vendor, product, score DESC, id"
+                // Determinism here needs id as a tiebreaker at *both* levels, not just the outer one:
+                // DISTINCT ON (vendor, product) itself picks whichever row sorts first within each
+                // group under the inner ORDER BY, so without "id" trailing "score DESC" there, the
+                // representative row DISTINCT ON keeps for a group with tied scores is itself
+                // unspecified -- confirmed live against the real dictionary, where google:chrome's
+                // representative row id varied between 30447 and 443462 across otherwise-identical
+                // query plans. The outer "score DESC, id" then breaks ties *between* the (already
+                // deterministic) representative rows of different groups, so which rows land in the
+                // top-`limit` candidate pool no longer depends on Postgres's otherwise-unspecified
+                // return order for equal ORDER BY keys (docs/spec/task-backlog.md item 33) -- both
+                // tiebreaks together are what make this reproducible for the golden benchmark.
                 + ") deduped ORDER BY score DESC, id LIMIT ?"
                 + ") t "
                 + "CROSS JOIN LATERAL ("
