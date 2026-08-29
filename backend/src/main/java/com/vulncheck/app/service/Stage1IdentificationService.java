@@ -388,8 +388,16 @@ public class Stage1IdentificationService {
         CpeDictionaryEntry chosenCpe = null;
         String method = methodIfNoDisambiguationNeeded;
         BigDecimal disambiguationConfidence = null;
+        // Measurement-only provenance for IdentifiedProduct#cpeCandidateCount/cpeCandidateVariantDerived
+        // (docs/spec/task-backlog.md item 16) — tracked alongside chosenCpe through every path that can
+        // set it, reset to null wherever chosenCpe is reset to null, and never read by any confidence
+        // branch below.
+        Integer cpeCandidateCount = null;
+        Boolean cpeCandidateVariantDerived = null;
 
         if (cpeCandidates.size() > 1) {
+            cpeCandidateCount = cpeCandidates.size();
+            cpeCandidateVariantDerived = cpeCandidatesAreVariantDerived;
             Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
             boolean withinBudget = apiKey.isPresent()
                     && jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
@@ -423,6 +431,8 @@ public class Stage1IdentificationService {
             Optional<ChosenCpe> chosen = resolveSingleCpeCandidate(item, userId, cpeCandidates.get(0), cpeCandidatesAreVariantDerived);
             if (chosen.isPresent()) {
                 chosenCpe = chosen.get().entry();
+                cpeCandidateCount = 1;
+                cpeCandidateVariantDerived = cpeCandidatesAreVariantDerived;
                 if (chosen.get().aiConfidence() != null) {
                     disambiguationConfidence = chosen.get().aiConfidence();
                     method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
@@ -493,10 +503,12 @@ public class Stage1IdentificationService {
                             + "correct with a blank one)", item.getId(), weakMatch.ecosystem(),
                             weakMatch.packageName(), item.getVendor());
                     registryMatch = Optional.empty();
-                    CpeDictionaryEntry rescued = rescueCpeAfterRegistryMatchRejected(
+                    RescuedCpe rescued = rescueCpeAfterRegistryMatchRejected(
                             item, userId, vendorForCpeRescue, productNameForCpeRescue);
                     if (rescued != null) {
-                        chosenCpe = rescued;
+                        chosenCpe = rescued.entry();
+                        cpeCandidateCount = rescued.candidateCount();
+                        cpeCandidateVariantDerived = rescued.variantDerived();
                         log.info("Live CPE lookup after statically-rejected weak registry match found a "
                                 + "fallback candidate for item {}: {}", item.getId(), chosenCpe.getCpeString());
                     }
@@ -513,10 +525,12 @@ public class Stage1IdentificationService {
                         + "given the usage text — likely an unrelated same-named package",
                         item.getId(), weakMatch.ecosystem(), weakMatch.packageName());
                 registryMatch = Optional.empty();
-                CpeDictionaryEntry rescued = rescueCpeAfterRegistryMatchRejected(
+                RescuedCpe rescued = rescueCpeAfterRegistryMatchRejected(
                         item, userId, vendorForCpeRescue, productNameForCpeRescue);
                 if (rescued != null) {
-                    chosenCpe = rescued;
+                    chosenCpe = rescued.entry();
+                    cpeCandidateCount = rescued.candidateCount();
+                    cpeCandidateVariantDerived = rescued.variantDerived();
                     log.info("Live CPE lookup after AI-rejected registry match found a fallback candidate "
                             + "for item {}: {}", item.getId(), chosenCpe.getCpeString());
                 }
@@ -568,10 +582,12 @@ public class Stage1IdentificationService {
                 // this item from "uncorroborated" to "has a real, independently-found CPE" — never
                 // downgrades anything the registry match itself would have provided.
                 registryMatch = Optional.empty();
-                CpeDictionaryEntry rescued = rescueCpeAfterRegistryMatchRejected(
+                RescuedCpe rescued = rescueCpeAfterRegistryMatchRejected(
                         item, userId, vendorForCpeRescue, productNameForCpeRescue);
                 if (rescued != null) {
-                    chosenCpe = rescued;
+                    chosenCpe = rescued.entry();
+                    cpeCandidateCount = rescued.candidateCount();
+                    cpeCandidateVariantDerived = rescued.variantDerived();
                     log.info("Live CPE lookup after sole-Chocolatey-match rejected found a fallback "
                             + "candidate for item {}: {}", item.getId(), chosenCpe.getCpeString());
                 }
@@ -591,6 +607,8 @@ public class Stage1IdentificationService {
                         + "now-distrusted registry match's ecosystem context, so it cannot stand on its own",
                         chosenCpe.getCpeString(), item.getId());
                 chosenCpe = null;
+                cpeCandidateCount = null;
+                cpeCandidateVariantDerived = null;
             }
         }
 
@@ -625,6 +643,8 @@ public class Stage1IdentificationService {
                         + "ride along on that match's confidence", chosenCpe.getCpeString(), item.getId(),
                         trustedMatch.ecosystem(), trustedMatch.packageName());
                 chosenCpe = null;
+                cpeCandidateCount = null;
+                cpeCandidateVariantDerived = null;
             }
         }
         if (trustRegistryMatch) {
@@ -641,6 +661,8 @@ public class Stage1IdentificationService {
         }
         if (chosenCpe != null) {
             identifiedProduct.setCpe(withItemVersion(chosenCpe.getCpeString(), item.getVersion()));
+            identifiedProduct.setCpeCandidateCount(cpeCandidateCount);
+            identifiedProduct.setCpeCandidateVariantDerived(cpeCandidateVariantDerived);
             if (disambiguationConfidence != null) {
                 // CPE Tier2 actually ran an AI call and selected this candidate — the displayed
                 // confidence must be *that* call's own stated number, not max()'d against an
@@ -676,9 +698,10 @@ public class Stage1IdentificationService {
      * rescue candidates keep the pre-existing best-effort behavior (take the first, no further AI
      * call); this rescue path has never been disambiguated, and widening that is out of scope here.
      *
-     * @return the rescued CPE candidate, or {@code null} if the retried lookup still found nothing.
+     * @return the rescued CPE candidate plus its own candidate-pool provenance (measurement-only,
+     *      see {@link RescuedCpe}), or {@code null} if the retried lookup still found nothing.
      */
-    private CpeDictionaryEntry rescueCpeAfterRegistryMatchRejected(
+    private RescuedCpe rescueCpeAfterRegistryMatchRejected(
             ResearchJobItem item, Long userId, String vendorForCpeRescue, String productNameForCpeRescue) {
         CpeCandidateResult rescueResult =
                 fuzzyMatchCpe(vendorForCpeRescue, productNameForCpeRescue, userId, Optional.empty(), Optional.empty());
@@ -690,7 +713,16 @@ public class Stage1IdentificationService {
         Optional<ChosenCpe> chosen = (rescueCandidates.size() == 1 && rescueResult.variantDerived())
                 ? resolveSingleCpeCandidate(item, userId, rescueCandidate, true)
                 : Optional.of(new ChosenCpe(rescueCandidate, null));
-        return chosen.map(ChosenCpe::entry).orElse(null);
+        return chosen.map(c -> new RescuedCpe(c.entry(), rescueCandidates.size(), rescueResult.variantDerived()))
+                .orElse(null);
+    }
+
+    /** Result of {@link #rescueCpeAfterRegistryMatchRejected}: {@code entry} is the rescued CPE
+     *  itself; {@code candidateCount}/{@code variantDerived} are the rescue lookup's own
+     *  candidate-pool provenance, carried only as far as {@link IdentifiedProduct#getCpeCandidateCount()}/
+     *  {@link IdentifiedProduct#getCpeCandidateVariantDerived()} for measurement — never used in any
+     *  confidence calculation. */
+    private record RescuedCpe(CpeDictionaryEntry entry, int candidateCount, boolean variantDerived) {
     }
 
     /** Fix5 gate: whether {@code candidate} independently explains {@code trustedMatch}'s own
