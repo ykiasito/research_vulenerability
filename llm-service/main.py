@@ -533,14 +533,24 @@ VERIFY_HIGH_CONFIDENCE_SCHEMA = {
             "type": "array",
             "description": (
                 "Only when outcome='ambiguous': the plausible real variants, each with a short "
-                "distinguishing note (e.g. 'Windows版', 'Mac版', '無料版'). Empty array otherwise."
+                "distinguishing note (e.g. 'Windows版', 'Mac版', '無料版'). Empty array otherwise. "
+                "At most 5 -- pick the most plausible variants if there are genuinely more."
             ),
+            # Backlog item 9 (senior review 2026-08-29, PR #5): identified_products.verification_note
+            # (a TEXT column with no DB-side length limit) is built entirely from this field's
+            # contents -- see HighConfidenceVerificationService#describeAmbiguousCandidates. Before
+            # this, the model's own max_tokens was the only thing bounding it. No runaway response has
+            # actually been observed; this is a defensive cap given the project's 10GB DB size cap,
+            # not a fix for an incident. maxItems/maxLength here are the cheap, model-enforced half of
+            # the fix -- the Java side also truncates the assembled note as a second line of defense
+            # in case a model response ever doesn't honor this schema.
+            "maxItems": 5,
             "items": {
                 "type": "object",
                 "properties": {
-                    "vendor": {"type": "string"},
-                    "product": {"type": "string"},
-                    "note": {"type": ["string", "null"]},
+                    "vendor": {"type": "string", "maxLength": 100},
+                    "product": {"type": "string", "maxLength": 100},
+                    "note": {"type": ["string", "null"], "maxLength": 100},
                 },
                 "required": ["vendor", "product", "note"],
                 "additionalProperties": False,

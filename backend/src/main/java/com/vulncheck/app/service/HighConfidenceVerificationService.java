@@ -218,6 +218,15 @@ public class HighConfidenceVerificationService {
         return reasoning + "（AIの推測: " + hint + "）";
     }
 
+    // Backlog item 9 (senior review 2026-08-29, PR #5): identified_products.verification_note is a
+    // TEXT column with no DB-side length limit, and the llm-service response schema now caps
+    // ambiguous_candidates at maxItems=5 / maxLength=100 per string field (see
+    // VERIFY_HIGH_CONFIDENCE_SCHEMA in llm-service/main.py) -- but that schema constraint only binds
+    // the model, not this method's own concatenation. This is the second, defense-in-depth half of
+    // the fix: truncate the assembled note so a model response that doesn't honor the schema (or a
+    // future change to it) can't still write an unbounded string here.
+    private static final int VERIFICATION_NOTE_MAX_LENGTH = 2000;
+
     private String describeAmbiguousCandidates(VerifyHighConfidenceResponse verdict) {
         // Same null-or-blank normalization as describeIncorrectVerdict: reasoning is allowed to be
         // "" on the wire (pydantic requires non-null, not non-blank), and initializing the
@@ -257,7 +266,20 @@ public class HighConfidenceVerificationService {
                 sb.append(" (").append(candidate.note()).append(')');
             }
         }
-        return sb.toString();
+        return truncate(sb.toString(), VERIFICATION_NOTE_MAX_LENGTH);
+    }
+
+    /** Truncates {@code value} to at most {@code maxLength} characters, defensively, without
+     *  splitting a UTF-16 surrogate pair (same approach as {@code LlmServiceClient#truncate}). */
+    private static String truncate(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) {
+            return value;
+        }
+        int cutIndex = maxLength;
+        if (Character.isLowSurrogate(value.charAt(cutIndex))) {
+            cutIndex--;
+        }
+        return value.substring(0, cutIndex);
     }
 
     /** Joins two independently-nullable strings with {@code ":"}, omitting whichever side is null
