@@ -33,6 +33,7 @@ PostgreSQL 16。Flywayでマイグレーション管理（`backend/src/main/reso
 | V25 | OSV.dev独自（非GHSA査読）アドバイザリのローカルミラー6テーブル新設(`osv_advisories`/`osv_affected_packages`/`osv_affected_versions`/`osv_affected_ranges`/`osv_sync_state`/`osv_sync_failures`)、V19のGHSAミラーと同型 |
 | V26 | `research_job_items.raw_product_name`（CSV記載の製品名の生テキスト、注記除去前のもの。表示/エクスポート用。識別処理自体は引き続き除去済みの`product_name`を使う）追加 |
 | V27 | `job_cost_ledger`に呼び出し単位の内訳列(`input_tokens`/`output_tokens`/`web_search_requests`/`call_site`)追加（見積り定数をログgrepではなくSQLで再導出可能にする） |
+| V32 | Chocolatey連携の完全削除（利用規約が商用利用を制限しているため）に伴い、V14で追加した`ecosystem_registries`のChocolatey行を削除 |
 
 ## テーブル一覧
 
