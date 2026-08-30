@@ -170,59 +170,6 @@ public class Stage1IdentificationService {
      */
     private static final String JENKINS_TARGET_SW = "jenkins";
 
-    /**
-     * Registry ecosystems whose {@link #passesTargetSwGate} fallback (the {@code orElse(true)}
-     * default-allow that applies when a registry matched but its ecosystem has no {@link
-     * #ECOSYSTEM_TO_TARGET_SW} mapping) must NOT default-allow — the gate must instead fall through
-     * to the same hard-reject a registry-less item gets. hex/maven's own default-allow is only
-     * defensible because both are registries that legitimately distribute a *component of some
-     * other platform* (an Elixir library, a Java artifact) with no single canonical {@code
-     * target_sw} word of their own — a candidate whose target_sw is platform-scoped could plausibly
-     * still be that hex/maven package for a different platform. Chocolatey shares none of that: it
-     * is a catalog of standalone Windows desktop applications, not a library/component registry, so
-     * a platform-scoped candidate (scoped to some *other* platform's plugin/component slot) can
-     * never legitimately be the Chocolatey package's own identity either.
-     *
-     * <p>Measured live (job191, golden-300 confidence=0.95 error analysis, senior review
-     * 2026-08-30): three of the five 0.95-confidence errors — Slack ({@code target_sw=wordpress}),
-     * RabbitMQ ({@code target_sw=pivotal_cloud_foundry}), and Zoom ({@code target_sw=mac_os_x}) —
-     * were sole Chocolatey matches whose corroborating CPE only survived {@link #passesTargetSwGate}
-     * because this fallback let a platform-scoped candidate through unchallenged. Static
-     * re-measurement done alongside this same fix (job193) found this fallback alone does not
-     * resolve all three the same way — this is this fix's own author-run measurement, not a
-     * separate, later-dated review confirmation:
-     * <ul>
-     *   <li><b>RabbitMQ</b> is fixed, but the outcome is column-dependent: whether the corroborating
-     *       candidate's target_sw set actually reflects this fix depends on whether {@link
-     *       com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#findFuzzyMatches} surfaced the
-     *       row via its {@code product}-column trigram match or its {@code title}-column one, since
-     *       {@code target_sw_values} is filtered down to whichever column triggered that particular
-     *       match (see {@link com.vulncheck.app.repository.CpeDictionaryRepositoryImpl} — this is
-     *       deliberately left unchanged by PR #14 to preserve the gate's existing behavior; see
-     *       docs/spec/task-backlog.md items 24/26).</li>
-     *   <li><b>Zoom</b> is <em>not</em> actually fixed by this fallback, despite appearing in the
-     *       original error set: {@code zoom:zoom}'s (vendor, product) partition has 813 catalogued
-     *       rows, two of which (versions 4.6.10 and 5.13.5) carry {@code target_sw=*}. {@code *} is
-     *       in the wildcard/non-scoping short-circuit inside {@link #passesTargetSwGate}, which fires
-     *       and returns {@code true} before this standalone-ecosystem check is ever reached — see
-     *       docs/spec/task-backlog.md item 24's 2026-08-30 addendum.</li>
-     *   <li><b>Slack</b> is whack-a-mole, not fixed: the original bad CPE ({@code
-     *       slack-chat_project:slack-chat}, {@code target_sw=wordpress}) is correctly rejected here,
-     *       but a different bad CPE with {@code target_sw=*} (e.g. {@code
-     *       slack_archivebot_project:slack_archivebot}) simply takes its place as the next-best
-     *       candidate and passes via the same wildcard short-circuit as Zoom above — see
-     *       docs/spec/task-backlog.md item 26.</li>
-     * </ul>
-     *
-     * <p>Deliberately a separate set rather than an addition to {@link #ECOSYSTEM_TO_TARGET_SW}:
-     * {@code windows} is already in {@link #NON_SCOPING_TARGET_SW_VALUES} and so short-circuits
-     * {@link #passesTargetSwGate} to an unconditional pass before any ecosystem/target_sw mapping is
-     * even consulted — mapping chocolatey to {@code target_sw=windows} there would do nothing for the
-     * gate (that value is never rejected either way) and would only add an unrelated, unrequested
-     * ranking preference via {@link #targetSwMatchesEcosystem}/{@link #rankCpeCandidates}.
-     */
-    private static final java.util.Set<String> STANDALONE_APPLICATION_ECOSYSTEMS = java.util.Set.of("chocolatey");
-
     private final List<PackageRegistryLookup> registryLookups;
     private final RegistryRoutingPolicy registryRoutingPolicy;
     private final RegistryLookupCache registryLookupCache;
@@ -548,19 +495,7 @@ public class Stage1IdentificationService {
                 // when no AI verdict exists at all; an actual AI verdict (matched or not, the two
                 // branches below) always takes precedence over this static rule.
                 boolean itemHasVendor = item.getVendor() != null && !item.getVendor().isBlank();
-                // REVISE item 5 (senior review 2026-08-26, job 39 Chocolatey existence-fallback
-                // fix): the 14/14-wrong calibration above came from a collision pattern that is
-                // specific to a *library/language* package registry sharing a name with an
-                // unrelated desktop app (crates.io's `slack` crate vs. the Slack desktop app).
-                // Chocolatey is itself a desktop-software catalog, not a library registry, so it
-                // doesn't share that false-positive shape — and critically, every one of job 39's
-                // 32 target items (the population ChocolateyRegistryClient's existence-fallback was
-                // built to recover) has a non-blank vendor, so applying this rule unexempted would
-                // statically reject 100% of the unconfirmed-version Chocolatey matches that fix
-                // produces. Narrow and explicit: chocolatey only, not a general widening of the
-                // rule for every ecosystem.
-                boolean isExemptEcosystem = "chocolatey".equals(weakMatch.ecosystem());
-                if (!weakMatch.exactVersionConfirmed() && itemHasVendor && !isExemptEcosystem) {
+                if (!weakMatch.exactVersionConfirmed() && itemHasVendor) {
                     log.info("Statically rejecting weak registry match for item {} (ecosystem={} package={}) — "
                             + "no AI verification available, version is unconfirmed, and item vendor '{}' is "
                             + "present (REVISE item 3: measured 14/14 wrong with a non-blank vendor vs 5/5 "
@@ -577,9 +512,8 @@ public class Stage1IdentificationService {
                                 + "fallback candidate for item {}: {}", item.getId(), chosenCpe.getCpeString());
                     }
                 } else {
-                    // No AI available, and either the version already came back confirmed, the item
-                    // has no vendor field to weigh against it (the 5/5-correct case above), or the
-                    // match's ecosystem is chocolatey (REVISE item 5's narrow exemption above) —
+                    // No AI available, and either the version already came back confirmed or the
+                    // item has no vendor field to weigh against it (the 5/5-correct case above) —
                     // degrade to trusting the weak match, same as before this fix.
                     log.info("No AI verification available for weak registry match on item {} (ecosystem={} package={}) "
                             + "— using it as a best-effort fallback", item.getId(), weakMatch.ecosystem(), weakMatch.packageName());
@@ -609,57 +543,12 @@ public class Stage1IdentificationService {
         // below — recomputing this after nulling chosenCpe would flip it back to true (chosenCpe ==
         // null is itself one of the conditions that makes a match trustable), silently re-admitting
         // the very registry match this fix rejects, in a different shape.
-        //
-        // golden-300 fix (2026-08-29, item 1 "Chocolatey false sense of security"): Chocolatey is
-        // the one registry client (of 11) with no downstream vulnerability query path at all — it
-        // has no link into the CPE dictionary and none of the app's 10 OSV ecosystems cover it (see
-        // ChocolateyRegistryClient's own javadoc). Trusting a *sole* Chocolatey match (no
-        // independently-corroborating CPE) as IDENTIFIED means the item reaches the UI looking
-        // exactly like "investigated, 0 vulnerabilities found" when in truth nothing was ever
-        // queryable for it — docs/spec/known-limitations.md documents this as the cause of 7
-        // negative-control false positives in golden-300 (Slack, OBS Studio, WinDirStat, WizTree,
-        // ShareX, ClipboardFusion, XYplorer). Deliberately narrow and unconditional on version
-        // confirmation: even a version-confirmed Chocolatey hit still has zero vulnerability-lookup
-        // capability, so it must not become IDENTIFIED on its own either. A Chocolatey match that IS
-        // corroborated by a real CPE (chosenCpe != null) is unaffected — that CPE brings its own
-        // vulnerability-query path with it. Falls through to the same "distrust" path as an
-        // unconfirmed-version registry match below (job-39's isExemptEcosystem static-rejection
-        // exemption above is untouched — it's a different, narrower rule about the no-AI-available
-        // weak-match check, not this final trust decision).
-        boolean isSoleChocolateyMatch = registryMatch.isPresent() && chosenCpe == null
-                && "chocolatey".equals(registryMatch.get().ecosystem());
         boolean trustRegistryMatch = registryMatch.isPresent()
-                && (registryMatch.get().exactVersionConfirmed() || chosenCpe == null)
-                && !isSoleChocolateyMatch;
+                && (registryMatch.get().exactVersionConfirmed() || chosenCpe == null);
         if (registryMatch.isPresent() && !trustRegistryMatch) {
-            if (isSoleChocolateyMatch) {
-                log.info("Not trusting sole Chocolatey match for item {} (package={}) as IDENTIFIED — "
-                        + "Chocolatey has no downstream vulnerability query path (no CPE/OSV linkage) and "
-                        + "no other CPE corroborates it, so treating this as an uncorroborated weak match "
-                        + "instead of a false 'investigated, 0 vulnerabilities' result",
-                        item.getId(), registryMatch.get().packageName());
-                // REVISE item 3 (senior review 2026-08-29, round 1): the other two "distrust this registry
-                // match" paths above (static/AI rejection of a weak match, lines ~495/515) both
-                // attempt a live CPE rescue after discarding the registry match — this branch never
-                // did, even though a sole Chocolatey match is discarded for exactly the same reason
-                // (nothing else corroborates it). Same rescue call, same shape: only ever upgrades
-                // this item from "uncorroborated" to "has a real, independently-found CPE" — never
-                // downgrades anything the registry match itself would have provided.
-                registryMatch = Optional.empty();
-                RescuedCpe rescued = rescueCpeAfterRegistryMatchRejected(
-                        item, userId, vendorForCpeRescue, productNameForCpeRescue);
-                if (rescued != null) {
-                    chosenCpe = rescued.entry();
-                    cpeCandidateCount = rescued.candidateCount();
-                    cpeCandidateVariantDerived = rescued.variantDerived();
-                    log.info("Live CPE lookup after sole-Chocolatey-match rejected found a fallback "
-                            + "candidate for item {}: {}", item.getId(), chosenCpe.getCpeString());
-                }
-            } else {
-                log.info("Distrusting unconfirmed-version registry match for item {} (ecosystem={} package={}) — "
-                        + "a CPE match already identifies this product, likely an unrelated same-named package",
-                        item.getId(), registryMatch.get().ecosystem(), registryMatch.get().packageName());
-            }
+            log.info("Distrusting unconfirmed-version registry match for item {} (ecosystem={} package={}) — "
+                    + "a CPE match already identifies this product, likely an unrelated same-named package",
+                    item.getId(), registryMatch.get().ecosystem(), registryMatch.get().packageName());
             // Round-5 fix: the CPE that got this far may only have passed passesTargetSwGate BECAUSE
             // of this registry match's own ecosystem context (e.g. crates.io "slack" admitting
             // slack_morphism_project:slack_morphism, target_sw=rust) — now that the registry match
@@ -1050,7 +939,7 @@ public class Stage1IdentificationService {
 
     /** Margin used by {@link #maxConfidenceMatch} to decide whether several matches are "tied" —
      *  registry clients only ever emit confidence from a small, discrete set of constants (0.4/0.5
-     *  unconfirmed, 0.95 version-confirmed — see e.g. {@code ChocolateyRegistryClient}'s
+     *  unconfirmed, 0.95 version-confirmed — see e.g. {@link com.vulncheck.app.service.registry.RegistryLookupCache}'s
      *  VERSION_CONFIRMED/UNCONFIRMED_CONFIDENCE), so in practice this margin only ever collapses
      *  exact ties, but is expressed as a small tolerance rather than {@code equals} in case a future
      *  registry client's confidence is computed rather than a fixed constant. */
@@ -1940,19 +1829,13 @@ public class Stage1IdentificationService {
      * (hex, maven — deliberately treated as no signal at all, per {@link #ECOSYSTEM_TO_TARGET_SW}'s
      * own javadoc and REVISE item 8, which leaves hex's "tesla" alone entirely). {@code
      * mappedTargetSw} is therefore only ever present when there IS a registry match AND its
-     * ecosystem is one of the eight mapped ones. {@code registryEcosystem} is the raw ecosystem
-     * string itself (not just its {@code target_sw} mapping) — kept alongside {@code mappedTargetSw}
-     * so {@link #passesTargetSwGate} can check it against {@link #STANDALONE_APPLICATION_ECOSYSTEMS},
-     * which is keyed on ecosystem name, not on a target_sw mapping few of those ecosystems have.
+     * ecosystem is one of the eight mapped ones.
      */
-    private record TargetSwContext(
-            boolean hasRegistryMatch, Optional<String> mappedTargetSw, String exactMatchQuery,
-            Optional<String> registryEcosystem) {
+    private record TargetSwContext(boolean hasRegistryMatch, Optional<String> mappedTargetSw, String exactMatchQuery) {
         static TargetSwContext from(Optional<String> registryEcosystem, String exactMatchQuery) {
             return registryEcosystem.isEmpty()
-                    ? new TargetSwContext(false, Optional.empty(), exactMatchQuery, Optional.empty())
-                    : new TargetSwContext(true, mapEcosystemToTargetSw(registryEcosystem.get()), exactMatchQuery,
-                            registryEcosystem);
+                    ? new TargetSwContext(false, Optional.empty(), exactMatchQuery)
+                    : new TargetSwContext(true, mapEcosystemToTargetSw(registryEcosystem.get()), exactMatchQuery);
         }
     }
 
@@ -1998,14 +1881,9 @@ public class Stage1IdentificationService {
         if (ctx.mappedTargetSw().isPresent()) {
             return targetSwValues.contains(ctx.mappedTargetSw().get());
         }
-        // A registry match exists but its ecosystem has no target_sw mapping (hex/maven/chocolatey)
-        // reaches here. hex/maven default-allow (see ECOSYSTEM_TO_TARGET_SW's own javadoc for why
-        // guessing a mapping for those two would be worse than having none), but chocolatey is a
-        // standalone-application catalog, not a platform-component registry, so that default-allow
-        // must not extend to it — see STANDALONE_APPLICATION_ECOSYSTEMS's own javadoc.
-        if (ctx.registryEcosystem().map(STANDALONE_APPLICATION_ECOSYSTEMS::contains).orElse(false)) {
-            return false;
-        }
+        // A registry match exists but its ecosystem has no target_sw mapping (hex/maven) reaches
+        // here — default-allow (see ECOSYSTEM_TO_TARGET_SW's own javadoc for why guessing a mapping
+        // for those two would be worse than having none).
         return true;
     }
 
