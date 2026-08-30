@@ -19,11 +19,26 @@
 #        - "os-layer": FixedVersion is empty/"-" -> upstream base-image issue, nothing
 #          this repo's manifests can do about it (see backlog item 47)
 #   4. Writes a Markdown report to $TRIVY_FINDINGS_FILE (default /tmp/trivy-findings.md)
-#      containing ONLY the fixable findings, formatted as a ready-to-paste
-#      `docs/spec/task-backlog.md` OPEN item candidate. This script never writes to
-#      task-backlog.md itself (docs/spec/ is gitignored and usually absent from a
-#      worktree checkout) — actually filing the item is left to whoever reviews the
-#      report.
+#      with the source-manifest findings and the built-image findings kept in two
+#      SEPARATE sections (backlog item 44 REVISE, PR#27 review):
+#        - source-manifest section (pom.xml / requirements.txt / requirements-dev.txt):
+#          this is always as fresh as the current source tree, and its fixable
+#          findings are formatted as a ready-to-paste `docs/spec/task-backlog.md`
+#          OPEN item candidate.
+#        - built-image section (backend/llm-service images): this only reflects
+#          whatever was baked into the image at build time, which can lag behind
+#          the current source if nobody has rebuilt since a dependency bump. It is
+#          reference-only — never formatted as a backlog candidate — and if the
+#          image predates the last manifest-touching commit, the report and stderr
+#          both carry a WARNING telling the reader to rebuild and re-scan before
+#          trusting this section's counts. (A real incident on 2026-08-30: an
+#          un-rebuilt backend image reported 92 "findings" — starlette/tomcat/
+#          thymeleaf/jackson — that were already fixed on the source side by the
+#          Spring Boot 3.5.16 BOM update; none of those should ever have been
+#          filed as backlog candidates.)
+#      This script never writes to task-backlog.md itself (docs/spec/ is gitignored
+#      and usually absent from a worktree checkout) — actually filing an item is
+#      left to whoever reviews the report.
 #
 # requirements-dev.txt handling (backlog item 44, point 4):
 #   Trivy's pip analyzer only recognizes files with the exact name "requirements.txt"
@@ -35,6 +50,14 @@
 #   (llm-service/Dockerfile only COPYs requirements.txt) — a compromised test
 #   dependency can still execute arbitrary code on a developer machine or CI runner
 #   during `mvn test`/`pytest`, which is exactly the moment this script runs.
+#
+# Image scanning (backlog item 44 REVISE, PR#27 review): images are scanned via
+# `docker save` to a tarball under $SCAN_TMP_DIR, then `trivy image --input <tar>`.
+# This intentionally avoids bind-mounting /var/run/docker.sock into the Trivy
+# container — a full-control handle to the host Docker daemon is a supply-chain
+# risk not worth taking for a script that runs routinely on every PR. This uses a
+# temporary ~600MB of /tmp space per run (both images' tarballs together, roughly),
+# cleaned up automatically by the EXIT trap on $SCAN_TMP_DIR.
 #
 # This script is informational: it always exits 0 after a successful scan pass,
 # even if vulnerabilities were found (CI is not blocked on this; a human decides
@@ -52,7 +75,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BACKEND_DIR="$REPO_ROOT/backend"
 LLM_SERVICE_DIR="$REPO_ROOT/llm-service"
 
-TRIVY_IMAGE="${TRIVY_IMAGE:-aquasec/trivy:latest}"
+# Pinned to the version that was current aquasec/trivy:latest as of 2026-08-30
+# (backlog item 44 REVISE, PR#27 review — :latest silently drifts between runs).
+# Override via TRIVY_IMAGE if a newer version needs to be picked up deliberately.
+TRIVY_IMAGE="${TRIVY_IMAGE:-aquasec/trivy:0.74.0}"
 MAVEN_IMAGE="${MAVEN_IMAGE:-maven:3.9-eclipse-temurin-21}"
 DOCKER_NETWORK="${DOCKER_NETWORK:-research_vulenerability_default}"
 M2_CACHE_VOLUME="${M2_CACHE_VOLUME:-research_vuln_m2_cache}"
@@ -124,14 +150,42 @@ docker run --rm \
   > "$SCAN_TMP_DIR/requirements-dev.json"
 
 # --- Built images (OS layer + baked-in transitive deps) ---------------------
+# Reference timestamp used to detect a stale (un-rebuilt) image: the most recent
+# commit that touched either dependency manifest. Computed once and reused for
+# both images (backlog item 44 REVISE, PR#27 review point 1/2).
+SOURCE_MANIFEST_COMMIT_TIME="$(git -C "$REPO_ROOT" log -1 --format=%cI -- backend/pom.xml llm-service/requirements.txt || true)"
+SOURCE_MANIFEST_COMMIT_EPOCH=""
+if [[ -n "$SOURCE_MANIFEST_COMMIT_TIME" ]]; then
+  SOURCE_MANIFEST_COMMIT_EPOCH="$(date -d "$SOURCE_MANIFEST_COMMIT_TIME" +%s)"
+fi
+
+IMAGE_STALE_WARNINGS=()
+
 scan_image() {
   local image_name="$1" out_file="$2"
   if docker image inspect "$image_name" >/dev/null 2>&1; then
     log "Scanning image $image_name..."
+
+    if [[ -n "$SOURCE_MANIFEST_COMMIT_EPOCH" ]]; then
+      local image_created image_created_epoch
+      image_created="$(docker image inspect "$image_name" --format '{{.Created}}')"
+      image_created_epoch="$(date -d "$image_created" +%s)"
+      if (( image_created_epoch < SOURCE_MANIFEST_COMMIT_EPOCH )); then
+        local warning
+        warning="WARNING: image $image_name was built at $image_created, which is OLDER than the last commit touching backend/pom.xml or llm-service/requirements.txt ($SOURCE_MANIFEST_COMMIT_TIME). Findings from this image may already be fixed in source. Run 'docker compose build' and re-run this script before treating this image's findings as actionable."
+        log "$warning"
+        IMAGE_STALE_WARNINGS+=("$warning")
+      fi
+    fi
+
+    local sanitized tar_path
+    sanitized="$(echo "$image_name" | tr '/:' '__')"
+    tar_path="$SCAN_TMP_DIR/${sanitized}.tar"
+    docker save "$image_name" -o "$tar_path"
     docker run --rm \
       -v "$TRIVY_CACHE_DIR:/root/.cache/" \
-      -v /var/run/docker.sock:/var/run/docker.sock \
-      "$TRIVY_IMAGE" image --scanners vuln --format json "$image_name" \
+      -v "$SCAN_TMP_DIR:/scan:ro" \
+      "$TRIVY_IMAGE" image --scanners vuln --format json --input "/scan/${sanitized}.tar" \
       > "$out_file"
   else
     log "WARNING: image $image_name not found locally, skipping image scan for it. Build it first (docker compose build) for full coverage."
@@ -144,58 +198,121 @@ scan_image "$LLM_SERVICE_IMAGE" "$SCAN_TMP_DIR/llm-service-image.json"
 # --- Classify + report --------------------------------------------------
 log "Classifying findings (fixable vs. OS-layer/upstream) and writing report..."
 
-FLAT_JSON="$SCAN_TMP_DIR/all-findings.json"
-jq -s '
-  [ .[] | (.Results // [])[] | . as $r |
-    ($r.Vulnerabilities // [])[] |
-    select(.Severity == "CRITICAL" or .Severity == "HIGH") |
-    {
-      Target: $r.Target,
-      VulnerabilityID: .VulnerabilityID,
-      PkgName: .PkgName,
-      InstalledVersion: .InstalledVersion,
-      FixedVersion: (.FixedVersion // ""),
-      Severity: .Severity,
-      Title: (.Title // ""),
-      PrimaryURL: (.PrimaryURL // "")
-    }
-  ] | unique
-' "$SCAN_TMP_DIR/pom.json" "$SCAN_TMP_DIR/requirements.json" "$SCAN_TMP_DIR/requirements-dev.json" \
-  "$SCAN_TMP_DIR/backend-image.json" "$SCAN_TMP_DIR/llm-service-image.json" \
-  > "$FLAT_JSON"
+extract_findings() {
+  # Flattens CRITICAL/HIGH vulnerabilities out of one or more Trivy JSON reports.
+  jq -s '
+    [ .[] | (.Results // [])[] | . as $r |
+      ($r.Vulnerabilities // [])[] |
+      select(.Severity == "CRITICAL" or .Severity == "HIGH") |
+      {
+        Target: $r.Target,
+        VulnerabilityID: .VulnerabilityID,
+        PkgName: .PkgName,
+        InstalledVersion: .InstalledVersion,
+        FixedVersion: (.FixedVersion // ""),
+        Severity: .Severity,
+        Title: (.Title // ""),
+        PrimaryURL: (.PrimaryURL // "")
+      }
+    ] | unique
+  ' "$@"
+}
 
-FIXABLE_JSON="$SCAN_TMP_DIR/fixable.json"
-UNFIXABLE_JSON="$SCAN_TMP_DIR/unfixable.json"
-jq '[.[] | select(.FixedVersion != "" and .FixedVersion != "-")]' "$FLAT_JSON" > "$FIXABLE_JSON"
-jq '[.[] | select(.FixedVersion == "" or .FixedVersion == "-")]' "$FLAT_JSON" > "$UNFIXABLE_JSON"
+# Source-manifest findings (always as fresh as the current source tree) —
+# these are the only findings ever formatted as a backlog candidate.
+SOURCE_FLAT_JSON="$SCAN_TMP_DIR/source-findings.json"
+extract_findings "$SCAN_TMP_DIR/pom.json" "$SCAN_TMP_DIR/requirements.json" "$SCAN_TMP_DIR/requirements-dev.json" \
+  > "$SOURCE_FLAT_JSON"
 
-FIXABLE_COUNT="$(jq 'length' "$FIXABLE_JSON")"
-UNFIXABLE_COUNT="$(jq 'length' "$UNFIXABLE_JSON")"
+# Built-image findings (may lag behind source — see header note + staleness
+# warning above). Reference-only, never turned into a backlog candidate.
+IMAGE_FLAT_JSON="$SCAN_TMP_DIR/image-findings.json"
+extract_findings "$SCAN_TMP_DIR/backend-image.json" "$SCAN_TMP_DIR/llm-service-image.json" \
+  > "$IMAGE_FLAT_JSON"
+
+SOURCE_FIXABLE_JSON="$SCAN_TMP_DIR/source-fixable.json"
+SOURCE_UNFIXABLE_JSON="$SCAN_TMP_DIR/source-unfixable.json"
+jq '[.[] | select(.FixedVersion != "" and .FixedVersion != "-")]' "$SOURCE_FLAT_JSON" > "$SOURCE_FIXABLE_JSON"
+jq '[.[] | select(.FixedVersion == "" or .FixedVersion == "-")]' "$SOURCE_FLAT_JSON" > "$SOURCE_UNFIXABLE_JSON"
+SOURCE_FIXABLE_COUNT="$(jq 'length' "$SOURCE_FIXABLE_JSON")"
+SOURCE_UNFIXABLE_COUNT="$(jq 'length' "$SOURCE_UNFIXABLE_JSON")"
+
+IMAGE_FIXABLE_JSON="$SCAN_TMP_DIR/image-fixable.json"
+IMAGE_UNFIXABLE_JSON="$SCAN_TMP_DIR/image-unfixable.json"
+jq '[.[] | select(.FixedVersion != "" and .FixedVersion != "-")]' "$IMAGE_FLAT_JSON" > "$IMAGE_FIXABLE_JSON"
+jq '[.[] | select(.FixedVersion == "" or .FixedVersion == "-")]' "$IMAGE_FLAT_JSON" > "$IMAGE_UNFIXABLE_JSON"
+IMAGE_FIXABLE_COUNT="$(jq 'length' "$IMAGE_FIXABLE_JSON")"
+IMAGE_UNFIXABLE_COUNT="$(jq 'length' "$IMAGE_UNFIXABLE_JSON")"
+
+format_grouped_findings() {
+  jq -r '
+    group_by(.Target) | map(
+      "  - **" + .[0].Target + "**\n" +
+      (map("    - " + .Severity + " `" + .VulnerabilityID + "` " + .PkgName + " " + .InstalledVersion + " → " + .FixedVersion +
+        (if .Title != "" then " — " + .Title else "" end)) | join("\n"))
+    ) | join("\n")
+  ' "$1"
+}
+
 SCAN_DATE="$(date -u +%Y-%m-%d)"
 
 {
   echo "# Trivy scan findings — $SCAN_DATE"
   echo
-  echo "Fixable (app-dependency, CRITICAL/HIGH, has FixedVersion): $FIXABLE_COUNT"
-  echo "OS-layer / upstream-only (no FixedVersion, not actionable here): $UNFIXABLE_COUNT"
+
+  if [[ "${#IMAGE_STALE_WARNINGS[@]}" -gt 0 ]]; then
+    echo "## ⚠ WARNING: built image(s) are older than the current source manifests"
+    echo
+    for w in "${IMAGE_STALE_WARNINGS[@]}"; do
+      echo "- $w"
+    done
+    echo
+    echo "The \"built Docker images\" section below reflects a stale build. Do NOT treat its counts as accurate until you rebuild (\`docker compose build\`) and re-run this script."
+    echo
+  fi
+
+  echo "## ソースマニフェスト由来 (backend/pom.xml, llm-service/requirements.txt, requirements-dev.txt)"
   echo
-  if [[ "$FIXABLE_COUNT" -eq 0 ]]; then
+  echo "常にソースツリーの最新状態を反映する。バックログ起票候補はこのセクションの内容のみから作成すること。"
+  echo
+  echo "Fixable (app-dependency, CRITICAL/HIGH, has FixedVersion): $SOURCE_FIXABLE_COUNT"
+  echo "OS-layer / upstream-only (no FixedVersion, not actionable here): $SOURCE_UNFIXABLE_COUNT"
+  echo
+  if [[ "$SOURCE_FIXABLE_COUNT" -eq 0 ]]; then
     echo "No fixable CRITICAL/HIGH findings. Nothing to file."
   else
-    echo "## Backlog candidate (paste into docs/spec/task-backlog.md ## OPEN after review)"
+    echo "### Backlog candidate (paste into docs/spec/task-backlog.md ## OPEN after review)"
     echo
-    echo "### [NEW]. Trivyスキャンで検出されたCRITICAL/HIGH脆弱性(修正版あり、自動起票候補) [自動生成、要レビュー、$SCAN_DATE]"
+    echo "#### [NEW]. Trivyスキャンで検出されたCRITICAL/HIGH脆弱性(修正版あり、自動起票候補) [自動生成、要レビュー、$SCAN_DATE]"
     echo "- **状態**: OPEN"
-    echo "- **背景**: \`scripts/run-trivy-scan.sh\`の自動実行($SCAN_DATE)で、以下のCRITICAL/HIGH脆弱性が検出された。いずれも\`FixedVersion\`が存在し、依存関係の更新で対応可能と判定されたもの(OS層・上流待ちの${UNFIXABLE_COUNT}件は対応不能のため除外済み、既存記録は項目47参照)。重複や既存バックログ項目との突き合わせは未実施——起票前に確認すること。"
-    echo "$(jq -r '
-      group_by(.Target) | map(
-        "  - **" + .[0].Target + "**\n" +
-        (map("    - " + .Severity + " `" + .VulnerabilityID + "` " + .PkgName + " " + .InstalledVersion + " → " + .FixedVersion +
-          (if .Title != "" then " — " + .Title else "" end)) | join("\n"))
-      ) | join("\n")
-    ' "$FIXABLE_JSON")"
+    echo "- **背景**: \`scripts/run-trivy-scan.sh\`の自動実行($SCAN_DATE)で、ソースマニフェスト(pom.xml/requirements.txt/requirements-dev.txt)から以下のCRITICAL/HIGH脆弱性が検出された。いずれも\`FixedVersion\`が存在し、依存関係の更新で対応可能と判定されたもの(OS層・上流待ちの${SOURCE_UNFIXABLE_COUNT}件は対応不能のため除外済み、既存記録は項目47参照)。重複や既存バックログ項目との突き合わせは未実施——起票前に確認すること。"
+    echo "$(format_grouped_findings "$SOURCE_FIXABLE_JSON")"
     echo "- **やること**: 該当ライブラリを記載の\`FixedVersion\`以上へ更新し、既存テストスイートで回帰が無いことを確認する。"
     echo "- **費用**: 無料(ライブラリ更新のみ、AI不使用)。"
+  fi
+
+  echo
+  echo "## ビルド済みDockerイメージ由来(参考情報 — このセクションから直接バックログを起票しないこと)"
+  echo
+  echo "OS層・言語ランタイムに焼き込まれた依存関係を検出する(ソースマニフェストのスキャンだけでは見えないもの、backlog項目46参照)。ただしスキャン時点でのイメージの中身しか見ておらず、\`docker compose build\`が古いままだと、ソース側では既に修正済みの脆弱性を誤って含む。上のWARNINGが出ている場合は特に、再ビルド・再スキャンするまでこのセクションの件数を信用しないこと。"
+  echo
+  echo "Fixable (has FixedVersion): $IMAGE_FIXABLE_COUNT"
+  echo "OS-layer / upstream-only (no FixedVersion): $IMAGE_UNFIXABLE_COUNT"
+  echo
+  if [[ "$IMAGE_FIXABLE_COUNT" -eq 0 && "$IMAGE_UNFIXABLE_COUNT" -eq 0 ]]; then
+    echo "No CRITICAL/HIGH findings in the built images."
+  else
+    if [[ "$IMAGE_FIXABLE_COUNT" -gt 0 ]]; then
+      echo "### Fixable (reference only)"
+      echo
+      echo "$(format_grouped_findings "$IMAGE_FIXABLE_JSON")"
+      echo
+    fi
+    if [[ "$IMAGE_UNFIXABLE_COUNT" -gt 0 ]]; then
+      echo "### OS-layer / upstream-only (reference only, see backlog item 47)"
+      echo
+      echo "$(format_grouped_findings "$IMAGE_UNFIXABLE_JSON")"
+    fi
   fi
 } > "$TRIVY_FINDINGS_FILE"
 
