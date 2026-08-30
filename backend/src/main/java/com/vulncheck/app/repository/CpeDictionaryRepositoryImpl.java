@@ -204,6 +204,13 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         //   - max_cataloged_major has no filter at all and aggregates the whole (vendor, product)
         //     partition, which is the actual bug fix.
         //
+        // cataloged_row_count (docs/spec/task-backlog.md item 89, K3 ranking tie-break): a plain
+        // count(*) added to the same unfiltered LATERAL aggregate as max_cataloged_major (same
+        // partition, same "whole pair regardless of this call's own trigram filter" reasoning) — one
+        // extra column on an aggregate that already scans the partition, not an extra query/round
+        // trip. Stage1IdentificationService#rankCpeCandidates uses it, descending, as its final K3
+        // tie-break (e.g. getgreenshot:greenshot's 80 catalogued rows vs. greenshot:greenshot's 1).
+        //
         // d.vendor = t.vendor AND d.product = t.product (not IS NOT DISTINCT FROM): a NULL vendor
         // or product would never equal itself under plain "=", dropping that row out of the LATERAL
         // aggregate entirely instead of joining back to its own outer row — verified against the
@@ -232,7 +239,7 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         // without a second round-trip query (an explicit constraint from the round-2 review) — the
         // product/vendor/title columns are untouched, only this target_sw/version extraction is
         // affected.
-        String sql = "SELECT t.*, a.target_sw_values, a.max_cataloged_major FROM ("
+        String sql = "SELECT t.*, a.target_sw_values, a.max_cataloged_major, a.cataloged_row_count FROM ("
                 + "SELECT * FROM ("
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at, "
                 + "similarity(" + column + ", ?) AS score "
@@ -255,7 +262,8 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "SELECT array_agg(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 11)) "
                 + "FILTER (WHERE d." + column + " % ? AND similarity(d." + column + ", ?) > ?) AS target_sw_values, "
                 + "max((NULLIF(substring(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 6) "
-                + "from '^[0-9]{1,9}'), ''))::integer) AS max_cataloged_major "
+                + "from '^[0-9]{1,9}'), ''))::integer) AS max_cataloged_major, "
+                + "count(*)::integer AS cataloged_row_count "
                 + "FROM cpe_dictionary d "
                 + "WHERE d.vendor = t.vendor AND d.product = t.product"
                 + ") a "
@@ -289,6 +297,7 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 entry.setLastSyncedAt(lastSyncedAt);
                 entry.setTargetSwValues(toStringSet(rs.getArray("target_sw_values")));
                 entry.setMaxCatalogedMajor(rs.getObject("max_cataloged_major", Integer.class));
+                entry.setCatalogedRowCount(rs.getObject("cataloged_row_count", Integer.class));
                 byId.put(id, entry);
                 bestScoreById.put(id, score);
             }
