@@ -161,6 +161,19 @@ fi
 
 IMAGE_STALE_WARNINGS=()
 
+# The staleness check above only looks at the last COMMIT time of either
+# manifest — it has no way to see an uncommitted edit. If the manifest has
+# been edited but not yet committed, the check can wrongly call an image
+# "fresh" (or "stale") based on a commit timestamp that no longer reflects
+# the manifest's actual current content (backlog item 63, PR#27 2nd review).
+DIRTY_MANIFEST_STATUS="$(git -C "$REPO_ROOT" status --porcelain -- backend/pom.xml llm-service/requirements.txt || true)"
+if [[ -n "$DIRTY_MANIFEST_STATUS" ]]; then
+  DIRTY_MANIFEST_FILES="$(echo "$DIRTY_MANIFEST_STATUS" | awk '{print $2}' | paste -sd ', ' -)"
+  MANIFEST_DIRTY_WARNING="WARNING: uncommitted changes detected in dependency manifest(s): $DIRTY_MANIFEST_FILES. The staleness check above is based on each manifest's last COMMIT time and cannot see uncommitted edits, so its verdict on the built images may be inaccurate. Commit the manifest change (or verify manually) before trusting the staleness warning (or its absence) for that image."
+  log "$MANIFEST_DIRTY_WARNING"
+  IMAGE_STALE_WARNINGS+=("$MANIFEST_DIRTY_WARNING")
+fi
+
 scan_image() {
   local image_name="$1" out_file="$2"
   if docker image inspect "$image_name" >/dev/null 2>&1; then
@@ -200,12 +213,19 @@ log "Classifying findings (fixable vs. OS-layer/upstream) and writing report..."
 
 extract_findings() {
   # Flattens CRITICAL/HIGH vulnerabilities out of one or more Trivy JSON reports.
-  jq -s '
+  # $1 = optional label prefix (e.g. "backend-image") to disambiguate Target
+  # names that Trivy reports generically (e.g. embedded-jar findings inside an
+  # image are just labelled "Java", not the image name — see backlog item 62,
+  # PR#27 2nd review). Pass "" for source-manifest scans, where each input
+  # already scans a distinct, unambiguous file path.
+  local label="$1"
+  shift
+  jq -s --arg label "$label" '
     [ .[] | (.Results // [])[] | . as $r |
       ($r.Vulnerabilities // [])[] |
       select(.Severity == "CRITICAL" or .Severity == "HIGH") |
       {
-        Target: $r.Target,
+        Target: (if $label != "" then ($label + ": " + $r.Target) else $r.Target end),
         VulnerabilityID: .VulnerabilityID,
         PkgName: .PkgName,
         InstalledVersion: .InstalledVersion,
@@ -221,13 +241,22 @@ extract_findings() {
 # Source-manifest findings (always as fresh as the current source tree) —
 # these are the only findings ever formatted as a backlog candidate.
 SOURCE_FLAT_JSON="$SCAN_TMP_DIR/source-findings.json"
-extract_findings "$SCAN_TMP_DIR/pom.json" "$SCAN_TMP_DIR/requirements.json" "$SCAN_TMP_DIR/requirements-dev.json" \
+extract_findings "" "$SCAN_TMP_DIR/pom.json" "$SCAN_TMP_DIR/requirements.json" "$SCAN_TMP_DIR/requirements-dev.json" \
   > "$SOURCE_FLAT_JSON"
 
 # Built-image findings (may lag behind source — see header note + staleness
 # warning above). Reference-only, never turned into a backlog candidate.
+# Each image is extracted separately with its own label (backlog item 62,
+# PR#27 2nd review) so that generic per-language Target names Trivy reports
+# for embedded deps (e.g. "Java", "Python") don't collide across the two
+# images once merged — without this, group_by(.Target) below would silently
+# fuse backend and llm-service findings into one indistinguishable group.
+extract_findings "backend-image" "$SCAN_TMP_DIR/backend-image.json" \
+  > "$SCAN_TMP_DIR/backend-image-findings.json"
+extract_findings "llm-service-image" "$SCAN_TMP_DIR/llm-service-image.json" \
+  > "$SCAN_TMP_DIR/llm-service-image-findings.json"
 IMAGE_FLAT_JSON="$SCAN_TMP_DIR/image-findings.json"
-extract_findings "$SCAN_TMP_DIR/backend-image.json" "$SCAN_TMP_DIR/llm-service-image.json" \
+jq -s 'add' "$SCAN_TMP_DIR/backend-image-findings.json" "$SCAN_TMP_DIR/llm-service-image-findings.json" \
   > "$IMAGE_FLAT_JSON"
 
 SOURCE_FIXABLE_JSON="$SCAN_TMP_DIR/source-fixable.json"
@@ -261,13 +290,13 @@ SCAN_DATE="$(date -u +%Y-%m-%d)"
   echo
 
   if [[ "${#IMAGE_STALE_WARNINGS[@]}" -gt 0 ]]; then
-    echo "## ⚠ WARNING: built image(s) are older than the current source manifests"
+    echo "## ⚠ WARNING: built-image staleness verdict may not be trustworthy"
     echo
     for w in "${IMAGE_STALE_WARNINGS[@]}"; do
       echo "- $w"
     done
     echo
-    echo "The \"built Docker images\" section below reflects a stale build. Do NOT treat its counts as accurate until you rebuild (\`docker compose build\`) and re-run this script."
+    echo "The \"built Docker images\" section below may reflect a stale build, or the staleness check itself may be unreliable (e.g. an uncommitted manifest edit). Do NOT treat its counts as accurate until you commit any pending manifest changes, rebuild (\`docker compose build\`), and re-run this script."
     echo
   fi
 
