@@ -57,6 +57,10 @@ services:
       # only for a deliberate template-focused debugging session (templates are baked into the
       # image and never edited live in the running container otherwise).
       THYMELEAF_CACHE_ENABLED: ${THYMELEAF_CACHE_ENABLED:-true}
+      # Secure attribute on the session cookie (see application.yml). False by default because this
+      # compose setup has no TLS termination — set to true in .env only once this deployment sits
+      # behind TLS (e.g. the EC2/production rollout), otherwise logins will silently stop working.
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
     ports:
       - "8080:8080"
     volumes:

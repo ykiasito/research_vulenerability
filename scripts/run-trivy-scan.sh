@@ -40,16 +40,39 @@
 #      and usually absent from a worktree checkout) — actually filing an item is
 #      left to whoever reviews the report.
 #
-# requirements-dev.txt handling (backlog item 44, point 4):
+# requirements-dev.txt handling (backlog item 44, point 4; dedup fix backlog
+# item 66 REVISE, PR#36 senior review):
 #   Trivy's pip analyzer only recognizes files with the exact name "requirements.txt"
 #   (tester-confirmed), so requirements-dev.txt is invisible to a plain `trivy fs` scan
 #   pointed at the llm-service directory. Rather than skip it, we resolve what it
 #   actually installs (`-r requirements.txt` plus `pytest==8.3.3`) into a temp file
-#   named requirements.txt and scan that. Coverage was deemed worth the extra ~cheap
+#   named requirements.txt and scan that. Because that temp file is scanned under
+#   the same in-container path (/repo/requirements.txt) as the real
+#   requirements.txt scan, both scans' findings are given a Target label prefix
+#   ("requirements.txt" / "requirements-dev.txt", reusing the label mechanism
+#   from backlog item 62) before being merged, so `group_by(.Target)` in the
+#   report never fuses main-dependency and dev-only findings together
+#   (backlog item 66). Coverage was deemed worth the extra ~cheap
 #   scan even though pytest is dev/test-only and never ships in the runtime image
 #   (llm-service/Dockerfile only COPYs requirements.txt) — a compromised test
 #   dependency can still execute arbitrary code on a developer machine or CI runner
 #   during `mvn test`/`pytest`, which is exactly the moment this script runs.
+#   Because the resolved dev scan input is structurally "requirements.txt contents
+#   PLUS pytest" (not dev-only packages), every finding that exists in the main
+#   requirements.txt scan is ALSO present, unchanged, in the requirements-dev.txt
+#   scan. Once the two scans got distinct Target labels (backlog item 66), that
+#   duplication stopped being silently absorbed by the final `unique` (which only
+#   dedupes identical objects, and the label makes the two copies' Target field
+#   differ) — so every main-dependency CRITICAL/HIGH finding would otherwise be
+#   listed twice in the report, and the "requirements-dev.txt" group would no
+#   longer mean "dev-only" the way its label implies. To fix this, before merging
+#   we subtract anything already reported under the requirements.txt label from
+#   the requirements-dev.txt label's findings (matched on VulnerabilityID +
+#   PkgName + InstalledVersion, not the whole object, so a package pinned to a
+#   different version in the two files is correctly kept rather than treated as
+#   a duplicate) — see the dedup step right before the source-findings merge
+#   below. The merged "requirements-dev.txt" Target group is therefore always
+#   dev-only findings only.
 #
 # Image scanning (backlog item 44 REVISE, PR#27 review): images are scanned via
 # `docker save` to a tarball under $SCAN_TMP_DIR, then `trivy image --input <tar>`.
@@ -161,6 +184,19 @@ fi
 
 IMAGE_STALE_WARNINGS=()
 
+# The staleness check above only looks at the last COMMIT time of either
+# manifest — it has no way to see an uncommitted edit. If the manifest has
+# been edited but not yet committed, the check can wrongly call an image
+# "fresh" (or "stale") based on a commit timestamp that no longer reflects
+# the manifest's actual current content (backlog item 63, PR#27 2nd review).
+DIRTY_MANIFEST_STATUS="$(git -C "$REPO_ROOT" status --porcelain -- backend/pom.xml llm-service/requirements.txt || true)"
+if [[ -n "$DIRTY_MANIFEST_STATUS" ]]; then
+  DIRTY_MANIFEST_FILES="$(echo "$DIRTY_MANIFEST_STATUS" | awk '{print $2}' | paste -sd ', ' -)"
+  MANIFEST_DIRTY_WARNING="WARNING: uncommitted changes detected in dependency manifest(s): $DIRTY_MANIFEST_FILES. The staleness check above is based on each manifest's last COMMIT time and cannot see uncommitted edits, so its verdict on the built images may be inaccurate. Commit the manifest change (or verify manually) before trusting the staleness warning (or its absence) for that image."
+  log "$MANIFEST_DIRTY_WARNING"
+  IMAGE_STALE_WARNINGS+=("$MANIFEST_DIRTY_WARNING")
+fi
+
 scan_image() {
   local image_name="$1" out_file="$2"
   if docker image inspect "$image_name" >/dev/null 2>&1; then
@@ -200,12 +236,19 @@ log "Classifying findings (fixable vs. OS-layer/upstream) and writing report..."
 
 extract_findings() {
   # Flattens CRITICAL/HIGH vulnerabilities out of one or more Trivy JSON reports.
-  jq -s '
+  # $1 = optional label prefix (e.g. "backend-image") to disambiguate Target
+  # names that Trivy reports generically (e.g. embedded-jar findings inside an
+  # image are just labelled "Java", not the image name — see backlog item 62,
+  # PR#27 2nd review). Pass "" for source-manifest scans, where each input
+  # already scans a distinct, unambiguous file path.
+  local label="$1"
+  shift
+  jq -s --arg label "$label" '
     [ .[] | (.Results // [])[] | . as $r |
       ($r.Vulnerabilities // [])[] |
       select(.Severity == "CRITICAL" or .Severity == "HIGH") |
       {
-        Target: $r.Target,
+        Target: (if $label != "" then ($label + ": " + $r.Target) else $r.Target end),
         VulnerabilityID: .VulnerabilityID,
         PkgName: .PkgName,
         InstalledVersion: .InstalledVersion,
@@ -220,14 +263,51 @@ extract_findings() {
 
 # Source-manifest findings (always as fresh as the current source tree) —
 # these are the only findings ever formatted as a backlog candidate.
+# requirements.json and requirements-dev.json are both scans of a file that
+# Trivy sees as the same in-container path (/repo/requirements.txt — see the
+# requirements-dev.txt handling note above for why the dev scan has to be
+# named that way), so without a label they'd collide under the same .Target
+# once grouped, silently fusing main-dependency and dev-only findings into
+# one indistinguishable group (backlog item 66). pom.xml is a single,
+# unambiguous file and stays unlabeled.
+extract_findings "" "$SCAN_TMP_DIR/pom.json" \
+  > "$SCAN_TMP_DIR/pom-findings.json"
+extract_findings "requirements.txt" "$SCAN_TMP_DIR/requirements.json" \
+  > "$SCAN_TMP_DIR/requirements-findings.json"
+extract_findings "requirements-dev.txt" "$SCAN_TMP_DIR/requirements-dev.json" \
+  > "$SCAN_TMP_DIR/requirements-dev-findings.json"
+
+# Drop findings from requirements-dev-findings.json that are already reported
+# under requirements-findings.json (see the requirements-dev.txt handling note
+# above: the resolved dev scan input is structurally "main reqs + pytest", so
+# without this it would fully re-report every main-dependency finding a second
+# time under the requirements-dev.txt label — dedup fix, backlog item 66
+# REVISE, PR#36 senior review). Matched on VulnerabilityID + PkgName +
+# InstalledVersion so a package resolved to a different version in the two
+# files is kept rather than dropped.
+jq -s '
+  (.[0] | map({key: (.VulnerabilityID + "|" + .PkgName + "|" + .InstalledVersion), value: true}) | from_entries) as $main_keys
+  | [.[1][] | select(($main_keys[.VulnerabilityID + "|" + .PkgName + "|" + .InstalledVersion] // false) | not)]
+' "$SCAN_TMP_DIR/requirements-findings.json" "$SCAN_TMP_DIR/requirements-dev-findings.json" \
+  > "$SCAN_TMP_DIR/requirements-dev-only-findings.json"
+
 SOURCE_FLAT_JSON="$SCAN_TMP_DIR/source-findings.json"
-extract_findings "$SCAN_TMP_DIR/pom.json" "$SCAN_TMP_DIR/requirements.json" "$SCAN_TMP_DIR/requirements-dev.json" \
+jq -s 'add' "$SCAN_TMP_DIR/pom-findings.json" "$SCAN_TMP_DIR/requirements-findings.json" "$SCAN_TMP_DIR/requirements-dev-only-findings.json" \
   > "$SOURCE_FLAT_JSON"
 
 # Built-image findings (may lag behind source — see header note + staleness
 # warning above). Reference-only, never turned into a backlog candidate.
+# Each image is extracted separately with its own label (backlog item 62,
+# PR#27 2nd review) so that generic per-language Target names Trivy reports
+# for embedded deps (e.g. "Java", "Python") don't collide across the two
+# images once merged — without this, group_by(.Target) below would silently
+# fuse backend and llm-service findings into one indistinguishable group.
+extract_findings "backend-image" "$SCAN_TMP_DIR/backend-image.json" \
+  > "$SCAN_TMP_DIR/backend-image-findings.json"
+extract_findings "llm-service-image" "$SCAN_TMP_DIR/llm-service-image.json" \
+  > "$SCAN_TMP_DIR/llm-service-image-findings.json"
 IMAGE_FLAT_JSON="$SCAN_TMP_DIR/image-findings.json"
-extract_findings "$SCAN_TMP_DIR/backend-image.json" "$SCAN_TMP_DIR/llm-service-image.json" \
+jq -s 'add' "$SCAN_TMP_DIR/backend-image-findings.json" "$SCAN_TMP_DIR/llm-service-image-findings.json" \
   > "$IMAGE_FLAT_JSON"
 
 SOURCE_FIXABLE_JSON="$SCAN_TMP_DIR/source-fixable.json"
@@ -261,13 +341,13 @@ SCAN_DATE="$(date -u +%Y-%m-%d)"
   echo
 
   if [[ "${#IMAGE_STALE_WARNINGS[@]}" -gt 0 ]]; then
-    echo "## ⚠ WARNING: built image(s) are older than the current source manifests"
+    echo "## ⚠ WARNING: built-image staleness verdict may not be trustworthy"
     echo
     for w in "${IMAGE_STALE_WARNINGS[@]}"; do
       echo "- $w"
     done
     echo
-    echo "The \"built Docker images\" section below reflects a stale build. Do NOT treat its counts as accurate until you rebuild (\`docker compose build\`) and re-run this script."
+    echo "The \"built Docker images\" section below may reflect a stale build, or the staleness check itself may be unreliable (e.g. an uncommitted manifest edit). Do NOT treat its counts as accurate until you commit any pending manifest changes, rebuild (\`docker compose build\`), and re-run this script."
     echo
   fi
 
