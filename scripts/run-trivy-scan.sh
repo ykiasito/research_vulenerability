@@ -40,7 +40,8 @@
 #      and usually absent from a worktree checkout) — actually filing an item is
 #      left to whoever reviews the report.
 #
-# requirements-dev.txt handling (backlog item 44, point 4):
+# requirements-dev.txt handling (backlog item 44, point 4; dedup fix backlog
+# item 66 REVISE, PR#36 senior review):
 #   Trivy's pip analyzer only recognizes files with the exact name "requirements.txt"
 #   (tester-confirmed), so requirements-dev.txt is invisible to a plain `trivy fs` scan
 #   pointed at the llm-service directory. Rather than skip it, we resolve what it
@@ -56,6 +57,22 @@
 #   (llm-service/Dockerfile only COPYs requirements.txt) — a compromised test
 #   dependency can still execute arbitrary code on a developer machine or CI runner
 #   during `mvn test`/`pytest`, which is exactly the moment this script runs.
+#   Because the resolved dev scan input is structurally "requirements.txt contents
+#   PLUS pytest" (not dev-only packages), every finding that exists in the main
+#   requirements.txt scan is ALSO present, unchanged, in the requirements-dev.txt
+#   scan. Once the two scans got distinct Target labels (backlog item 66), that
+#   duplication stopped being silently absorbed by the final `unique` (which only
+#   dedupes identical objects, and the label makes the two copies' Target field
+#   differ) — so every main-dependency CRITICAL/HIGH finding would otherwise be
+#   listed twice in the report, and the "requirements-dev.txt" group would no
+#   longer mean "dev-only" the way its label implies. To fix this, before merging
+#   we subtract anything already reported under the requirements.txt label from
+#   the requirements-dev.txt label's findings (matched on VulnerabilityID +
+#   PkgName + InstalledVersion, not the whole object, so a package pinned to a
+#   different version in the two files is correctly kept rather than treated as
+#   a duplicate) — see the dedup step right before the source-findings merge
+#   below. The merged "requirements-dev.txt" Target group is therefore always
+#   dev-only findings only.
 #
 # Image scanning (backlog item 44 REVISE, PR#27 review): images are scanned via
 # `docker save` to a tarball under $SCAN_TMP_DIR, then `trivy image --input <tar>`.
@@ -259,8 +276,23 @@ extract_findings "requirements.txt" "$SCAN_TMP_DIR/requirements.json" \
   > "$SCAN_TMP_DIR/requirements-findings.json"
 extract_findings "requirements-dev.txt" "$SCAN_TMP_DIR/requirements-dev.json" \
   > "$SCAN_TMP_DIR/requirements-dev-findings.json"
+
+# Drop findings from requirements-dev-findings.json that are already reported
+# under requirements-findings.json (see the requirements-dev.txt handling note
+# above: the resolved dev scan input is structurally "main reqs + pytest", so
+# without this it would fully re-report every main-dependency finding a second
+# time under the requirements-dev.txt label — dedup fix, backlog item 66
+# REVISE, PR#36 senior review). Matched on VulnerabilityID + PkgName +
+# InstalledVersion so a package resolved to a different version in the two
+# files is kept rather than dropped.
+jq -s '
+  (.[0] | map({key: (.VulnerabilityID + "|" + .PkgName + "|" + .InstalledVersion), value: true}) | from_entries) as $main_keys
+  | [.[1][] | select(($main_keys[.VulnerabilityID + "|" + .PkgName + "|" + .InstalledVersion] // false) | not)]
+' "$SCAN_TMP_DIR/requirements-findings.json" "$SCAN_TMP_DIR/requirements-dev-findings.json" \
+  > "$SCAN_TMP_DIR/requirements-dev-only-findings.json"
+
 SOURCE_FLAT_JSON="$SCAN_TMP_DIR/source-findings.json"
-jq -s 'add' "$SCAN_TMP_DIR/pom-findings.json" "$SCAN_TMP_DIR/requirements-findings.json" "$SCAN_TMP_DIR/requirements-dev-findings.json" \
+jq -s 'add' "$SCAN_TMP_DIR/pom-findings.json" "$SCAN_TMP_DIR/requirements-findings.json" "$SCAN_TMP_DIR/requirements-dev-only-findings.json" \
   > "$SOURCE_FLAT_JSON"
 
 # Built-image findings (may lag behind source — see header note + staleness
