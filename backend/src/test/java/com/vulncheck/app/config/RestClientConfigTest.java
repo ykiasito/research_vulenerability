@@ -9,9 +9,11 @@ import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.client.ClientHttpRequest;
+import org.springframework.http.client.ClientHttpRequestFactory;
 import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.client.RestClient;
 
 /**
  * Regression coverage for the Spring Boot 3.4+ auto-detection change: the deprecated
@@ -41,11 +43,25 @@ class RestClientConfigTest {
                 .isEqualTo((int) readTimeout.toMillis());
     }
 
+    /**
+     * Pulls the {@link ClientHttpRequestFactory} a built {@link RestClient} actually holds, so the
+     * {@code ...RestClient()} bean-level tests below assert on what the bean itself constructs
+     * rather than re-deriving an expected value by calling {@link RestClientConfig#simpleRequestFactory}
+     * a second time (which would pass even if the bean method stopped calling it at all). {@code
+     * RestClient.builder().requestFactory(...).build()} stores the factory as-is (see {@code
+     * DefaultRestClientBuilder#initRequestFactory}, which returns the explicitly-set factory
+     * unchanged), so {@code DefaultRestClient}'s package-private {@code clientRequestFactory} field
+     * is exactly the instance the bean method built.
+     */
+    private static ClientHttpRequestFactory requestFactoryOf(RestClient restClient) {
+        return (ClientHttpRequestFactory) ReflectionTestUtils.getField(restClient, "clientRequestFactory");
+    }
+
     @Test
     void externalApiRestClientUsesSimpleClientHttpRequestFactoryWithFiveSecondConnectAndTenSecondRead() {
-        SimpleClientHttpRequestFactory requestFactory =
-                RestClientConfig.simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(10));
+        RestClient restClient = new RestClientConfig().externalApiRestClient();
 
+        ClientHttpRequestFactory requestFactory = requestFactoryOf(restClient);
         assertThat(requestFactory).isExactlyInstanceOf(SimpleClientHttpRequestFactory.class);
         assertThat((int) ReflectionTestUtils.getField(requestFactory, "connectTimeout")).isEqualTo(5_000);
         assertThat((int) ReflectionTestUtils.getField(requestFactory, "readTimeout")).isEqualTo(10_000);
@@ -53,9 +69,9 @@ class RestClientConfigTest {
 
     @Test
     void nvdSyncRestClientUsesSimpleClientHttpRequestFactoryWithTenSecondConnectAndFiveMinuteRead() {
-        SimpleClientHttpRequestFactory requestFactory =
-                RestClientConfig.simpleRequestFactory(Duration.ofSeconds(10), Duration.ofMinutes(5));
+        RestClient restClient = new RestClientConfig().nvdSyncRestClient();
 
+        ClientHttpRequestFactory requestFactory = requestFactoryOf(restClient);
         assertThat(requestFactory).isExactlyInstanceOf(SimpleClientHttpRequestFactory.class);
         assertThat((int) ReflectionTestUtils.getField(requestFactory, "connectTimeout")).isEqualTo(10_000);
         assertThat((int) ReflectionTestUtils.getField(requestFactory, "readTimeout"))
@@ -64,9 +80,9 @@ class RestClientConfigTest {
 
     @Test
     void llmServiceRestClientUsesSimpleClientHttpRequestFactoryWithFiveSecondConnectAndSixtySecondRead() {
-        SimpleClientHttpRequestFactory requestFactory =
-                RestClientConfig.simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(60));
+        RestClient restClient = new RestClientConfig().llmServiceRestClient("http://llm-service:8000");
 
+        ClientHttpRequestFactory requestFactory = requestFactoryOf(restClient);
         assertThat(requestFactory).isExactlyInstanceOf(SimpleClientHttpRequestFactory.class);
         assertThat((int) ReflectionTestUtils.getField(requestFactory, "connectTimeout")).isEqualTo(5_000);
         assertThat((int) ReflectionTestUtils.getField(requestFactory, "readTimeout")).isEqualTo(60_000);
