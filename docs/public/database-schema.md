@@ -83,4 +83,4 @@ V27（2026-08-29）で追加された4列:
   - `BUNDLED_EXTRACT` → `POST /v1/bundled-components/extract`（`ledger=BUNDLED_COMPONENT`）
 - `input_tokens` / `output_tokens` / `web_search_requests`: Claude APIレスポンスの実測値（`computeActualCost`が`actual_cost_usd`を算出する際の元データ）。V27適用前に書かれた行はこの4列とも`NULL`のまま。
 
-**job 185汚染行の除外に関する注意**: job 185（2026-08-29実施、150件）の67行は、`llm-service/main.py`の`_count_web_searches`計測バグ（`web_search_tool_result`のエラーブロックも成功として二重・三重カウントしていた）を含むビルドで書き込まれたものであり、`actual_cost_usd`が水増しされている。かつV27適用前に書かれたため`call_site`は`NULL`。今後、`job_cost_ledger`から$/item平均や見積り定数の再導出を行う際は、`call_site IS NOT NULL`（またはjob 185を明示的に除外する`job_id > 185`）の条件を必ず加えること。詳細は`JobCostBudgetService.java`のコメント、`docs/public/nfr-status-2026-08.md`1章参照。
+**過去の計測バグによる汚染行の除外に関する注意**: `llm-service/main.py`の`_count_web_searches`計測バグ（`web_search_tool_result`のエラーブロックも成功として二重・三重カウントしていた）を含むビルドで書き込まれた一部の行は`actual_cost_usd`が水増しされており、かつV27適用前に書かれたため`call_site`が`NULL`のままになっている。今後、`job_cost_ledger`から$/item平均や見積り定数の再導出を行う際は、`call_site IS NOT NULL`の条件を必ず加えること。詳細は`JobCostBudgetService.java`のコメントを参照。
