@@ -200,12 +200,19 @@ log "Classifying findings (fixable vs. OS-layer/upstream) and writing report..."
 
 extract_findings() {
   # Flattens CRITICAL/HIGH vulnerabilities out of one or more Trivy JSON reports.
-  jq -s '
+  # $1 = optional label prefix (e.g. "backend-image") to disambiguate Target
+  # names that Trivy reports generically (e.g. embedded-jar findings inside an
+  # image are just labelled "Java", not the image name — see backlog item 62,
+  # PR#27 2nd review). Pass "" for source-manifest scans, where each input
+  # already scans a distinct, unambiguous file path.
+  local label="$1"
+  shift
+  jq -s --arg label "$label" '
     [ .[] | (.Results // [])[] | . as $r |
       ($r.Vulnerabilities // [])[] |
       select(.Severity == "CRITICAL" or .Severity == "HIGH") |
       {
-        Target: $r.Target,
+        Target: (if $label != "" then ($label + ": " + $r.Target) else $r.Target end),
         VulnerabilityID: .VulnerabilityID,
         PkgName: .PkgName,
         InstalledVersion: .InstalledVersion,
@@ -221,13 +228,22 @@ extract_findings() {
 # Source-manifest findings (always as fresh as the current source tree) —
 # these are the only findings ever formatted as a backlog candidate.
 SOURCE_FLAT_JSON="$SCAN_TMP_DIR/source-findings.json"
-extract_findings "$SCAN_TMP_DIR/pom.json" "$SCAN_TMP_DIR/requirements.json" "$SCAN_TMP_DIR/requirements-dev.json" \
+extract_findings "" "$SCAN_TMP_DIR/pom.json" "$SCAN_TMP_DIR/requirements.json" "$SCAN_TMP_DIR/requirements-dev.json" \
   > "$SOURCE_FLAT_JSON"
 
 # Built-image findings (may lag behind source — see header note + staleness
 # warning above). Reference-only, never turned into a backlog candidate.
+# Each image is extracted separately with its own label (backlog item 62,
+# PR#27 2nd review) so that generic per-language Target names Trivy reports
+# for embedded deps (e.g. "Java", "Python") don't collide across the two
+# images once merged — without this, group_by(.Target) below would silently
+# fuse backend and llm-service findings into one indistinguishable group.
+extract_findings "backend-image" "$SCAN_TMP_DIR/backend-image.json" \
+  > "$SCAN_TMP_DIR/backend-image-findings.json"
+extract_findings "llm-service-image" "$SCAN_TMP_DIR/llm-service-image.json" \
+  > "$SCAN_TMP_DIR/llm-service-image-findings.json"
 IMAGE_FLAT_JSON="$SCAN_TMP_DIR/image-findings.json"
-extract_findings "$SCAN_TMP_DIR/backend-image.json" "$SCAN_TMP_DIR/llm-service-image.json" \
+jq -s 'add' "$SCAN_TMP_DIR/backend-image-findings.json" "$SCAN_TMP_DIR/llm-service-image-findings.json" \
   > "$IMAGE_FLAT_JSON"
 
 SOURCE_FIXABLE_JSON="$SCAN_TMP_DIR/source-fixable.json"
