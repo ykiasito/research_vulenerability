@@ -94,4 +94,35 @@ class CpeUtilsTest {
         assertThat(vendorProduct.vendor()).isEqualTo("ktat");
         assertThat(vendorProduct.product()).isEqualTo("http\\:\\:session");
     }
+
+    @Test
+    void buildCpeWithExplicitPartUsesThatPartInsteadOfAssumingApplication() {
+        // task-backlog item 39 (senior review, 2026-08-30, PR#16 review): NvdVulnerabilitySource#find
+        // used to always call the 3-arg buildCpe (hardcoded part=a), silently querying NVD for a
+        // nonexistent CPE name for part=o products like PAN-OS.
+        assertThat(CpeUtils.buildCpe("o", "paloaltonetworks", "pan-os", "10.2.4"))
+                .isEqualTo("cpe:2.3:o:paloaltonetworks:pan-os:10.2.4:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void buildCpeThreeArgOverloadStillDefaultsToPartA() {
+        // BundledComponentResearchService has no source CPE to read a real part from at all, so it
+        // deliberately keeps using this overload — must keep behaving exactly as before.
+        assertThat(CpeUtils.buildCpe("rarlab", "winrar", "6.11"))
+                .isEqualTo("cpe:2.3:a:rarlab:winrar:6.11:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void parsePartExtractsThePartSegmentFromAFullyQualifiedCpeString() {
+        assertThat(CpeUtils.parsePart("cpe:2.3:o:paloaltonetworks:pan-os:10.2.4:*:*:*:*:*:*:*")).isEqualTo("o");
+        assertThat(CpeUtils.parsePart("cpe:2.3:a:rarlab:winrar:6.11:*:*:*:*:*:*:*")).isEqualTo("a");
+        assertThat(CpeUtils.parsePart("cpe:2.3:h:cisco:asa_5505:-:*:*:*:*:*:*:*")).isEqualTo("h");
+    }
+
+    @Test
+    void parsePartDefaultsToAWhenTheCpeStringIsNullOrTooShortToCarryAPart() {
+        assertThat(CpeUtils.parsePart(null)).isEqualTo("a");
+        assertThat(CpeUtils.parsePart("cpe:2.3")).isEqualTo("a");
+        assertThat(CpeUtils.parsePart("not-a-cpe-string")).isEqualTo("a");
+    }
 }

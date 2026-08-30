@@ -4,7 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.vulncheck.app.entity.CpeDictionaryEntry;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -193,9 +195,37 @@ class CpeDictionaryRepositoryImplTest {
      * here score differently against the query (one an exact product match, the other only a
      * partial/fuzzy one), so a correct implementation must return the exact match first regardless
      * of how the LATERAL join happens to order its output internally.
+     *
+     * <p>Calls {@link CpeDictionaryRepositoryImpl#collect} directly (via a plain {@code new}, not
+     * through the {@code cpeDictionaryRepository} proxy) rather than going through {@link
+     * CpeDictionaryRepository#findFuzzyMatches}, and reads {@code byId}'s insertion order (a {@link
+     * LinkedHashMap}) instead of a returned {@code List}: {@code findFuzzyMatches} re-sorts its
+     * combined product-column/title-column results in Java, so a test that only observed its return
+     * value could pass purely from that Java-side stable sort, independent of anything the SQL itself
+     * did. This version at least removes that particular masking layer.
+     *
+     * <p><b>Known remaining limitation (docs/spec/task-backlog.md item 33):</b> this still cannot
+     * reliably detect a regression that removes this SQL's own {@code ORDER BY t.score DESC}.
+     * Verified directly in this session by temporarily deleting that clause and re-running this exact
+     * test: it still passed. The reason is structural, not a fixable test-data choice — a correlated
+     * {@code CROSS JOIN LATERAL} (referencing the outer subquery's {@code t.vendor}/{@code t.product})
+     * can only be executed by PostgreSQL as a Nested Loop, the only join strategy that supports a
+     * per-row correlated subquery; a Nested Loop always preserves its outer input's row order, so the
+     * already-sorted order coming out of the inner {@code deduped ORDER BY score DESC, id LIMIT ?}
+     * subquery survives regardless of whether the outer {@code ORDER BY} is present. The outer
+     * {@code ORDER BY} is kept as an explicit, self-documenting correctness guarantee (defense against
+     * a future query-shape change — e.g. a plain, non-correlated join or a {@code UNION} — that would
+     * no longer constrain the planner to Nested Loop), not because a plausible unit test can currently
+     * observe its absence. What this test does verify, and would fail without: the SQL-level result
+     * for a single {@code collect()} call is correctly and deterministically sorted by score, with no
+     * Java-side sort involved in that determination.
+     *
+     * <p>This test's own transaction (from {@code @DataJpaTest}) is already open when {@code
+     * collect()} runs, which is what {@code SET LOCAL pg_trgm.similarity_threshold} inside it needs
+     * — see {@link CpeDictionaryRepositoryImpl}'s own class javadoc.
      */
     @Test
-    void findFuzzyMatchesReturnsResultsSortedByScoreDescending() {
+    void collectOrdersRowsByScoreDescendingAtTheSqlLevel() {
         insert(
                 "cpe:2.3:a:zzzrevise14ordervendor:zzzrevise14orderproductexact:1.0:*:*:*:*:*:*:*",
                 "Zzzrevise14orderproductexact",
@@ -207,10 +237,85 @@ class CpeDictionaryRepositoryImplTest {
                 "zzzrevise14ordervendor",
                 "zzzrevise14orderproductfuzzyish");
 
-        List<CpeDictionaryEntry> results = cpeDictionaryRepository.findFuzzyMatches(
-                "zzzrevise14orderproductexact", 0.3, 0.3, 10);
+        CpeDictionaryRepositoryImpl impl = new CpeDictionaryRepositoryImpl(jdbcTemplate);
+        Map<Long, CpeDictionaryEntry> byId = new LinkedHashMap<>();
+        Map<Long, Double> bestScoreById = new LinkedHashMap<>();
 
-        assertThat(results).hasSizeGreaterThanOrEqualTo(2);
-        assertThat(results.get(0).getProduct()).isEqualTo("zzzrevise14orderproductexact");
+        impl.collect("product", "zzzrevise14orderproductexact", 0.3, 10, byId, bestScoreById);
+
+        List<CpeDictionaryEntry> orderedBySql = List.copyOf(byId.values());
+        assertThat(orderedBySql).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(orderedBySql.get(0).getProduct()).isEqualTo("zzzrevise14orderproductexact");
+
+        double previousScore = Double.MAX_VALUE;
+        for (CpeDictionaryEntry entry : orderedBySql) {
+            double score = bestScoreById.get(entry.getId());
+            assertThat(score).isLessThanOrEqualTo(previousScore);
+            previousScore = score;
+        }
+    }
+
+    /**
+     * Regression test for a PR #15 REVISE finding: the inner {@code DISTINCT ON (vendor, product)}
+     * subquery's own {@code ORDER BY vendor, product, score DESC} had no tiebreaker after
+     * {@code score}, so which single row {@code DISTINCT ON} kept as a (vendor, product) group's
+     * representative was itself unspecified whenever two rows in the group tied on score — the
+     * outer {@code ORDER BY score DESC, id} added in an earlier revision only orders *between*
+     * groups, and cannot fix a choice that was already arbitrary *within* one. Verified live
+     * against the real dictionary before this fix: the google:chrome group's representative row id
+     * varied between 30447 and 443462 across otherwise identical query plans.
+     *
+     * <p>Two rows here share one (vendor, product) pair and an identical {@code product} value, so
+     * both score exactly 1.0 against a product-column {@code collect()} call using that same text
+     * as the query — a genuine tie, not merely a close score.
+     *
+     * <p>Simply inserting the two rows through JPA in ascending id order (letting {@code
+     * BIGSERIAL} assign ids) was tried first and did <em>not</em> reproduce the bug: on a freshly
+     * created 2-row table, physical heap order already matches ascending id order, so even the
+     * pre-fix query (with no {@code id} tiebreak at all) happened to return the lower-id row simply
+     * because it is also the row a plain sequential scan visits first — passing for the wrong
+     * reason regardless of whether the fix is present. To make the inner tiebreak's effect
+     * actually observable, this test instead inserts the two rows with explicit, manually chosen
+     * ids (bypassing the sequence, which {@code BIGSERIAL} permits) so that physical insertion
+     * order is the *reverse* of numeric id order: the row with the higher id is written first (and
+     * so is what a sequential scan visits first), the row with the lower id second. Without the
+     * inner {@code id} tiebreak, {@code DISTINCT ON} keeps whichever row the scan visits first for
+     * equal sort keys — the higher-id row here — so this test fails pre-fix and passes post-fix,
+     * rather than passing either way.
+     */
+    @Test
+    void collectPicksLowerIdRowWhenDistinctOnGroupTiesOnScore() {
+        long higherId = 900_000_002L;
+        long lowerId = 900_000_001L;
+
+        // Inserted first (physically first in the heap) but has the *higher* id, so a plain
+        // sequential scan visits this row before the lower-id one below.
+        jdbcTemplate.update(
+                "INSERT INTO cpe_dictionary (id, cpe_string, title, vendor, product, last_synced_at) "
+                        + "VALUES (?, ?, ?, ?, ?, now())",
+                higherId,
+                "cpe:2.3:a:zzzrevise15distinctvendor:zzzrevise15distinctproduct:2.0:*:*:*:*:*:*:*",
+                "Zzzrevise15distinctproduct Two",
+                "zzzrevise15distinctvendor",
+                "zzzrevise15distinctproduct");
+        jdbcTemplate.update(
+                "INSERT INTO cpe_dictionary (id, cpe_string, title, vendor, product, last_synced_at) "
+                        + "VALUES (?, ?, ?, ?, ?, now())",
+                lowerId,
+                "cpe:2.3:a:zzzrevise15distinctvendor:zzzrevise15distinctproduct:1.0:*:*:*:*:*:*:*",
+                "Zzzrevise15distinctproduct One",
+                "zzzrevise15distinctvendor",
+                "zzzrevise15distinctproduct");
+
+        CpeDictionaryRepositoryImpl impl = new CpeDictionaryRepositoryImpl(jdbcTemplate);
+        Map<Long, CpeDictionaryEntry> byId = new LinkedHashMap<>();
+        Map<Long, Double> bestScoreById = new LinkedHashMap<>();
+
+        impl.collect("product", "zzzrevise15distinctproduct", 0.3, 10, byId, bestScoreById);
+
+        assertThat(byId).hasSize(1);
+        assertThat(byId).containsOnlyKeys(lowerId);
+        assertThat(byId.get(lowerId).getCpeString())
+                .isEqualTo("cpe:2.3:a:zzzrevise15distinctvendor:zzzrevise15distinctproduct:1.0:*:*:*:*:*:*:*");
     }
 }

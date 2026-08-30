@@ -88,8 +88,15 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         String sql = "SELECT * FROM ("
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at "
                 + "FROM cpe_dictionary WHERE product ~ ? "
-                + "ORDER BY vendor, product"
-                + ") deduped ORDER BY length(product) ASC LIMIT ?";
+                // id tiebreaks at both levels for the same reason as collect() below: without "id"
+                // trailing the inner ORDER BY, DISTINCT ON's own representative-row choice per
+                // (vendor, product) group is unspecified, and without it trailing the outer
+                // "length(product) ASC" (ties are common -- many products share the same slug
+                // length), which row survives the LIMIT is unspecified too. Both matter here because
+                // Stage1's initialism matching ("vs code" -> visual_studio_code) reads directly off
+                // whichever row this query returns.
+                + "ORDER BY vendor, product, id"
+                + ") deduped ORDER BY length(product) ASC, id LIMIT ?";
         List<CpeDictionaryEntry> results = new java.util.ArrayList<>();
         jdbcTemplate.query(sql, rs -> {
             CpeDictionaryEntry entry = new CpeDictionaryEntry();
@@ -120,8 +127,12 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
     }
 
     /** {@code column} is always one of the two hardcoded literals above — never request input —
-     *  so interpolating it directly into the SQL text is safe. */
-    private void collect(String column, String query, double threshold, int limit,
+     *  so interpolating it directly into the SQL text is safe.
+     *
+     * <p>Package-private (rather than {@code private}) so {@code CpeDictionaryRepositoryImplTest} can
+     * call it directly to verify the SQL-level {@code ORDER BY} on a single {@code collect()} call's
+     * raw JDBC row order, independent of {@link #findFuzzyMatches}'s own Java-side stable sort. */
+    void collect(String column, String query, double threshold, int limit,
             Map<Long, CpeDictionaryEntry> byId, Map<Long, Double> bestScoreById) {
         // SET LOCAL restricts the GIN-indexed "%" pre-filter below to roughly the caller's own
         // threshold instead of the 0.3 session default, because a tighter threshold lets "%" itself
@@ -226,8 +237,19 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at, "
                 + "similarity(" + column + ", ?) AS score "
                 + "FROM cpe_dictionary WHERE " + column + " % ? AND similarity(" + column + ", ?) > ? "
-                + "ORDER BY vendor, product, score DESC"
-                + ") deduped ORDER BY score DESC LIMIT ?"
+                // Determinism here needs id as a tiebreaker at *both* levels, not just the outer one:
+                // DISTINCT ON (vendor, product) itself picks whichever row sorts first within each
+                // group under the inner ORDER BY, so without "id" trailing "score DESC" there, the
+                // representative row DISTINCT ON keeps for a group with tied scores is itself
+                // unspecified -- confirmed live against the real dictionary, where google:chrome's
+                // representative row id varied between 30447 and 443462 across otherwise-identical
+                // query plans. The outer "score DESC, id" then breaks ties *between* the (already
+                // deterministic) representative rows of different groups, so which rows land in the
+                // top-`limit` candidate pool no longer depends on Postgres's otherwise-unspecified
+                // return order for equal ORDER BY keys (docs/spec/task-backlog.md item 33) -- both
+                // tiebreaks together are what make this reproducible for the golden benchmark.
+                + "ORDER BY vendor, product, score DESC, id"
+                + ") deduped ORDER BY score DESC, id LIMIT ?"
                 + ") t "
                 + "CROSS JOIN LATERAL ("
                 + "SELECT array_agg(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 11)) "
@@ -237,7 +259,22 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "FROM cpe_dictionary d "
                 + "WHERE d.vendor = t.vendor AND d.product = t.product"
                 + ") a "
-                + "ORDER BY t.score DESC";
+                // The outermost ORDER BY also carries an id tiebreak for the same reason as the
+                // inner two levels above (deduped ORDER BY and the DISTINCT ON's own inner ORDER
+                // BY): ties on t.score alone would otherwise leave the return order unspecified.
+                // On this query's current shape, the planner picks a Nested Loop for the CROSS
+                // JOIN LATERAL, which walks its outer side (t) in whatever order it was produced
+                // in rather than re-sorting it — confirmed no Sort node appears for this outer
+                // ORDER BY in the query plan — so in practice this outer ORDER BY is eliminated by
+                // the planner entirely, because the Nested Loop already preserves the inner
+                // "deduped ORDER BY score DESC, id LIMIT ?" subquery's order as-is. But that is an
+                // artifact of today's plan shape, not something this ORDER BY clause can rely on:
+                // if a future change to this query (e.g. swapping the LATERAL join for something
+                // that forces materialization/re-sorting of t) makes the planner actually realize
+                // this outer ORDER BY as a real Sort node, PostgreSQL's sort is not stable, so
+                // without "t.id" here the tied t.score rows would be shuffled again on every plan
+                // change.
+                + "ORDER BY t.score DESC, t.id";
         jdbcTemplate.query(sql, rs -> {
             long id = rs.getLong("id");
             double score = rs.getDouble("score");
