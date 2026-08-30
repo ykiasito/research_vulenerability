@@ -8,6 +8,7 @@ import com.vulncheck.app.repository.OsvSyncFailureRepository;
 import com.vulncheck.app.repository.OsvSyncStateRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.NvdCpeSyncService;
+import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
 import com.vulncheck.app.service.UserApiKeyService;
 import com.vulncheck.app.service.csaf.RedHatCsafSyncService;
 import com.vulncheck.app.service.csaf.SiemensCsafSyncService;
@@ -15,7 +16,9 @@ import com.vulncheck.app.service.csaf.SiemensCsafSyncService.SyncResult;
 import com.vulncheck.app.service.cveorg.CveOrgSyncService;
 import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.osv.OsvSyncService;
+import java.util.Optional;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Controller;
@@ -34,6 +37,7 @@ import org.springframework.web.bind.annotation.RequestParam;
  */
 @Controller
 @RequiredArgsConstructor
+@Slf4j
 public class AdminController {
 
     private final NvdCpeSyncService nvdCpeSyncService;
@@ -61,6 +65,50 @@ public class AdminController {
                 .orElseThrow(() -> new IllegalStateException("認証済みユーザーが見つかりません。"));
         int count = nvdCpeSyncService.syncByKeyword(keyword, userApiKeyService.getNvdApiKey(user.getId()));
         model.addAttribute("result", count + " 件のCPEエントリを同期しました（キーワード: " + keyword + "）。");
+        return "admin/cpe-dictionary";
+    }
+
+    /**
+     * Starts a full (no keyword filter) NVD CPE Dictionary mirror on its own daemon thread and
+     * returns immediately — the sync itself takes hours (see {@link
+     * NvdCpeSyncService#syncAllAndRelease}). Mirrors {@link
+     * com.vulncheck.app.service.CpeDictionaryBootstrapSync}'s startup-triggered sync (same
+     * unauthenticated {@code Optional.empty()} call, same daemon-thread-and-forget shape) so this
+     * and the {@code CPE_FULL_SYNC_ON_STARTUP} env var remain two independent ways to trigger the
+     * same underlying operation. Both go through {@link NvdCpeSyncService#tryBeginFullSync}, which
+     * holds the single "already running" guard shared by both trigger paths, so a second click (or
+     * a click racing the startup sync) while one is already running doesn't start a concurrent
+     * mirror competing for the same NVD rate limit and the same {@code cpe_dictionary} upserts.
+     */
+    @PostMapping("/admin/cpe-dictionary/sync-all")
+    public String cpeFullSync(Model model) {
+        if (!nvdCpeSyncService.tryBeginFullSync()) {
+            model.addAttribute("result", "フル同期を開始できませんでした: 別のフル同期が既に実行中です。");
+            return "admin/cpe-dictionary";
+        }
+
+        Thread worker = new Thread(() -> {
+            log.warn("Full NVD CPE dictionary sync starting (admin-triggered) — this takes hours");
+            long startedAt = System.currentTimeMillis();
+            try {
+                SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
+                long minutes = (System.currentTimeMillis() - startedAt) / 60000;
+                if (outcome.completed()) {
+                    log.warn("Full NVD CPE dictionary sync (admin-triggered) finished: {} entries upserted in {} minutes",
+                            outcome.upserted(), minutes);
+                } else {
+                    log.error("Full NVD CPE dictionary sync (admin-triggered) aborted early after {} entries in {} "
+                            + "minutes — dictionary is only partially synced", outcome.upserted(), minutes);
+                }
+            } catch (Exception e) {
+                log.error("Full NVD CPE dictionary sync (admin-triggered) aborted", e);
+            }
+        }, "cpe-full-sync-admin");
+        worker.setDaemon(true);
+        worker.start();
+
+        model.addAttribute("result",
+                "フル同期を開始しました。完了まで数時間かかります。バックエンドのログで進捗を確認してください。");
         return "admin/cpe-dictionary";
     }
 

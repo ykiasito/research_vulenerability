@@ -18,13 +18,21 @@
     <tbody>
     <tr th:each="eco : ${ecosystems}">
         <td th:text="${eco.ecosystem}"></td>
-        <td th:text="${eco.displayName}"></td>
+        <td>
+            <span th:text="${eco.displayName}"></span>
+            <span th:if="${eco.ecosystem == 'chocolatey'}" style="color: #b45f06;">※</span>
+        </td>
         <td th:text="${eco.lookupBaseUrl}"></td>
         <td th:text="${eco.enabled} ? '○' : '×'"></td>
     </tr>
     </tbody>
 </table>
 <p style="color: #888;">AI（Tier3）がパッケージ識別子を推測する際も、この「有効」なエコシステムのみを候補として提示できます。</p>
+<p style="color: #b45f06;">
+    ※ Chocolateyのみ、他のレジストリと性質が異なります。パッケージが実在するかどうかの確認はできますが、
+    そのパッケージに脆弱性があるかを調べる先（CPE辞書やOSVの対応エコシステム）にはつながっていません。
+    そのため、Chocolatey経由での脆弱性の特定率は他のレジストリより低めです。
+</p>
 
 <h2>2. 脆弱性データソース</h2>
 <table border="1" cellpadding="4">
