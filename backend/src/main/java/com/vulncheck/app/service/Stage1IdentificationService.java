@@ -1479,6 +1479,38 @@ public class Stage1IdentificationService {
      * single row at version 1.2.6 (max cataloged major 1), while the item's own version is in the
      * 3.7.x line — concrete numeric evidence that candidate's catalogue coverage cannot possibly
      * be current, which a same-named-vendor overlap alone never carries.
+     *
+     * <p>Backlog item 89 (senior review 2026-08-30, real job195/196 data): three more keys inserted
+     * into the chain — {@code exactSlug -> targetSw -> K1 -> K2 -> versionPlausible -> vendorAgrees
+     * -> K3} — to close a further four golden-300 misses without any AI spend:
+     * <ul>
+     *   <li><b>K1</b> ({@link #unexplainedQueryTokenCount}, ascending): how many of the query's own
+     *       tokens neither the candidate's own text nor its CPE vendor account for. Fixes Adobe
+     *       Acrobat Reader DC — {@code exactSlug}/{@code targetSw} tie between {@code
+     *       adobe:acrobat_reader_dc} and {@code adobe:acrobat_reader} (the query "Adobe Acrobat
+     *       Reader DC" doesn't equal either candidate's bare product slug), but only the wrong,
+     *       shorter candidate leaves "dc" unexplained.</li>
+     *   <li><b>K2</b> ({@link #versionCoverageRank}, ascending {@code COVERS(0) < UNKNOWN(1) <
+     *       NOT_COVERS(2)}): a 3-value sibling of {@code versionPlausible}'s boolean soft check,
+     *       inserted <em>ahead of</em> {@code vendorAgrees} rather than merely near it, specifically
+     *       because {@code vendorAgrees} would otherwise win these ties for the wrong reason — e.g.
+     *       PDF-XChange Editor 10.2.1's item {@code vendor} field is literally "Tracker Software
+     *       Products", which makes {@code vendorAgrees} favor the wrong, version-stale {@code
+     *       tracker-software:pdf-xchange_editor} (max cataloged major 9) over the correct {@code
+     *       pdf-xchange:pdf-xchange_editor} (max cataloged major 10, actually covers the item).
+     *       Fixes Node.js the same way ({@code nodejs:node.js} covers major 20, {@code
+     *       joyent:node.js} has no cataloged evidence at all).</li>
+     *   <li><b>K3</b> ({@link #catalogedRowCount}, descending, the final tie-break): Greenshot
+     *       1.3.290 ties {@code getgreenshot:greenshot} and {@code greenshot:greenshot} on every key
+     *       above (both are exact-slug, both contain "greenshot" in their own CPE vendor so {@code
+     *       vendorAgrees} is true for both), leaving only which pair NVD has actually catalogued 80
+     *       rows for versus 1 to break the tie — a real coin-flip on {@code id} otherwise.</li>
+     * </ul>
+     * Performance (required by the same backlog item): every key above is now computed exactly once
+     * per candidate, into a {@link RankedCandidate} record, before sorting — not recomputed inside
+     * the {@link java.util.Comparator} on every one of the O(n log n) comparisons the way the
+     * pre-existing keys always were. K1 in particular re-tokenizes text, so leaving it comparator-side
+     * would have made the existing re-normalization cost newly visible at this candidate-pool size.
      */
     private List<CpeDictionaryEntry> rankCpeCandidates(String vendor, String exactMatchQuery,
             List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit, String itemVersion) {
@@ -1512,17 +1544,48 @@ public class Stage1IdentificationService {
 
         String normalizedVendor = normalizeForContainment(vendor);
         String normalizedExactMatchQuery = normalizeForContainment(exactMatchQuery);
-        return bestPerProduct.values().stream()
-                // Stable sort: preserves the underlying trigram ranking within each group, so this
-                // only promotes exact-slug-matching / target_sw-matching / vendor-agreeing candidates
-                // rather than re-ordering arbitrarily.
-                .sorted(java.util.Comparator
-                        .comparing((CpeDictionaryEntry e) -> exactProductSlugMatch(normalizedExactMatchQuery, e) ? 0 : 1)
-                        .thenComparing(e -> targetSwMatchesEcosystem(e, mappedTargetSw) ? 0 : 1)
-                        .thenComparing(e -> versionCoverageIsPlausible(e, itemVersion) ? 0 : 1)
-                        .thenComparing(e -> vendorAgrees(normalizedVendor, e) ? 0 : 1))
-                .limit(limit)
+        List<RankedCandidate> ranked = bestPerProduct.values().stream()
+                .map(entry -> new RankedCandidate(
+                        entry,
+                        exactProductSlugMatch(normalizedExactMatchQuery, entry),
+                        targetSwMatchesEcosystem(entry, mappedTargetSw),
+                        unexplainedQueryTokenCount(normalizedExactMatchQuery, entry),
+                        versionCoverageRank(entry, itemVersion),
+                        versionCoverageIsPlausible(entry, itemVersion),
+                        vendorAgrees(normalizedVendor, entry),
+                        catalogedRowCount(entry)))
                 .toList();
+        // Stable sort: preserves the underlying trigram ranking within each group (RankedCandidate
+        // is built directly off bestPerProduct.values()'s own already-ordered stream), so this only
+        // promotes candidates that actually win one of the keys below rather than re-ordering
+        // arbitrarily.
+        return ranked.stream()
+                .sorted(java.util.Comparator
+                        .comparing((RankedCandidate c) -> c.exactSlugMatch() ? 0 : 1)
+                        .thenComparing(c -> c.targetSwMatch() ? 0 : 1)
+                        .thenComparingInt(RankedCandidate::unexplainedTokenCount)
+                        .thenComparingInt(RankedCandidate::versionCoverageRank)
+                        .thenComparing(c -> c.versionPlausible() ? 0 : 1)
+                        .thenComparing(c -> c.vendorAgrees() ? 0 : 1)
+                        .thenComparing(java.util.Comparator.comparingInt(RankedCandidate::catalogedRowCount).reversed()))
+                .limit(limit)
+                .map(RankedCandidate::entry)
+                .toList();
+    }
+
+    /** Backlog item 89: every {@link #rankCpeCandidates} comparison key, computed exactly once per
+     *  candidate — see that method's own javadoc for what each field means and why precomputing them
+     *  into a record (rather than recomputing inside the {@link java.util.Comparator} on every
+     *  comparison) matters here. */
+    private record RankedCandidate(
+            CpeDictionaryEntry entry,
+            boolean exactSlugMatch,
+            boolean targetSwMatch,
+            int unexplainedTokenCount,
+            int versionCoverageRank,
+            boolean versionPlausible,
+            boolean vendorAgrees,
+            int catalogedRowCount) {
     }
 
     /**
@@ -1648,6 +1711,77 @@ public class Stage1IdentificationService {
         return vendorProduct != null
                 ? vendorProduct.vendor() + ":" + vendorProduct.product()
                 : String.valueOf(entry.getCpeString());
+    }
+
+    /**
+     * Backlog item 89, K1 ranking tie-break: how many of {@code normalizedExactMatchQuery}'s own
+     * tokens are accounted for by neither {@code entry}'s own text (product or title) nor its CPE
+     * vendor. Deliberately a fresh method rather than a change to {@link #explainsQuery} — this asks
+     * a different question ("how much of the query is unaccounted for", a graded signal for ranking
+     * among already-admitted candidates) from what {@link #explainsQuery} answers ("does this
+     * candidate explain the query at all", a boolean admission gate) — but reuses that method's own
+     * {@link #tokenize}/{@link #vendorExplains} building blocks rather than inventing new ones.
+     *
+     * <p>Checking both {@code product} and {@code title} tokens (not product alone) matters for the
+     * Adobe Acrobat Reader DC case this key was built for: the query "Adobe Acrobat Reader DC"
+     * includes the vendor word "Adobe", which {@code acrobat_reader_dc}'s bare product slug doesn't
+     * contain, but a real dictionary title ("Adobe Acrobat Reader DC") does — checking product alone
+     * would wrongly count "adobe" as unexplained for the *correct* candidate too, losing the signal
+     * that actually separates it from the wrong, shorter {@code acrobat_reader} candidate (which
+     * leaves "dc" unexplained by either its product or its title, and "dc" is too short/unrelated
+     * for {@link #vendorExplains} to credit to Adobe's own CPE vendor either).
+     */
+    private int unexplainedQueryTokenCount(String normalizedExactMatchQuery, CpeDictionaryEntry entry) {
+        List<String> queryTokens = tokenize(normalizedExactMatchQuery);
+        if (queryTokens.isEmpty()) {
+            return 0;
+        }
+        List<String> productTokens = tokenize(normalizeForContainment(entry.getProduct()));
+        List<String> titleTokens = tokenize(normalizeForContainment(entry.getTitle()));
+        String normalizedCpeVendor = normalizeForContainment(cpeVendorOf(entry));
+        int unexplained = 0;
+        for (String token : queryTokens) {
+            boolean explainedByCandidateText = productTokens.contains(token) || titleTokens.contains(token);
+            if (!explainedByCandidateText && !vendorExplains(normalizedCpeVendor, token)) {
+                unexplained++;
+            }
+        }
+        return unexplained;
+    }
+
+    /**
+     * Backlog item 89, K2 ranking tie-break: a 3-value sibling of {@link #versionCoverageIsPlausible}
+     * — {@code COVERS(0)} when {@code entry}'s cataloged history already reaches at least the item's
+     * own major version, {@code UNKNOWN(1)} when there's no usable evidence either way (mirrors that
+     * method's own "no evidence means always plausible" cases exactly), {@code NOT_COVERS(2)}
+     * otherwise. Never a hard reject (same as {@code versionCoverageIsPlausible}) — purely a ranking
+     * order among already-admitted candidates, and deliberately placed ahead of {@code vendorAgrees}
+     * in {@link #rankCpeCandidates}'s own key chain (see that method's own javadoc for why: a raw
+     * boolean {@code versionCoverageIsPlausible} tie-break sitting only after {@code vendorAgrees}
+     * isn't enough on its own here, because {@code vendorAgrees} itself would otherwise pick the
+     * wrong, version-stale candidate first for PDF-XChange Editor).
+     */
+    private int versionCoverageRank(CpeDictionaryEntry entry, String itemVersion) {
+        Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
+        if (maxCatalogedMajor == null || maxCatalogedMajor <= 0) {
+            return 1; // UNKNOWN — no cataloged evidence at all.
+        }
+        java.util.OptionalInt itemMajor = leadingMajorVersion(itemVersion);
+        if (itemMajor.isEmpty()) {
+            return 1; // UNKNOWN — item's own version isn't parseable.
+        }
+        return itemMajor.getAsInt() <= maxCatalogedMajor ? 0 : 2; // COVERS : NOT_COVERS
+    }
+
+    /** Backlog item 89, K3 ranking tie-break (the final one in the chain): {@code entry}'s own
+     *  {@link CpeDictionaryEntry#getCatalogedRowCount()}, defaulting to 0 when a candidate wasn't
+     *  sourced from the {@code collect()} query that populates it (e.g. the name-variant search) —
+     *  the same "no evidence" default {@link #catalogedRowCount} treats as the lowest priority, never
+     *  a hard reject. See {@link #rankCpeCandidates}'s own javadoc for the Greenshot tie this exists
+     *  to break. */
+    private int catalogedRowCount(CpeDictionaryEntry entry) {
+        Integer count = entry.getCatalogedRowCount();
+        return count == null ? 0 : count;
     }
 
     private boolean vendorAgrees(String normalizedVendor, CpeDictionaryEntry entry) {

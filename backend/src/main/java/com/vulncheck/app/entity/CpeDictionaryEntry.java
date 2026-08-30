@@ -68,4 +68,22 @@ public class CpeDictionaryEntry {
      */
     @Transient
     private Integer maxCatalogedMajor;
+
+    /**
+     * The number of rows sharing this entry's vendor/product pair in the {@code cpe_dictionary}
+     * table (every catalogued version, not just this one row's own) — backlog item 89's K3 ranking
+     * tie-break: {@link com.vulncheck.app.service.Stage1IdentificationService#rankCpeCandidates}
+     * uses it, descending, as the last tie-break among candidates that are otherwise indistinguishable
+     * (e.g. Greenshot 1.3.290 against both {@code getgreenshot:greenshot} (80 catalogued rows) and
+     * {@code greenshot:greenshot} (1 row) — the row-count-richer pair is far more likely to be NVD's
+     * real, actively-maintained tracking entry for the product). Computed the same unconditional,
+     * whole-partition way as {@link #maxCatalogedMajor} (see {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#collect} for how this gets populated).
+     * Not a persisted column: populated in Java from a per-query aggregate, hence {@link Transient}.
+     * Null whenever a candidate wasn't sourced from that query (e.g. the name-variant search), which
+     * {@link com.vulncheck.app.service.Stage1IdentificationService} treats as "no evidence" (lowest
+     * tie-break priority, same as a literal 0).
+     */
+    @Transient
+    private Integer catalogedRowCount;
 }
