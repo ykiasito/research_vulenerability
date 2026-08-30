@@ -2118,8 +2118,11 @@ class Stage1IdentificationServiceTest {
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
 
+        // identify() always rewrites the winning CPE's version segment to the item's own version
+        // (see Stage1IdentificationService#withItemVersion), so the presence/vendor:product of this
+        // result is what actually proves the candidate was not demoted, not its version segment.
         assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:citrix:workspace:2006.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:citrix:workspace:2405.0:*:*:*:*:*:*:*");
     }
 
     @Test
@@ -2139,8 +2142,10 @@ class Stage1IdentificationServiceTest {
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
 
+        // Same version-rewriting caveat as above: only presence/vendor:product proves the
+        // zero-max-cataloged-major candidate was treated as no-evidence rather than demoted.
         assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:vendor:widget-tool:9.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
