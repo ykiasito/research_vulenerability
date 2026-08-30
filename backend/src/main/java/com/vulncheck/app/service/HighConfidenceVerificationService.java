@@ -173,8 +173,9 @@ public class HighConfidenceVerificationService {
      * operator-raised {@code downgrade-factor} (e.g. 0.8), a 0.95-confidence match downgrades to
      * 0.76, which never falls below the 0.5 floor, so a match with neither a CPE nor a registry
      * fallback (nothing left to look up vulnerabilities against) would stay IDENTIFIED regardless —
-     * exactly the "IDENTIFIED with no vulnerability-lookup path" bug this whole PR's Chocolatey fix
-     * closed, reopened through a different door. Once the CPE is dropped, the absence of a registry
+     * exactly the "IDENTIFIED with no vulnerability-lookup path" bug this whole PR closed for the
+     * (since-removed) Chocolatey registry, reopened through a different door. Once the CPE is
+     * dropped, the absence of a registry
      * fallback alone is sufficient reason to demote, independent of how much the confidence number
      * happens to be discounted by.
      */
