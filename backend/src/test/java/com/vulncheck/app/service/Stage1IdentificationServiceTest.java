@@ -2496,6 +2496,47 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void rejectsASingleTokenQueryMatchingOnlyALeadingPortionOfAMultiTokenCandidateWhenItemVendorDoesNotExplainTheLeftover() {
+        // Backlog item 89 P3 (senior review 2026-08-30): "Slack" (item vendor "Slack Technologies")
+        // against slack_archivebot_project:slack_archivebot — Direction 1 previously accepted this
+        // purely because "slack" aligns against the candidate's leading token, leaving "archivebot"
+        // completely unpoliced. The item's own vendor field doesn't explain "archivebot" either, so
+        // this must now be rejected, leaving the item UNIDENTIFIED (golden-300's own intended
+        // outcome for this control row) rather than misidentified as an unrelated Slack add-on.
+        CpeDictionaryEntry slackArchivebot =
+                cpeEntry("cpe:2.3:a:slack_archivebot_project:slack_archivebot:1.0:*:*:*:*:*:*:*", "slack_archivebot");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(slackArchivebot));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Slack");
+        item.setVendor("Slack Technologies");
+
+        assertThat(service(List.of()).identify(item, USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void keepsASingleTokenQueryMatchingALeadingPortionOfAMultiTokenCandidateWhenItemVendorExplainsTheLeftover() {
+        // Contrast with the Slack rejection above (backlog item 89 P3): when the item's own vendor
+        // field DOES explain the candidate's leftover trailing token, the match is still accepted —
+        // this is not a blanket ban on every single-token-query-vs-multi-token-candidate match, only
+        // on ones whose leftover the item's own vendor field can't account for.
+        CpeDictionaryEntry fooBar = cpeEntry("cpe:2.3:a:acme:foo_bar:2.0:*:*:*:*:*:*:*", "foo_bar");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(fooBar));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo");
+        item.setVendor("Foo Bar Inc");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:foo_bar:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
     void normalizeForContainmentStripsCpeBackslashEscapesSoAnEscapedDictionaryEntryStillMatchesTheUnescapedQuery() {
         // CPE 2.3 strings backslash-escape reserved characters (e.g. "notepad\+\+" for the product
         // segment of Notepad++'s own dictionary entry) — normalizeForContainment must strip those so

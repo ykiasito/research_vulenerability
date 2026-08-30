@@ -2150,14 +2150,37 @@ public class Stage1IdentificationService {
      * to be vendor-explained too, but only when there was no leading anchor to already vouch for the
      * match, closes this without re-breaking the AVG case (whose leading "avg" already proves it).
      *
+     * <p>Backlog item 89 P3 (senior review 2026-08-30): Direction 1 itself has a mirror-image gap —
+     * when the *query* is the single-token side and it only aligns against a *leading* portion of a
+     * longer candidate product slug ("Slack" against {@code slack_archivebot_project}'s product
+     * {@code slack_archivebot}), the trailing leftover candidate tokens ("archivebot") were never
+     * policed at all, the same class of gap REVISE item 5 already closed for Direction 2. Closed the
+     * same way — leftover trailing candidate tokens must be explained — but by the *item's own*
+     * vendor field, never the candidate's own CPE vendor (which would trivially "explain" its own
+     * leftover fragment the same way REVISE item 4 already guards against for {@link
+     * #alignPrefixAtAnyBoundary}). Only checked for a single-token query, mirroring REVISE item 5's
+     * own single-token-candidate condition: a multi-token query that merely happens to align against
+     * a shorter leading run of the candidate already has its own internal structure proving the tie
+     * (the same reasoning REVISE item 2's {@code queryTokens.size() >= 2} guard above relies on), so
+     * widening this to every query would risk re-breaking a real multi-word match. Only checked when
+     * the item has a non-blank vendor field at all — same "no evidence means permissive" default this
+     * class uses everywhere else (e.g. {@link #versionCoverageIsPlausible}, {@link
+     * #passesTargetSwGate}'s blank-target_sw passthrough): a blank item vendor gives {@link
+     * #vendorExplains} nothing to ever confirm against, and a query like bare "apache" (item vendor
+     * routinely blank for a package with no inventory-recorded vendor) legitimately matching
+     * {@code apache:apache_http_server} must not be rejected purely because there's no vendor text to
+     * check the leftover "http"/"server" tokens against — measured live via this project's own test
+     * suite (see {@code Stage1IdentificationServiceTest}'s several blank-vendor single-token-query
+     * fixtures) once an unconditional version of this check was tried.
+     *
      * <p>Backlog item 89 P2 (senior review 2026-08-30): {@code requireTrailingVendorExplanation}
      * controls whether Direction 2's REVISE item 5 trailing-vendor-explanation rule (see above) is
      * enforced at all — {@code true} everywhere except {@link #plausibleContainmentOnly}'s own
      * relaxed second pass, which only ever runs after the strict pass (this flag {@code true})
-     * already rejected every candidate in the pool. Does not affect Direction 1, which stays
-     * unconditionally strict regardless of this flag — P2's relaxation is calibrated narrowly to the
-     * one rule it was measured against (Metasploit Framework -&gt; rapid7:metasploit), not a general
-     * loosening of every containment rule at once.
+     * already rejected every candidate in the pool. Does not affect Direction 1 or this method's own
+     * new P3 check above, both of which stay unconditionally strict regardless of this flag — P2's
+     * relaxation is calibrated narrowly to the one rule it was measured against (Metasploit Framework
+     * -&gt; rapid7:metasploit), not a general loosening of every containment rule at once.
      */
     private boolean explainsQuery(String normalizedItemVendor, String normalizedQuery, CpeDictionaryEntry entry,
             String candidateText, boolean isTitleField, boolean requireTrailingVendorExplanation) {
@@ -2203,7 +2226,22 @@ public class Stage1IdentificationService {
         if (candidateTokensConsumed <= 0 && !isTitleField && queryTokens.size() >= 2) {
             candidateTokensConsumed = alignPrefixAtAnyBoundary(queryTokens, candidateTokens, normalizedItemVendor);
         }
-        if (candidateTokensConsumed > 0 && (!isTitleField || candidateTokensConsumed > vendorTokenCount(entry))) {
+        boolean direction1Match = candidateTokensConsumed > 0
+                && (!isTitleField || candidateTokensConsumed > vendorTokenCount(entry));
+        // Backlog item 89 P3: a single-token query that only consumed a *leading* portion of a
+        // longer candidate leaves candidateTokens[candidateTokensConsumed..] unaccounted for — see
+        // this method's own javadoc above for why this is checked only for a single-token query, only
+        // against the item's own vendor field, and only when that vendor field is non-blank at all.
+        if (direction1Match && queryTokens.size() == 1 && candidateTokensConsumed < candidateTokens.size()
+                && !normalizedItemVendor.isBlank()) {
+            for (int i = candidateTokensConsumed; i < candidateTokens.size(); i++) {
+                if (!vendorExplains(normalizedItemVendor, candidateTokens.get(i))) {
+                    direction1Match = false;
+                    break;
+                }
+            }
+        }
+        if (direction1Match) {
             return true;
         }
 
