@@ -1464,15 +1464,19 @@ public class Stage1IdentificationService {
      * <em>before</em> {@code vendorAgrees}. After exact-slug/target_sw (both job 37 REVISE item 1's
      * own ordering, left untouched) because this tie-break must never be allowed to demote a
      * candidate that already won on stronger textual/ecosystem evidence — inserting it any earlier
-     * would risk re-litigating job 37 REVISE item 1's own fix. Before {@code vendorAgrees} because
-     * this is objective catalogue evidence (does this vendor:product pair even have a row at or
-     * above this version?), which should outrank a merely textual vendor-string overlap — measured
-     * live in the Audacity false positive this tie-break was built for: the wrong candidate
-     * ({@code audacity:audacity}, catalogued only up to old 2.x versions) has {@code vendorAgrees}
-     * true purely from sharing the word "audacity", while the correct candidate
-     * ({@code audacityteam:audacity}, actually catalogued at the item's 3.7.x version) has {@code
-     * vendorAgrees} false — placing this tie-break behind {@code vendorAgrees} would have let the
-     * wrong candidate keep winning for exactly the wrong reason.
+     * would risk re-litigating job 37 REVISE item 1's own fix. Its exact position relative to
+     * {@code vendorAgrees} is the part that actually matters in the Audacity false positive this
+     * tie-break was built for: both candidates ({@code audacity:audacity} and the correct
+     * {@code audacityteam:audacity}) tie on every other key in the chain, including
+     * {@code vendorAgrees} itself — golden-300's own vendor string for this item is "Audacity
+     * Team", and {@link #containsEitherWay}'s bidirectional partial match makes both candidates'
+     * vendor slugs ("audacity" and "audacityteam") match it, so {@code vendorAgrees} is {@code
+     * true} for both and cannot break the tie. {@code versionCoverageIsPlausible} is the only
+     * remaining signal that can, which is exactly why it has to sit somewhere in this chain at
+     * all: the wrong candidate ({@code audacity:audacity}) is catalogued in the dictionary as a
+     * single row at version 1.2.6 (max cataloged major 1), while the item's own version is in the
+     * 3.7.x line — concrete numeric evidence that candidate's catalogue coverage cannot possibly
+     * be current, which a same-named-vendor overlap alone never carries.
      */
     private List<CpeDictionaryEntry> rankCpeCandidates(String vendor, String exactMatchQuery,
             List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit, String itemVersion) {
