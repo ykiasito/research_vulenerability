@@ -4,9 +4,11 @@ import com.vulncheck.app.entity.JobCostLedgerEntry;
 import com.vulncheck.app.repository.JobCostLedgerRepository;
 import jakarta.annotation.PostConstruct;
 import java.math.BigDecimal;
+import java.util.Deque;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -195,6 +197,24 @@ public class JobCostBudgetService {
     private BigDecimal verificationCostCapPerItemUsd;
 
     /**
+     * Per-item Tier2-only budget floor (docs/spec/task-backlog.md item 90, senior review 2026-08-30,
+     * the P0 fix for item 89's finding that {@link #tryReserve(Long, BigDecimal)}'s pure
+     * first-come-first-served admission policy can starve CSV rows near the end of a job of even a
+     * single Tier2 LLM disambiguate call — see {@link #tryReserve(Long, BigDecimal, String)}'s
+     * javadoc for the actual consumption-order mechanism and its current wiring status).
+     *
+     * <p>Defaults to {@code 0}. Combined with {@link #startJobBudget} carving {@code floor *
+     * itemCount} out of the very same overall {@link #costCapPerItemUsd} total (not adding to it),
+     * a zero floor leaves the common pool's cap exactly equal to {@code costCapPerItemUsd *
+     * itemCount} — the pre-existing total, byte-for-byte unchanged from before this property
+     * existed. Whether to actually raise this above {@code 0} is a separate product decision
+     * (docs/spec/task-backlog.md item 91: trading Stage4 vulnerability-research coverage for
+     * Tier1/Tier2 identification accuracy), not settled by this change.
+     */
+    @Value("${app.tier2-budget-floor-per-item-usd:0}")
+    private BigDecimal tier2BudgetFloorPerItemUsd;
+
+    /**
      * Bundled-package (formerly "Stage 3.5") detection cost constants — see
      * {@code docs/spec/bundled-package-detection-plan.md} §4 for the derivation (same web_search
      * max_uses=1 pricing shape as Stage4 for the changelog-discovery call, plus a text-only
@@ -228,6 +248,17 @@ public class JobCostBudgetService {
     // that never grows large enough to be worth adding eviction machinery for.
     private final Set<Long> endedJobIds = ConcurrentHashMap.newKeySet();
 
+    // Tier2-only budget floor ledger (item 90, see #tier2BudgetFloorPerItemUsd's javadoc) — a
+    // partition carved OUT OF capByJobId/spentByJobId above (see #startJobBudget), not an addition
+    // to the job's total budget. tier2ReservationPoolByJobId records, per job and in reservation
+    // order, whether each TIER2 reservation made through the 3-arg #tryReserve(Long, BigDecimal,
+    // String) landed in this floor pool (true) or spilled over into the common pool (false), so
+    // #reconcile can refund the right pool later — see that method's javadoc for why this is a
+    // best-effort FIFO match, same precision level the rest of this class already accepts.
+    private final Map<Long, BigDecimal> tier2FloorCapByJobId = new ConcurrentHashMap<>();
+    private final Map<Long, BigDecimal> tier2FloorSpentByJobId = new ConcurrentHashMap<>();
+    private final Map<Long, Deque<Boolean>> tier2ReservationPoolByJobId = new ConcurrentHashMap<>();
+
     // Second, independent ledger for bundled-package detection's own budget (see the constants'
     // javadoc above) — deliberately separate maps, not an extra dimension folded into capByJobId/
     // spentByJobId, so this feature's spend can never be commingled with or silently borrow from the
@@ -249,8 +280,18 @@ public class JobCostBudgetService {
         // StuckJobResumer re-running processJobAsync for a job resumed after a crash/redeploy) —
         // clear any stale tombstone so this fresh budget isn't immediately treated as ended.
         endedJobIds.remove(jobId);
-        capByJobId.put(jobId, costCapPerItemUsd.multiply(BigDecimal.valueOf(itemCount)));
+        BigDecimal totalCap = costCapPerItemUsd.multiply(BigDecimal.valueOf(itemCount));
+        // Item 90: the Tier2 floor is carved OUT OF this same total, not added on top of it, so a
+        // zero floor (the default) leaves the common pool's cap identical to the pre-existing total
+        // — see #tier2BudgetFloorPerItemUsd's javadoc. Defensively clamp the floor to the total cap
+        // so a misconfigured floor above the per-item cost cap can never drive the common pool
+        // negative.
+        BigDecimal floorCap = tier2BudgetFloorPerItemUsd.multiply(BigDecimal.valueOf(itemCount)).min(totalCap);
+        capByJobId.put(jobId, totalCap.subtract(floorCap));
         spentByJobId.put(jobId, BigDecimal.ZERO);
+        tier2FloorCapByJobId.put(jobId, floorCap);
+        tier2FloorSpentByJobId.put(jobId, BigDecimal.ZERO);
+        tier2ReservationPoolByJobId.remove(jobId);
     }
 
     /**
@@ -264,6 +305,9 @@ public class JobCostBudgetService {
     public void endJobBudget(Long jobId) {
         capByJobId.remove(jobId);
         spentByJobId.remove(jobId);
+        tier2FloorCapByJobId.remove(jobId);
+        tier2FloorSpentByJobId.remove(jobId);
+        tier2ReservationPoolByJobId.remove(jobId);
         endedJobIds.add(jobId);
     }
 
@@ -312,6 +356,70 @@ public class JobCostBudgetService {
         }
         spentByJobId.put(jobId, spent.add(estimatedCostUsd));
         return true;
+    }
+
+    /**
+     * Item 90 (senior review 2026-08-30): same admission check as {@link #tryReserve(Long,
+     * BigDecimal)}, but a {@code callSite} of {@link JobCostLedgerEntry#CALL_SITE_TIER2} gets
+     * first crack at the dedicated {@link #tier2FloorCapByJobId} floor pool before falling back to
+     * the shared common pool (exactly {@link #tryReserve(Long, BigDecimal)}'s own logic) — see
+     * {@link #tier2BudgetFloorPerItemUsd}'s javadoc for why the floor exists and how it's carved
+     * out of the job's total budget. Every other {@code callSite} (Stage4, Tier3, or {@code null})
+     * has no floor-pool access at all and is routed straight to {@link #tryReserve(Long,
+     * BigDecimal)}, unchanged.
+     *
+     * <p><b>Not wired to any real call site as of this change.</b> {@code
+     * Stage1IdentificationService}'s four Tier2 reservation call sites still call the 2-arg {@link
+     * #tryReserve(Long, BigDecimal)} directly (out of scope for item 90 — see
+     * docs/spec/task-backlog.md item 90's own scope note); wiring them to this overload is left for
+     * a follow-up change. With {@link #tier2BudgetFloorPerItemUsd} defaulted to {@code 0} this has
+     * zero production effect regardless — the floor pool's cap is always {@code 0} (every
+     * reservation attempted against it fails immediately) and the common pool's cap is unchanged
+     * from before this overload existed. Do not raise {@code app.tier2-budget-floor-per-item-usd}
+     * above {@code 0} in production before those call sites are wired to this overload, or the
+     * floor carve-out simply shrinks the common pool for Stage4/Tier3 with no offsetting Tier2
+     * benefit.
+     */
+    public synchronized boolean tryReserve(Long jobId, BigDecimal estimatedCostUsd, String callSite) {
+        if (!JobCostLedgerEntry.CALL_SITE_TIER2.equals(callSite)) {
+            return tryReserve(jobId, estimatedCostUsd);
+        }
+        if (tryReserveTier2Floor(jobId, estimatedCostUsd)) {
+            return true;
+        }
+        if (tryReserve(jobId, estimatedCostUsd)) {
+            recordTier2ReservationPool(jobId, false);
+            return true;
+        }
+        return false;
+    }
+
+    /** Admission check against only the Tier2 floor pool — same fail-open/fail-closed shape as
+     *  {@link #tryReserve(Long, BigDecimal)} (never-started fails closed here rather than open,
+     *  though: an absent floor-pool entry means the caller falls back to the common pool's own
+     *  fail-open behavior instead, so this method itself never needs to fail open). Records a
+     *  successful reservation's pool assignment for {@link #reconcile} to consume later. */
+    private boolean tryReserveTier2Floor(Long jobId, BigDecimal estimatedCostUsd) {
+        if (endedJobIds.contains(jobId)) {
+            return false;
+        }
+        BigDecimal floorCap = tier2FloorCapByJobId.get(jobId);
+        if (floorCap == null) {
+            return false;
+        }
+        BigDecimal floorSpent = tier2FloorSpentByJobId.getOrDefault(jobId, BigDecimal.ZERO);
+        if (floorSpent.add(estimatedCostUsd).compareTo(floorCap) > 0) {
+            return false;
+        }
+        tier2FloorSpentByJobId.put(jobId, floorSpent.add(estimatedCostUsd));
+        recordTier2ReservationPool(jobId, true);
+        return true;
+    }
+
+    private void recordTier2ReservationPool(Long jobId, boolean fromFloor) {
+        tier2ReservationPoolByJobId
+                .computeIfAbsent(jobId, key -> new ConcurrentLinkedDeque<>())
+                .addLast(fromFloor);
     }
 
     /**
@@ -365,7 +473,21 @@ public class JobCostBudgetService {
         // persisted, and persistLedgerEntry never throws (see its own javadoc) — so a DB failure
         // here can never swallow the in-memory reservation refund, and can never propagate up
         // through LlmServiceClient's callers and clobber an already-paid-for Claude response.
-        if (capByJobId.containsKey(jobId)) {
+        //
+        // Item 90: a TIER2 call whose reservation landed in the floor pool (tracked by
+        // tier2ReservationPoolByJobId, pushed by the 3-arg tryReserve overload) must be refunded
+        // back into that same floor pool, not the common pool, or the two ledgers would drift out
+        // of sync with what was actually reserved where. pollTier2FloorReservation returns false
+        // (common pool) for every TIER2 call today, since nothing yet calls the 3-arg tryReserve in
+        // production — see that overload's javadoc — so this is a no-op change until that wiring
+        // lands.
+        if (JobCostLedgerEntry.CALL_SITE_TIER2.equals(callSite) && pollTier2FloorReservation(jobId)) {
+            if (tier2FloorCapByJobId.containsKey(jobId)) {
+                BigDecimal spent = tier2FloorSpentByJobId.getOrDefault(jobId, BigDecimal.ZERO);
+                BigDecimal adjusted = spent.subtract(reservedEstimateUsd).add(actualCostUsd);
+                tier2FloorSpentByJobId.put(jobId, adjusted.max(BigDecimal.ZERO));
+            }
+        } else if (capByJobId.containsKey(jobId)) {
             BigDecimal spent = spentByJobId.getOrDefault(jobId, BigDecimal.ZERO);
             BigDecimal adjusted = spent.subtract(reservedEstimateUsd).add(actualCostUsd);
             spentByJobId.put(jobId, adjusted.max(BigDecimal.ZERO));
@@ -380,6 +502,28 @@ public class JobCostBudgetService {
                 inputTokens,
                 outputTokens,
                 webSearchRequests);
+    }
+
+    /**
+     * Consumes the oldest recorded pool assignment for a TIER2 reservation on this job — pushed by
+     * the TIER2 branch of {@link #tryReserve(Long, BigDecimal, String)} at reservation time — and
+     * reports whether the matching reconcile call must refund {@link #tier2FloorSpentByJobId}
+     * ({@code true}) instead of the common pool ({@code false}). Best-effort FIFO matching, the
+     * same level of precision this class already accepts elsewhere (see the class javadoc on
+     * in-memory state being an admission-check approximation, not an exact ledger): under
+     * concurrent Tier2 calls for the same job, a given reconcile is not guaranteed to match the
+     * exact tryReserve call it was originally paired with in {@code LlmServiceClient}, only *some*
+     * still-outstanding reservation of the same call site. When nothing is tracked (deque absent or
+     * empty — the case for every TIER2 caller today, since none of them call the 3-arg {@link
+     * #tryReserve(Long, BigDecimal, String)} overload yet), this returns {@code false}, which
+     * preserves {@link #reconcile}'s pre-existing common-pool-only refund behavior unchanged.
+     */
+    private boolean pollTier2FloorReservation(Long jobId) {
+        Deque<Boolean> deque = tier2ReservationPoolByJobId.get(jobId);
+        if (deque == null) {
+            return false;
+        }
+        return Boolean.TRUE.equals(deque.pollFirst());
     }
 
     /**

@@ -33,6 +33,10 @@ class JobCostBudgetServiceTest {
         // (app.high-confidence-verification.cost-cap-per-item-usd, default 0) — set to that same
         // default here; tests that need a real (non-zero) cap override it explicitly.
         ReflectionTestUtils.setField(service, "verificationCostCapPerItemUsd", BigDecimal.ZERO);
+        // tier2BudgetFloorPerItemUsd (item 90) is likewise @Value-injected in production
+        // (app.tier2-budget-floor-per-item-usd, default 0) — set to that same default here; tests
+        // that need a real (non-zero) floor override it explicitly.
+        ReflectionTestUtils.setField(service, "tier2BudgetFloorPerItemUsd", BigDecimal.ZERO);
         return service;
     }
 
@@ -420,5 +424,123 @@ class JobCostBudgetServiceTest {
         service.reconcile(15L, 89L, new BigDecimal("0.50"), BigDecimal.ZERO);
 
         assertThat(service.tryReserve(15L, new BigDecimal("0.50"))).isTrue();
+    }
+
+    // --- Item 90 (senior review 2026-08-30): Tier2-only budget floor, carved out of the same
+    // total budget so CSV rows near the end of a job aren't starved of even one Tier2 disambiguate
+    // call by earlier rows exhausting the shared/common pool first. Default floor is 0 — the tests
+    // above (which never touch tier2BudgetFloorPerItemUsd) already cover the all-zero regression
+    // case; these tests explicitly set a non-zero floor -----------------------------------------
+
+    @Test
+    void zeroFloorLeavesTheCommonPoolCapIdenticalToTheTotalCostCap() {
+        // With the default floor (0), the 3-arg overload for a TIER2 call site must behave
+        // identically to the plain 2-arg tryReserve — no regression from adding the floor pool.
+        JobCostBudgetService service = newService();
+        service.startJobBudget(25L, 100); // total cap = 100 * 0.005 = 0.50, floor = 0
+
+        assertThat(service.tryReserve(25L, new BigDecimal("0.30"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isTrue();
+        assertThat(service.tryReserve(25L, new BigDecimal("0.20"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isTrue();
+        assertThat(service.tryReserve(25L, new BigDecimal("0.001"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isFalse(); // 0.50 total cap exhausted, exactly as it would be with the 2-arg overload
+    }
+
+    @Test
+    void tier2ReservationStillSucceedsFromItsFloorAfterStage4ExhaustsTheCommonPool() {
+        // The item 89/90 scenario this floor fixes: CSV-tail items must still get a Tier2
+        // disambiguate call even after earlier items' Stage4 web-search research reservations have
+        // burned through the whole common pool.
+        JobCostBudgetService service = newService();
+        ReflectionTestUtils.setField(service, "tier2BudgetFloorPerItemUsd", new BigDecimal("0.003"));
+        service.startJobBudget(26L, 10); // total cap = 10 * 0.005 = 0.05; floor = 10 * 0.003 = 0.03;
+        // common pool cap = 0.05 - 0.03 = 0.02
+
+        // Stage4 (no floor access) exhausts the entire common pool.
+        assertThat(service.tryReserve(26L, new BigDecimal("0.02"), JobCostLedgerEntry.CALL_SITE_STAGE4))
+                .isTrue();
+        assertThat(service.tryReserve(26L, new BigDecimal("0.001"), JobCostLedgerEntry.CALL_SITE_STAGE4))
+                .isFalse(); // common pool exhausted
+
+        // A later item's Tier2 call still gets through, from the dedicated floor pool, even though
+        // the common pool is fully spent.
+        assertThat(service.tryReserve(26L, new BigDecimal("0.003"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isTrue();
+
+        // Repeat until the floor pool (0.03 total) is itself exhausted — 10 reservations of 0.003
+        // each fit exactly (the first one above already used one), matching "the last item in a
+        // 10-item CSV still gets its Tier2 call".
+        for (int i = 0; i < 9; i++) {
+            assertThat(service.tryReserve(26L, new BigDecimal("0.003"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                    .isTrue();
+        }
+    }
+
+    @Test
+    void tier2ReservationIsRejectedOnceBothTheFloorAndTheCommonPoolAreExhausted() {
+        JobCostBudgetService service = newService();
+        ReflectionTestUtils.setField(service, "tier2BudgetFloorPerItemUsd", new BigDecimal("0.003"));
+        service.startJobBudget(27L, 10); // total cap = 0.05; floor = 0.03; common = 0.02
+
+        // Exhaust the floor pool.
+        assertThat(service.tryReserve(27L, new BigDecimal("0.03"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isTrue();
+        // Exhaust the common pool too (still reachable via TIER2's fallback, and directly by Stage4).
+        assertThat(service.tryReserve(27L, new BigDecimal("0.02"), JobCostLedgerEntry.CALL_SITE_STAGE4))
+                .isTrue();
+
+        // Both pools are now empty — a further TIER2 reservation must be rejected, not silently
+        // fail open.
+        assertThat(service.tryReserve(27L, new BigDecimal("0.001"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isFalse();
+        // Stage4/Tier3 (no floor access) are rejected too, for the same reason (common pool empty).
+        assertThat(service.tryReserve(27L, new BigDecimal("0.001"), JobCostLedgerEntry.CALL_SITE_STAGE4))
+                .isFalse();
+    }
+
+    @Test
+    void tier2FallbackToTheCommonPoolStillRespectsTheTombstonedJobIdFailClosedBehavior() {
+        JobCostBudgetService service = newService();
+        ReflectionTestUtils.setField(service, "tier2BudgetFloorPerItemUsd", new BigDecimal("0.003"));
+        service.startJobBudget(28L, 10);
+        service.endJobBudget(28L);
+
+        assertThat(service.tryReserve(28L, new BigDecimal("0.001"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isFalse();
+    }
+
+    @Test
+    void reconcileRefundsTheFloorPoolForATier2ReservationThatLandedThere() {
+        // A TIER2 reservation made via the 3-arg overload that lands in the floor pool must be
+        // refunded back into that same floor pool by reconcile, freeing up floor-pool room for a
+        // later item, rather than (incorrectly) crediting the common pool instead.
+        JobCostLedgerRepository repository = mock(JobCostLedgerRepository.class);
+        JobCostBudgetService service = newService(repository);
+        ReflectionTestUtils.setField(service, "tier2BudgetFloorPerItemUsd", new BigDecimal("0.003"));
+        service.startJobBudget(29L, 1); // total cap = 0.005; floor = 0.003; common = 0.002
+
+        // Exhaust the common pool first (Stage4 has no floor access), so any later success can only
+        // be explained by floor-pool headroom, not leftover common-pool room.
+        assertThat(service.tryReserve(29L, new BigDecimal("0.002"), JobCostLedgerEntry.CALL_SITE_STAGE4))
+                .isTrue();
+        // Exhaust the floor pool too.
+        assertThat(service.tryReserve(29L, new BigDecimal("0.003"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isTrue();
+        // Both pools are now fully spent.
+        assertThat(service.tryReserve(29L, new BigDecimal("0.001"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isFalse();
+
+        // Reconcile the TIER2 reservation at a lower actual cost, refunding 0.002 back into the
+        // floor pool specifically (the common pool, exhausted by Stage4 above, is untouched by this
+        // call since its callSite is TIER2 and its reservation was tracked as floor-pool-sourced).
+        service.reconcile(
+                29L, 100L, JobCostLedgerEntry.CALL_SITE_TIER2, new BigDecimal("0.003"), new BigDecimal("0.001"),
+                50, 20, 0);
+
+        // The floor pool has 0.002 of headroom again; the common pool is still fully spent, so this
+        // succeeding proves the refund landed in the floor pool, not the common one.
+        assertThat(service.tryReserve(29L, new BigDecimal("0.002"), JobCostLedgerEntry.CALL_SITE_TIER2))
+                .isTrue();
     }
 }
