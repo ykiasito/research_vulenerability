@@ -187,4 +187,74 @@ class RestClientConfigTest {
             server.stop(0);
         }
     }
+
+    /**
+     * Behavioral regression coverage for the three SSRF-hardening beans themselves ({@link
+     * RestClientConfig#csafSyncRestClient}/{@link RestClientConfig#ghsaSyncRestClient}/{@link
+     * RestClientConfig#osvSyncRestClient}) — not just {@code noRedirectRequestFactory} in
+     * isolation (see {@link #noRedirectRequestFactoryDoesNotFollowRedirects} above). Before this
+     * test existed, a mutation that reverted any one of these three bean bodies from {@link
+     * RestClientConfig#noRedirectRequestFactory} back to {@link
+     * RestClientConfig#simpleRequestFactory} (auto-follow redirects, no SSRF hardening) passed
+     * every other test in this class unchanged, because none of them build the request factory
+     * via the bean method and drive it against a live redirect. {@code
+     * SiemensCsafSyncService#fetchBounded}/{@code RedHatCsafSyncService}/{@code
+     * GhsaSyncService#resolveRedirectTarget}/{@code OsvSyncService} all assume a 3xx response
+     * reaches them unaltered so they can re-validate the redirect target's host themselves; if the
+     * client silently auto-followed instead, that revalidation would never run.
+     *
+     * <p>Deliberately asserts on behavior (the 302 and its {@code Location} header surface
+     * untouched), not on the request factory's concrete type — {@code
+     * ClientHttpRequestFactoryBuilder.simple()} returns a Spring Boot package-private subclass of
+     * {@link SimpleClientHttpRequestFactory}, so a type-name assertion would be both fragile and
+     * beside the point (what matters is whether it follows redirects, not its class).
+     */
+    private static void assertDoesNotFollowRedirects(ClientHttpRequestFactory requestFactory) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        try {
+            int port = server.getAddress().getPort();
+            server.createContext(
+                    "/redirect",
+                    exchange -> {
+                        exchange.getResponseHeaders().add("Location", "http://localhost:" + port + "/target");
+                        exchange.sendResponseHeaders(302, -1);
+                        exchange.close();
+                    });
+            server.createContext(
+                    "/target",
+                    exchange -> {
+                        exchange.sendResponseHeaders(200, -1);
+                        exchange.close();
+                    });
+            server.start();
+
+            ClientHttpRequest request =
+                    requestFactory.createRequest(URI.create("http://localhost:" + port + "/redirect"), HttpMethod.GET);
+
+            try (ClientHttpResponse response = request.execute()) {
+                assertThat(response.getStatusCode().value()).isEqualTo(302);
+                assertThat(response.getHeaders().getFirst("Location")).isEqualTo("http://localhost:" + port + "/target");
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void csafSyncRestClientDoesNotFollowRedirects() throws Exception {
+        RestClient restClient = new RestClientConfig().csafSyncRestClient();
+        assertDoesNotFollowRedirects(requestFactoryOf(restClient));
+    }
+
+    @Test
+    void ghsaSyncRestClientDoesNotFollowRedirects() throws Exception {
+        RestClient restClient = new RestClientConfig().ghsaSyncRestClient();
+        assertDoesNotFollowRedirects(requestFactoryOf(restClient));
+    }
+
+    @Test
+    void osvSyncRestClientDoesNotFollowRedirects() throws Exception {
+        RestClient restClient = new RestClientConfig().osvSyncRestClient();
+        assertDoesNotFollowRedirects(requestFactoryOf(restClient));
+    }
 }
