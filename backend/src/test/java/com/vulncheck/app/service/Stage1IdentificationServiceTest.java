@@ -763,6 +763,112 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void relaxedContainmentDerivedMultiCandidatesWithNoApiKeyAreDroppedRatherThanTakingTheFirst() {
+        // REVISE item 1 (senior review, PR #51): a backlog item 89 P2 relaxed-containment-derived
+        // candidate pool is exactly as unverified a mechanical guess as a lone name-variant
+        // candidate — with no Claude key configured (today's real operating condition, see the
+        // PR's own root-cause note: the API credit is exhausted so apiKey.isPresent() is false for
+        // every real job), the pre-existing "no AI verdict -> take cpeCandidates.get(0)" fallback
+        // silently trusted whichever candidate happened to sort first among several unrelated
+        // vendors. "Android Studio" against google:android/motorola:android/samsung:android is the
+        // real control-row false positive this fixes: the strict containment pass rejects all
+        // three (their trailing "studio" token isn't vendor-explained by google/motorola/samsung),
+        // so the relaxed second pass is what actually produced this pool.
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(
+                        cpeEntry("cpe:2.3:a:google:android:1.0:*:*:*:*:*:*:*", "android"),
+                        cpeEntry("cpe:2.3:a:motorola:android:1.0:*:*:*:*:*:*:*", "android"),
+                        cpeEntry("cpe:2.3:a:samsung:android:1.0:*:*:*:*:*:*:*", "android")));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Android Studio"), USER_ID);
+
+        assertThat(result).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+    }
+
+    @Test
+    void relaxedContainmentDerivedMultiCandidatesAreAdoptedWhenAiDisambiguates() {
+        // Same relaxed-pass pool as the drop case above, but with a Claude key configured and a
+        // real AI selection — dropping the no-verdict degrade path must not also block a genuine
+        // AI verdict from being used; only the unverified-guess fallback is disabled for a relaxed
+        // -containment-derived pool, not Tier2 disambiguation itself. Reuses this suite's own
+        // observed stable-sort behavior (see ambiguousCpeCandidatesWithNoApiKeyDegradeToFirstCandidate
+        // above: tied candidates keep their input order) to pin selectedIndex=2 to the samsung entry.
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(
+                        cpeEntry("cpe:2.3:a:google:android:1.0:*:*:*:*:*:*:*", "android"),
+                        cpeEntry("cpe:2.3:a:motorola:android:1.0:*:*:*:*:*:*:*", "android"),
+                        cpeEntry("cpe:2.3:a:samsung:android:1.0:*:*:*:*:*:*:*", "android")));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 2, 0.7, "usage text mentions a Samsung device", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Android Studio"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:samsung:android:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
+        assertThat(result.get().getConfidence()).isEqualByComparingTo("0.7");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(3);
+    }
+
+    @Test
+    void strictContainmentDerivedMultiCandidatesStillDegradeToFirstCandidateWithNoApiKey() {
+        // Regression companion to the two relaxed-pass tests above (REVISE item 1, PR #51): a
+        // strict-containment-derived pool (the common case — plausibleContainmentOnly's first pass
+        // already succeeded) must keep the pre-existing "no AI verdict -> take get(0)" behavior
+        // exactly as before. "PDF-XChange" against two same-vendor products is a real strict-pass
+        // multi-candidate case (neither needed the relaxed second pass to be admitted).
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(
+                        cpeEntry("cpe:2.3:a:tracker-software:pdf-xchange_editor:9.0:*:*:*:*:*:*:*", "pdf-xchange_editor"),
+                        cpeEntry("cpe:2.3:a:tracker-software:pdf-xchange_viewer:2.5:*:*:*:*:*:*:*", "pdf-xchange_viewer")));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("PDF-XChange"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:tracker-software:pdf-xchange_editor:1.0.0:*:*:*:*:*:*:*");
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+    }
+
+    @Test
+    void nameVariantDerivedMultiCandidatesStillDegradeToFirstCandidateWithNoApiKey() {
+        // Regression companion to the relaxed-pass tests above (REVISE item 1, PR #51): a
+        // name-variant-derived pool (backlog item 98, evaluated separately) must be left completely
+        // untouched by this fix — relaxedContainmentDerived is false for it, so the pre-existing
+        // "no AI verdict -> take get(0)" behavior applies exactly as before, even with more than one
+        // variant-search candidate.
+        CpeDictionaryEntry vlcMediaPlayer =
+                cpeEntry("cpe:2.3:a:videolan:vlc_media_player:3.0.0:*:*:*:*:*:*:*", "vlc_media_player");
+        // Also satisfies expandLeadingInitialism's own leadingInitialsMatch check ("player" as the
+        // anchor, preceded by tokens whose initials spell "vm") — a second, genuinely-admitted
+        // variant-search candidate, not just a second row in the mocked repository response.
+        CpeDictionaryEntry otherVariantGuess =
+                cpeEntry("cpe:2.3:a:acme:video_manager_player:1.0.0:*:*:*:*:*:*:*", "video_manager_player");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
+                .thenReturn(List.of(vlcMediaPlayer, otherVariantGuess));
+        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:videolan:vlc_media_player:1.0.0:*:*:*:*:*:*:*");
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+    }
+
+    @Test
     void confidenceReflectsTheCpeTier2AiCallWhenATrustedRegistryMatchHasAHigherStaticNumber() {
         // Real bug found live 2026-08-23 via DB query: of 138 llm_disambiguate rows, 119 sat at
         // exactly the static registry confidence constant (0.95) rather than the AI's own,
@@ -2105,22 +2211,25 @@ class Stage1IdentificationServiceTest {
         // name) must NOT be demoted, unlike the genuinely-wrong-vendor Audacity case above. Uses the
         // real golden-300 Citrix Workspace App measurement: item major 2405 vs. the correct
         // candidate's cataloged major 2006 is a ratio of ~1.20, comfortably under
-        // VERSION_COVERAGE_IMPLAUSIBILITY_RATIO's threshold of 2. Two same-slug, different-vendor
-        // candidates (mirrors the "prefers" test above), because a single-candidate list makes the
-        // sort a no-op and the test would pass identically whether or not the trailing candidate was
-        // demoted. The trailing candidate is placed first and a second, fully-covering candidate is
-        // placed after it — both tie on every other ranking key (exact slug match, no ecosystem to
-        // gate target_sw on, blank item vendor), so the trailing candidate wins by stable sort ONLY
-        // if it is correctly left un-demoted; if the ratio guard wrongly demoted it, the covering
-        // candidate would sort first instead and this assertion would fail.
+        // VERSION_COVERAGE_IMPLAUSIBILITY_RATIO's threshold of 2.
+        //
+        // REVISE item 2 (senior review, PR #51): restored to the original regression shape — a
+        // same-slug competitor with NO cataloged evidence at all (null maxCatalogedMajor), not a
+        // fully-covering one. A brief, now-fixed regression (backlog item 89's K2 ranking key,
+        // versionCoverageRank) collapsed "trails but plausible" and "no evidence whatsoever" into
+        // the same worst rank, which made a fully-covering competitor an unsuitable "everything
+        // else ties" opponent here (K2 alone would legitimately prefer it, masking whether this
+        // ratio guard itself still works) — see versionCoverageRank's own javadoc. With K2 now
+        // correctly ranking both candidates UNKNOWN (tied), the ratio guard (versionPlausible) is
+        // also tied (no-evidence defaults to plausible too), so the trailing candidate wins purely
+        // by stable sort, exactly as this test originally relied on.
         CpeDictionaryEntry trailingCatalog =
                 cpeEntry("cpe:2.3:a:citrix:workspace:2006.0:*:*:*:*:*:*:*", "workspace");
         trailingCatalog.setMaxCatalogedMajor(2006);
-        CpeDictionaryEntry coveringCandidate =
-                cpeEntry("cpe:2.3:a:othervendor:workspace:3000.0:*:*:*:*:*:*:*", "workspace");
-        coveringCandidate.setMaxCatalogedMajor(3000);
+        CpeDictionaryEntry noEvidenceCompetitor =
+                cpeEntry("cpe:2.3:a:othervendor:workspace:1.0.0:*:*:*:*:*:*:*", "workspace");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(trailingCatalog, coveringCandidate));
+                .thenReturn(List.of(trailingCatalog, noEvidenceCompetitor));
         stubSaveReturnsArgument();
 
         // Item name is the bare shared slug ("workspace"), not the full "Citrix Workspace App" —
@@ -2144,21 +2253,23 @@ class Stage1IdentificationServiceTest {
     void versionCoverageTieBreakTreatsAZeroMaxCatalogedMajorAsNoEvidence() {
         // Backlog item 36 (senior review 2026-08-30): maxCatalogedMajor <= 0 (e.g. a partition whose
         // only numeric leading run ever parsed to zero) must default to plausible exactly like a
-        // null maxCatalogedMajor does — it is not concrete evidence of anything, so it must never
-        // hard-demote a candidate that has no other tie-break signal to fall back on. Two same-slug,
-        // different-vendor candidates for the same reason as the test above — a single-candidate list
-        // can't tell "correctly not demoted" apart from "demoted but nothing else to lose to". The
-        // zero-evidence candidate is placed first and a second, fully-covering candidate is placed
-        // after it; both tie on every other ranking key, so the zero-evidence candidate wins by
-        // stable sort ONLY if the <= 0 case is correctly treated as no evidence.
+        // null maxCatalogedMajor does — it is not concrete evidence of anything, so it must never be
+        // punished as if it were concrete evidence the item's version is out of reach.
+        //
+        // REVISE item 2 (senior review, PR #51): restored to the original regression shape — a
+        // same-slug competitor with NO cataloged evidence at all (null maxCatalogedMajor), not a
+        // fully-covering one (see the sibling test above for why a fully-covering competitor no
+        // longer isolates anything once K2, versionCoverageRank, exists). With the {@code <= 0}
+        // case correctly treated as "no evidence", both candidates tie all the way down the key
+        // chain (K2, the ratio guard, vendor agreement, cataloged row count), so the zero-evidence
+        // candidate wins purely by stable sort, exactly as this test originally relied on.
         CpeDictionaryEntry zeroEvidence =
                 cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
         zeroEvidence.setMaxCatalogedMajor(0);
-        CpeDictionaryEntry coveringCandidate =
-                cpeEntry("cpe:2.3:a:othervendor:widget-tool:20.0.0:*:*:*:*:*:*:*", "widget-tool");
-        coveringCandidate.setMaxCatalogedMajor(20);
+        CpeDictionaryEntry noEvidenceCompetitor =
+                cpeEntry("cpe:2.3:a:othervendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(zeroEvidence, coveringCandidate));
+                .thenReturn(List.of(zeroEvidence, noEvidenceCompetitor));
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("widget-tool");
@@ -2167,7 +2278,8 @@ class Stage1IdentificationServiceTest {
         Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
 
         // Same version-rewriting caveat as above: only presence/vendor:product proves the
-        // zero-max-cataloged-major candidate was treated as no-evidence rather than demoted.
+        // zero-max-cataloged-major candidate was treated as no-evidence (UNKNOWN) rather than as bad
+        // as concrete NOT_COVERS evidence.
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:vendor:widget-tool:9.0.0:*:*:*:*:*:*:*");
     }
@@ -2323,6 +2435,205 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:avg:antivirus:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void unexplainedQueryTokenCountTieBreakPrefersTheCandidateThatExplainsEveryQueryToken() {
+        // Backlog item 89, K1 (senior review 2026-08-30, real job195/196 data): "Adobe Acrobat
+        // Reader DC" ties on exactSlug (neither candidate's bare product slug equals the full,
+        // vendor-prefixed query) and targetSw (no ecosystem here at all) between the correct
+        // acrobat_reader_dc and the wrong, shorter acrobat_reader — only K1 (how many query tokens
+        // neither the candidate's own text nor its CPE vendor explain) can tell them apart: "dc" is
+        // explained by acrobat_reader_dc's own title but by neither acrobat_reader's product/title
+        // nor Adobe's own short CPE vendor slug.
+        CpeDictionaryEntry acrobatReaderDc =
+                cpeEntry("cpe:2.3:a:adobe:acrobat_reader_dc:24.002.21005:*:*:*:*:*:*:*", "acrobat_reader_dc");
+        acrobatReaderDc.setTitle("Adobe Acrobat Reader DC 24.002.21005");
+        CpeDictionaryEntry acrobatReader =
+                cpeEntry("cpe:2.3:a:adobe:acrobat_reader:2020.006.20042:*:*:*:*:*:*:*", "acrobat_reader");
+        acrobatReader.setTitle("Adobe Acrobat Reader 2020.006.20042");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(acrobatReader, acrobatReaderDc));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Adobe Acrobat Reader DC");
+        item.setVendor("Adobe");
+        item.setVersion("24.002.21005");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:adobe:acrobat_reader_dc:24.002.21005:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void versionCoverageRankTieBreakPrefersTheCandidateWhoseCatalogueActuallyCoversTheItemsMajorVersion() {
+        // Backlog item 89, K2 (senior review 2026-08-30): Node.js 20.16.0 — both nodejs:node.js and
+        // joyent:node.js are exact-slug matches with no ecosystem/target_sw signal, so only K2 (a
+        // real cataloged major covering the item vs. no cataloged evidence at all) can distinguish
+        // them. Positioned ahead of versionPlausible/vendorAgrees in rankCpeCandidates's own key
+        // chain — see this test's PDF-XChange sibling below for why that ordering itself matters.
+        CpeDictionaryEntry nodejsNodeJs = cpeEntry("cpe:2.3:a:nodejs:node.js:20.16.0:*:*:*:*:*:*:*", "node.js");
+        nodejsNodeJs.setMaxCatalogedMajor(26);
+        CpeDictionaryEntry joyentNodeJs = cpeEntry("cpe:2.3:a:joyent:node.js:0.6.0:*:*:*:*:*:*:*", "node.js");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(joyentNodeJs, nodejsNodeJs));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Node.js");
+        item.setVersion("20.16.0");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:nodejs:node.js:20.16.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void versionCoverageRankTieBreakOutranksVendorAgreesEvenWhenTheItemsOwnVendorMatchesTheWrongCandidate() {
+        // Backlog item 89, K2 (senior review 2026-08-30): PDF-XChange Editor 10.2.1's item vendor
+        // field is literally "Tracker Software Products", which would make vendorAgrees favor the
+        // wrong, version-stale tracker-software:pdf-xchange_editor (cataloged only up to major 9)
+        // over the correct pdf-xchange:pdf-xchange_editor (cataloged up to major 10, actually covers
+        // the item) — this is exactly why K2 must sit ahead of vendorAgrees in rankCpeCandidates's
+        // own key chain, not merely somewhere in it.
+        CpeDictionaryEntry pdfXchangeVendor =
+                cpeEntry("cpe:2.3:a:pdf-xchange:pdf-xchange_editor:10.3.0.386:*:*:*:*:*:*:*", "pdf-xchange_editor");
+        pdfXchangeVendor.setMaxCatalogedMajor(10);
+        CpeDictionaryEntry trackerSoftwareVendor =
+                cpeEntry("cpe:2.3:a:tracker-software:pdf-xchange_editor:6.0.320.0:*:*:*:*:*:*:*", "pdf-xchange_editor");
+        trackerSoftwareVendor.setMaxCatalogedMajor(9);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(trackerSoftwareVendor, pdfXchangeVendor));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("PDF-XChange Editor");
+        item.setVendor("Tracker Software Products");
+        item.setVersion("10.2.1");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:pdf-xchange:pdf-xchange_editor:10.2.1:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void catalogedRowCountTieBreakPrefersTheVendorProductPairWithMoreCatalogedRows() {
+        // Backlog item 89, K3 (senior review 2026-08-30): Greenshot 1.3.290 ties getgreenshot:greenshot
+        // and greenshot:greenshot on every earlier key (both exact-slug, both no ecosystem/target_sw
+        // signal, both no version-coverage evidence, and both vendor-agree — "getgreenshot" and
+        // "greenshot" both containment-match the item's own "Greenshot" vendor field either way) —
+        // only K3, the final tie-break, can separate them: NVD actually catalogues 80 rows for
+        // getgreenshot:greenshot versus 1 for greenshot:greenshot.
+        CpeDictionaryEntry getgreenshotGreenshot =
+                cpeEntry("cpe:2.3:a:getgreenshot:greenshot:1.3.290:*:*:*:*:*:*:*", "greenshot");
+        getgreenshotGreenshot.setCatalogedRowCount(80);
+        CpeDictionaryEntry greenshotGreenshot =
+                cpeEntry("cpe:2.3:a:greenshot:greenshot:1.0:*:*:*:*:*:*:*", "greenshot");
+        greenshotGreenshot.setCatalogedRowCount(1);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(greenshotGreenshot, getgreenshotGreenshot));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Greenshot");
+        item.setVendor("Greenshot");
+        item.setVersion("1.3.290");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:getgreenshot:greenshot:1.3.290:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void relaxedContainmentPass2RecoversASingleTokenCandidateOnlyWhenTheStrictPassFoundNothingAtAll() {
+        // Backlog item 89 P2 (senior review 2026-08-30): "Metasploit Framework" against
+        // rapid7:metasploit — the strict pass rejects it (Direction 2's single-token-candidate rule
+        // requires the trailing "Framework" to be vendor-explained by "rapid7", which it isn't), and
+        // with no other candidate in the pool, the strict pass comes back completely empty. Only then
+        // does the relaxed second pass (same in-memory pool, no DB re-query) admit it. A relaxed-pass
+        // candidate must still go through the same forced-AI-verification-or-drop treatment a
+        // name-variant-derived candidate already gets — proven here by configuring an AI verdict and
+        // asserting the result actually went through METHOD_LLM_DISAMBIGUATE with the
+        // cpeCandidateVariantDerived measurement flag set, not a silent direct trust.
+        CpeDictionaryEntry rapid7Metasploit = cpeEntry("cpe:2.3:a:rapid7:metasploit:6.3.55:*:*:*:*:*:*:*", "metasploit");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(rapid7Metasploit));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.85,
+                        "usage text confirms this is the penetration testing framework", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Metasploit Framework");
+        item.setVendor("Rapid7");
+        item.setVersion("6.3.55");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:rapid7:metasploit:6.3.55:*:*:*:*:*:*:*");
+        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+    }
+
+    @Test
+    void relaxedContainmentPass2NeverFiresWhenTheStrictPassAlreadyFoundACandidate() {
+        // Control for the test above: when the strict pass already admits at least one candidate,
+        // the relaxed second pass must never run at all — proven by the ordinary no-Claude-key
+        // direct-trust path still succeeding without any AI call (a relaxed-pass admission would
+        // have forced AI verification and, with no key configured, dropped the candidate instead).
+        CpeDictionaryEntry exactSlug = cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(exactSlug));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("widget-tool"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+    }
+
+    @Test
+    void rejectsASingleTokenQueryMatchingOnlyALeadingPortionOfAMultiTokenCandidateWhenItemVendorDoesNotExplainTheLeftover() {
+        // Backlog item 89 P3 (senior review 2026-08-30): "Slack" (item vendor "Slack Technologies")
+        // against slack_archivebot_project:slack_archivebot — Direction 1 previously accepted this
+        // purely because "slack" aligns against the candidate's leading token, leaving "archivebot"
+        // completely unpoliced. The item's own vendor field doesn't explain "archivebot" either, so
+        // this must now be rejected, leaving the item UNIDENTIFIED (golden-300's own intended
+        // outcome for this control row) rather than misidentified as an unrelated Slack add-on.
+        CpeDictionaryEntry slackArchivebot =
+                cpeEntry("cpe:2.3:a:slack_archivebot_project:slack_archivebot:1.0:*:*:*:*:*:*:*", "slack_archivebot");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(slackArchivebot));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Slack");
+        item.setVendor("Slack Technologies");
+
+        assertThat(service(List.of()).identify(item, USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void keepsASingleTokenQueryMatchingALeadingPortionOfAMultiTokenCandidateWhenItemVendorExplainsTheLeftover() {
+        // Contrast with the Slack rejection above (backlog item 89 P3): when the item's own vendor
+        // field DOES explain the candidate's leftover trailing token, the match is still accepted —
+        // this is not a blanket ban on every single-token-query-vs-multi-token-candidate match, only
+        // on ones whose leftover the item's own vendor field can't account for.
+        CpeDictionaryEntry fooBar = cpeEntry("cpe:2.3:a:acme:foo_bar:2.0:*:*:*:*:*:*:*", "foo_bar");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(fooBar));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo");
+        item.setVendor("Foo Bar Inc");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:foo_bar:1.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
