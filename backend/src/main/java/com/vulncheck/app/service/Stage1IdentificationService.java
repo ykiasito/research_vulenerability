@@ -255,7 +255,7 @@ public class Stage1IdentificationService {
         // hit ever got a chance to shortcut anything. Kicking the local lookup off concurrently
         // doesn't skip either signal (both are still always gathered, same coverage as before),
         // it just removes the pure waiting-on-nothing between them.
-        CompletableFuture<List<CpeDictionaryEntry>> localCpeFuture = CompletableFuture.supplyAsync(
+        CompletableFuture<LocalCpeMatches> localCpeFuture = CompletableFuture.supplyAsync(
                 () -> localCpeLookup(item.getVendor(), item.getProductName(), item.getVersion()), registryLookupExecutor);
 
         RegistryResolution registryResolution = resolveRegistryMatch(item, userId, item.getProductName(), item.getVersion());
@@ -801,8 +801,11 @@ public class Stage1IdentificationService {
             return true;
         }
         String normalizedItemVendor = normalizeForContainment(itemVendor);
-        return explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getProduct(), false)
-                || explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getTitle(), true);
+        // Always the strict Direction 2 rule here (backlog item 89's pass-2 relaxation is
+        // Stage1's own candidate-pool retrieval concern via plausibleContainmentOnly, not this
+        // separate Fix5 corroboration check).
+        return explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getProduct(), false, true)
+                || explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getTitle(), true, true);
     }
 
     /**
@@ -956,10 +959,16 @@ public class Stage1IdentificationService {
     /**
      * Outcome of {@link #resolveCpeCandidates}: {@code variantDerived} tells {@link
      * #resolveCandidates} whether every entry in {@code candidates} came from the name-variant
-     * search ({@link #findByNameVariants}) rather than a literal dictionary/live-NVD hit. The two
-     * are never mixed within one result — the variant search only ever runs as a genuine last
-     * resort once both the literal search and the live NVD fallback have already come back empty —
-     * so a single flag for the whole list is enough; no per-entry provenance tracking is needed.
+     * search ({@link #findByNameVariants}) rather than a literal dictionary/live-NVD hit — OR
+     * (backlog item 89 P2) from {@link #plausibleContainmentOnly}'s relaxed second pass, which is
+     * just as much a mechanically-looser guess as a name-variant match and gets exactly the same
+     * "never auto-trust a lone AI-unverified candidate" treatment downstream (see {@link
+     * #resolveSingleCpeCandidate}). The two provenances are never mixed within one result — either
+     * the containment search's own first (strict) pass already succeeded, in which case this is
+     * {@code false} and nothing here is variant/pass2-derived at all, or it didn't, in which case
+     * every surviving candidate came from whichever single fallback (relaxed containment, or later
+     * the name-variant search) actually produced this list — so a single flag for the whole list is
+     * enough; no per-entry provenance tracking is needed.
      */
     private record CpeCandidateResult(List<CpeDictionaryEntry> candidates, boolean variantDerived) {
     }
@@ -1194,12 +1203,26 @@ public class Stage1IdentificationService {
      *  already discarded before the gate ever ran, the surviving {@code ietf:http} — merely untagged
      *  rather than actually correct — won by default. Ranking the full pool here and deferring the
      *  cut to after gating in {@link #rankAndGate} is what lets {@code hyper:http} survive to be
-     *  correctly chosen once the crates.io ecosystem context is known. */
-    private List<CpeDictionaryEntry> localCpeLookup(String vendor, String productName, String itemVersion) {
+     *  correctly chosen once the crates.io ecosystem context is known.
+     *
+     *  <p>Backlog item 89 P2: returns {@link LocalCpeMatches} rather than a bare list so {@link
+     *  #resolveCpeCandidates} can learn whether {@link #plausibleContainmentOnly}'s relaxed second
+     *  pass is what actually produced {@code candidates} here — see that method's own javadoc. */
+    private LocalCpeMatches localCpeLookup(String vendor, String productName, String itemVersion) {
         List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
                 productName, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
-        List<CpeDictionaryEntry> literalMatches = plausibleContainmentOnly(vendor, productName, pool);
-        return rankCpeCandidates(vendor, productName, literalMatches, Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
+        ContainmentResult containment = plausibleContainmentOnly(vendor, productName, pool);
+        List<CpeDictionaryEntry> ranked = rankCpeCandidates(
+                vendor, productName, containment.candidates(), Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
+        return new LocalCpeMatches(ranked, containment.usedRelaxedPass());
+    }
+
+    /** Backlog item 89 P2: pairs {@link #localCpeLookup}'s ranked candidate list with whether {@link
+     *  #plausibleContainmentOnly}'s relaxed second pass (rather than its strict first pass) is what
+     *  produced it — carried through {@link #resolveCpeCandidates} into {@link
+     *  CpeCandidateResult#variantDerived}, the same forced-AI-verification treatment a name-variant
+     *  match already gets. */
+    private record LocalCpeMatches(List<CpeDictionaryEntry> candidates, boolean usedRelaxedPass) {
     }
 
     /**
@@ -1308,11 +1331,17 @@ public class Stage1IdentificationService {
     /** Re-runs the same trigram-search + containment pipeline {@link #localCpeLookup} uses on the
      *  literal query, but against an alternate query string (a vendor-stripped remainder) instead of
      *  the item's raw product name. NOT used for the contraction/acronym direction — see {@link
-     *  #acronymVariantSearch}'s javadoc for why a synthetic acronym needs a stricter check. */
+     *  #acronymVariantSearch}'s javadoc for why a synthetic acronym needs a stricter check.
+     *
+     *  <p>Discards {@link ContainmentResult#usedRelaxedPass} deliberately: every candidate this
+     *  method can ever produce already gets forced AI verification regardless (see {@link
+     *  #resolveCpeCandidates}'s name-variant branch, which sets {@code variantDerived} unconditionally
+     *  whenever this whole search direction finds anything at all), so there is no separate flag to
+     *  carry through here. */
     private List<CpeDictionaryEntry> literalVariantSearch(String vendor, String variantQuery) {
         List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
                 variantQuery, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
-        return plausibleContainmentOnly(vendor, variantQuery, pool);
+        return plausibleContainmentOnly(vendor, variantQuery, pool).candidates();
     }
 
     /**
@@ -1821,7 +1850,7 @@ public class Stage1IdentificationService {
      */
     private CpeCandidateResult resolveCpeCandidates(String vendor, String productName, Long userId,
             Optional<String> registryEcosystem, Optional<String> registryPackageName,
-            List<CpeDictionaryEntry> localMatches, String itemVersion) {
+            LocalCpeMatches localMatches, String itemVersion) {
         // REVISE item 1: a registry-sourced item's own resolved package name — reduced to its one
         // meaningful segment the same way Fix 5's cpeCorroboratesRegistryPackage already does for a
         // Maven groupId:artifactId coordinate or a Go module path — is a strictly more precise exact
@@ -1831,9 +1860,13 @@ public class Stage1IdentificationService {
         String exactMatchQuery = registryPackageName.map(this::lastMeaningfulPackageSegment).orElse(productName);
         TargetSwContext targetSwContext = TargetSwContext.from(registryEcosystem, exactMatchQuery);
 
-        List<CpeDictionaryEntry> gatedLocalMatches = rankAndGate(vendor, localMatches, targetSwContext, itemVersion);
+        List<CpeDictionaryEntry> gatedLocalMatches = rankAndGate(vendor, localMatches.candidates(), targetSwContext, itemVersion);
         if (!gatedLocalMatches.isEmpty()) {
-            return new CpeCandidateResult(gatedLocalMatches, false);
+            // Backlog item 89 P2: localMatches.candidates() is either entirely strict-pass-derived or
+            // (only when the strict pass found nothing at all) entirely relaxed-pass-derived — see
+            // LocalCpeMatches's own javadoc — so localMatches's own flag is exactly right here,
+            // whether or not the target_sw gate above happened to drop some of those candidates.
+            return new CpeCandidateResult(gatedLocalMatches, localMatches.usedRelaxedPass());
         }
 
         String query = cpeQuery(vendor, productName);
@@ -1859,15 +1892,17 @@ public class Stage1IdentificationService {
         // Git", but re-querying the local dictionary with the original, longer string diluted
         // trigram similarity below both thresholds (0.276/0.286 vs. 0.3/0.6), silently discarding
         // the very entries the live call had just upserted a moment earlier.
-        List<CpeDictionaryEntry> refreshed =
-                rankAndGate(vendor, localCpeLookup(vendor, productName, itemVersion), targetSwContext, itemVersion);
+        LocalCpeMatches refreshedLocal = localCpeLookup(vendor, productName, itemVersion);
+        List<CpeDictionaryEntry> refreshed = rankAndGate(vendor, refreshedLocal.candidates(), targetSwContext, itemVersion);
         if (!refreshed.isEmpty()) {
-            return new CpeCandidateResult(refreshed, false);
+            return new CpeCandidateResult(refreshed, refreshedLocal.usedRelaxedPass());
         }
-        return new CpeCandidateResult(rankAndGate(vendor, plausibleContainmentOnly(vendor, productName,
+        ContainmentResult liveContainment = plausibleContainmentOnly(vendor, productName,
                 cpeDictionaryRepository.findFuzzyMatches(successfulQuery.get(),
-                        CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL)),
-                targetSwContext, itemVersion), false);
+                        CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL));
+        return new CpeCandidateResult(
+                rankAndGate(vendor, liveContainment.candidates(), targetSwContext, itemVersion),
+                liveContainment.usedRelaxedPass());
     }
 
     private String cpeQuery(String vendor, String productName) {
@@ -2008,8 +2043,20 @@ public class Stage1IdentificationService {
      * was. Requiring containment against the product name alone (vendor's role stays limited to
      * widening the initial pg_trgm search) closes this off without narrowing genuine matches,
      * since a real candidate's title/product almost always still contains the bare product name.
+     *
+     * <p>Backlog item 89 P2 (senior review 2026-08-30, real job195/196 data): when this strict first
+     * pass rejects every single candidate in {@code candidates}, retries the exact same in-memory
+     * pool (no DB re-query) with {@link #explainsQuery}'s Direction 2 trailing-vendor-explanation
+     * requirement relaxed — the rule that a single-token candidate matching at the very head of the
+     * query (nothing preceding it) must also have every *trailing* query token vendor-explained.
+     * That rule is what silently drops {@code Metasploit Framework} -&gt; {@code rapid7:metasploit}
+     * (the trailing "framework" isn't explained by rapid7's own CPE vendor), a genuine false
+     * negative once the strict pass finds nothing else to fall back on. Only ever fires when pass 1
+     * came back completely empty — never widens an already-nonempty strict result — and callers must
+     * treat a relaxed-pass result the same low-trust way {@link #findByNameVariants} results already
+     * are (see {@link ContainmentResult#usedRelaxedPass}).
      */
-    private List<CpeDictionaryEntry> plausibleContainmentOnly(String vendor, String query, List<CpeDictionaryEntry> candidates) {
+    private ContainmentResult plausibleContainmentOnly(String vendor, String query, List<CpeDictionaryEntry> candidates) {
         // A Go module path anchors on its VCS host ("github.com/gin-gonic/gin"), and that host
         // component has no CPE identity of its own — left in, it made containment matching anchor
         // on the near-universal "github"/"gitlab"/etc. vendor:vendor CPE entry instead of the
@@ -2019,10 +2066,24 @@ public class Stage1IdentificationService {
         // inventing a second one here.
         String normalizedQuery = normalizeForContainment(RegistryRoutingPolicy.stripHostPrefix(query));
         String normalizedItemVendor = normalizeForContainment(vendor);
-        return candidates.stream()
-                .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false)
-                        || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true))
+        List<CpeDictionaryEntry> strict = candidates.stream()
+                .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false, true)
+                        || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, true))
                 .toList();
+        if (!strict.isEmpty()) {
+            return new ContainmentResult(strict, false);
+        }
+        List<CpeDictionaryEntry> relaxed = candidates.stream()
+                .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false, false)
+                        || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, false))
+                .toList();
+        return new ContainmentResult(relaxed, !relaxed.isEmpty());
+    }
+
+    /** Backlog item 89 P2: outcome of {@link #plausibleContainmentOnly}. {@code usedRelaxedPass} is
+     *  {@code true} only when the strict first pass rejected every candidate and the relaxed second
+     *  pass is what actually produced {@code candidates} — see that method's own javadoc. */
+    private record ContainmentResult(List<CpeDictionaryEntry> candidates, boolean usedRelaxedPass) {
     }
 
     /**
@@ -2088,9 +2149,18 @@ public class Stage1IdentificationService {
      * way with the entire rest of the query silently unaccounted for. Requiring the trailing tokens
      * to be vendor-explained too, but only when there was no leading anchor to already vouch for the
      * match, closes this without re-breaking the AVG case (whose leading "avg" already proves it).
+     *
+     * <p>Backlog item 89 P2 (senior review 2026-08-30): {@code requireTrailingVendorExplanation}
+     * controls whether Direction 2's REVISE item 5 trailing-vendor-explanation rule (see above) is
+     * enforced at all — {@code true} everywhere except {@link #plausibleContainmentOnly}'s own
+     * relaxed second pass, which only ever runs after the strict pass (this flag {@code true})
+     * already rejected every candidate in the pool. Does not affect Direction 1, which stays
+     * unconditionally strict regardless of this flag — P2's relaxation is calibrated narrowly to the
+     * one rule it was measured against (Metasploit Framework -&gt; rapid7:metasploit), not a general
+     * loosening of every containment rule at once.
      */
     private boolean explainsQuery(String normalizedItemVendor, String normalizedQuery, CpeDictionaryEntry entry,
-            String candidateText, boolean isTitleField) {
+            String candidateText, boolean isTitleField, boolean requireTrailingVendorExplanation) {
         String candidate = normalizeForContainment(candidateText);
         if (normalizedQuery.isBlank() || candidate.isBlank()) {
             return false;
@@ -2157,7 +2227,11 @@ public class Stage1IdentificationService {
         // multi-token candidate, or one with a nonempty (and therefore already vendor-explained)
         // leading run, is left exactly as before — see this method's own javadoc for the AVG
         // AntiVirus Free / Windows Terminal contrast this distinction is calibrated against.
-        if (start == 0 && candidateTokens.size() == 1) {
+        //
+        // Backlog item 89 P2: this specific rule is what plausibleContainmentOnly's relaxed second
+        // pass exists to lift (requireTrailingVendorExplanation=false) — see this method's own
+        // javadoc for why only this rule, not the whole method, is relaxable.
+        if (requireTrailingVendorExplanation && start == 0 && candidateTokens.size() == 1) {
             for (int i = start + candidateTokens.size(); i < queryTokens.size(); i++) {
                 if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
                     return false;

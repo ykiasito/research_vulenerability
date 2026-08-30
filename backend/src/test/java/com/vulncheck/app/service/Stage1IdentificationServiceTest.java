@@ -2446,6 +2446,56 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void relaxedContainmentPass2RecoversASingleTokenCandidateOnlyWhenTheStrictPassFoundNothingAtAll() {
+        // Backlog item 89 P2 (senior review 2026-08-30): "Metasploit Framework" against
+        // rapid7:metasploit — the strict pass rejects it (Direction 2's single-token-candidate rule
+        // requires the trailing "Framework" to be vendor-explained by "rapid7", which it isn't), and
+        // with no other candidate in the pool, the strict pass comes back completely empty. Only then
+        // does the relaxed second pass (same in-memory pool, no DB re-query) admit it. A relaxed-pass
+        // candidate must still go through the same forced-AI-verification-or-drop treatment a
+        // name-variant-derived candidate already gets — proven here by configuring an AI verdict and
+        // asserting the result actually went through METHOD_LLM_DISAMBIGUATE with the
+        // cpeCandidateVariantDerived measurement flag set, not a silent direct trust.
+        CpeDictionaryEntry rapid7Metasploit = cpeEntry("cpe:2.3:a:rapid7:metasploit:6.3.55:*:*:*:*:*:*:*", "metasploit");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(rapid7Metasploit));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.85,
+                        "usage text confirms this is the penetration testing framework", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Metasploit Framework");
+        item.setVendor("Rapid7");
+        item.setVersion("6.3.55");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:rapid7:metasploit:6.3.55:*:*:*:*:*:*:*");
+        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+    }
+
+    @Test
+    void relaxedContainmentPass2NeverFiresWhenTheStrictPassAlreadyFoundACandidate() {
+        // Control for the test above: when the strict pass already admits at least one candidate,
+        // the relaxed second pass must never run at all — proven by the ordinary no-Claude-key
+        // direct-trust path still succeeding without any AI call (a relaxed-pass admission would
+        // have forced AI verification and, with no key configured, dropped the candidate instead).
+        CpeDictionaryEntry exactSlug = cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(exactSlug));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("widget-tool"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+    }
+
+    @Test
     void normalizeForContainmentStripsCpeBackslashEscapesSoAnEscapedDictionaryEntryStillMatchesTheUnescapedQuery() {
         // CPE 2.3 strings backslash-escape reserved characters (e.g. "notepad\+\+" for the product
         // segment of Notepad++'s own dictionary entry) — normalizeForContainment must strip those so
