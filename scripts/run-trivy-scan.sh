@@ -45,7 +45,13 @@
 #   (tester-confirmed), so requirements-dev.txt is invisible to a plain `trivy fs` scan
 #   pointed at the llm-service directory. Rather than skip it, we resolve what it
 #   actually installs (`-r requirements.txt` plus `pytest==8.3.3`) into a temp file
-#   named requirements.txt and scan that. Coverage was deemed worth the extra ~cheap
+#   named requirements.txt and scan that. Because that temp file is scanned under
+#   the same in-container path (/repo/requirements.txt) as the real
+#   requirements.txt scan, both scans' findings are given a Target label prefix
+#   ("requirements.txt" / "requirements-dev.txt", reusing the label mechanism
+#   from backlog item 62) before being merged, so `group_by(.Target)` in the
+#   report never fuses main-dependency and dev-only findings together
+#   (backlog item 66). Coverage was deemed worth the extra ~cheap
 #   scan even though pytest is dev/test-only and never ships in the runtime image
 #   (llm-service/Dockerfile only COPYs requirements.txt) — a compromised test
 #   dependency can still execute arbitrary code on a developer machine or CI runner
@@ -240,8 +246,21 @@ extract_findings() {
 
 # Source-manifest findings (always as fresh as the current source tree) —
 # these are the only findings ever formatted as a backlog candidate.
+# requirements.json and requirements-dev.json are both scans of a file that
+# Trivy sees as the same in-container path (/repo/requirements.txt — see the
+# requirements-dev.txt handling note above for why the dev scan has to be
+# named that way), so without a label they'd collide under the same .Target
+# once grouped, silently fusing main-dependency and dev-only findings into
+# one indistinguishable group (backlog item 66). pom.xml is a single,
+# unambiguous file and stays unlabeled.
+extract_findings "" "$SCAN_TMP_DIR/pom.json" \
+  > "$SCAN_TMP_DIR/pom-findings.json"
+extract_findings "requirements.txt" "$SCAN_TMP_DIR/requirements.json" \
+  > "$SCAN_TMP_DIR/requirements-findings.json"
+extract_findings "requirements-dev.txt" "$SCAN_TMP_DIR/requirements-dev.json" \
+  > "$SCAN_TMP_DIR/requirements-dev-findings.json"
 SOURCE_FLAT_JSON="$SCAN_TMP_DIR/source-findings.json"
-extract_findings "" "$SCAN_TMP_DIR/pom.json" "$SCAN_TMP_DIR/requirements.json" "$SCAN_TMP_DIR/requirements-dev.json" \
+jq -s 'add' "$SCAN_TMP_DIR/pom-findings.json" "$SCAN_TMP_DIR/requirements-findings.json" "$SCAN_TMP_DIR/requirements-dev-findings.json" \
   > "$SOURCE_FLAT_JSON"
 
 # Built-image findings (may lag behind source — see header note + staleness
