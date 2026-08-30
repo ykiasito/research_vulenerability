@@ -116,6 +116,15 @@ public class Stage1IdentificationService {
      */
     private static final int MIN_ANCHOR_LENGTH_FOR_INITIALISM_EXPANSION = 3;
     /**
+     * Backlog item 36 (senior review 2026-08-30): the multiplier {@link #versionCoverageIsPlausible}
+     * uses to decide whether an item's version is implausibly far beyond a candidate's catalogued
+     * history, rather than demoting on {@code itemMajor > maxCatalogedMajor} alone. Measured against
+     * golden-300: all 9 correct candidates whose catalogue trails the item's major version stay
+     * within a ratio of 1.60, while the genuinely wrong candidates this tie-break exists to demote
+     * (Audacity ratio 3.0, {@code puppet:cisco_ios} ratio 17) sit far beyond 2.
+     */
+    private static final int VERSION_COVERAGE_IMPLAUSIBILITY_RATIO = 2;
+    /**
      * Ecosystem -&gt; CPE {@code target_sw} value (REVISE item 5, senior review 2026-08-26 / job 36
      * root-cause): the platform-scoping word NVD uses in a CPE's {@code target_sw} segment for a
      * package originating from that ecosystem's own runtime, when a real CPE happens to be scoped
@@ -1531,17 +1540,31 @@ public class Stage1IdentificationService {
      * {@code target_sw_values} above — it aggregates every row in the (vendor, product) partition,
      * not just whichever subset happened to trigram-match this particular query column (see that
      * method's own comment).
+     *
+     * <p>Backlog item 36 (senior review 2026-08-30): that same "no evidence means always plausible"
+     * invariant also has to hold for the more common case where {@code maxCatalogedMajor} is real
+     * but simply lower than {@code itemMajor} — that fact alone is not evidence the candidate is
+     * wrong, because the NVD dictionary only ever catalogues the versions a CVE happened to name.
+     * A product with few CVEs filed against it stops accumulating catalogued versions long before
+     * its real-world release history does, and this is <em>not</em> rare: measured against
+     * golden-300's own 68 correct answers, 9 (13.2%) have a correct candidate whose {@code
+     * maxCatalogedMajor} is lower than the item's own major version (2026-08-30). That is why this
+     * method demotes only on a ratio (see {@link #VERSION_COVERAGE_IMPLAUSIBILITY_RATIO}) rather
+     * than on {@code itemMajor > maxCatalogedMajor} alone — a candidate whose catalogue simply
+     * trails a few majors behind is exactly the common, innocent case this ratio guard exists to
+     * keep plausible, reserving an actual demotion for when the item's version is implausibly far
+     * beyond anything ever catalogued for that (vendor, product) pair.
      */
     private boolean versionCoverageIsPlausible(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
-        if (maxCatalogedMajor == null) {
+        if (maxCatalogedMajor == null || maxCatalogedMajor <= 0) {
             return true;
         }
         java.util.OptionalInt itemMajor = leadingMajorVersion(itemVersion);
         if (itemMajor.isEmpty()) {
             return true;
         }
-        return itemMajor.getAsInt() <= maxCatalogedMajor;
+        return itemMajor.getAsInt() <= maxCatalogedMajor * VERSION_COVERAGE_IMPLAUSIBILITY_RATIO;
     }
 
     /** Parses the leading run of ASCII digits at the very start of {@code version} as an integer
