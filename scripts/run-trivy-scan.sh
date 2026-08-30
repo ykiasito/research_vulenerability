@@ -161,6 +161,19 @@ fi
 
 IMAGE_STALE_WARNINGS=()
 
+# The staleness check above only looks at the last COMMIT time of either
+# manifest — it has no way to see an uncommitted edit. If the manifest has
+# been edited but not yet committed, the check can wrongly call an image
+# "fresh" (or "stale") based on a commit timestamp that no longer reflects
+# the manifest's actual current content (backlog item 63, PR#27 2nd review).
+DIRTY_MANIFEST_STATUS="$(git -C "$REPO_ROOT" status --porcelain -- backend/pom.xml llm-service/requirements.txt || true)"
+if [[ -n "$DIRTY_MANIFEST_STATUS" ]]; then
+  DIRTY_MANIFEST_FILES="$(echo "$DIRTY_MANIFEST_STATUS" | awk '{print $2}' | paste -sd ', ' -)"
+  MANIFEST_DIRTY_WARNING="WARNING: uncommitted changes detected in dependency manifest(s): $DIRTY_MANIFEST_FILES. The staleness check above is based on each manifest's last COMMIT time and cannot see uncommitted edits, so its verdict on the built images may be inaccurate. Commit the manifest change (or verify manually) before trusting the staleness warning (or its absence) for that image."
+  log "$MANIFEST_DIRTY_WARNING"
+  IMAGE_STALE_WARNINGS+=("$MANIFEST_DIRTY_WARNING")
+fi
+
 scan_image() {
   local image_name="$1" out_file="$2"
   if docker image inspect "$image_name" >/dev/null 2>&1; then
@@ -277,13 +290,13 @@ SCAN_DATE="$(date -u +%Y-%m-%d)"
   echo
 
   if [[ "${#IMAGE_STALE_WARNINGS[@]}" -gt 0 ]]; then
-    echo "## ⚠ WARNING: built image(s) are older than the current source manifests"
+    echo "## ⚠ WARNING: built-image staleness verdict may not be trustworthy"
     echo
     for w in "${IMAGE_STALE_WARNINGS[@]}"; do
       echo "- $w"
     done
     echo
-    echo "The \"built Docker images\" section below reflects a stale build. Do NOT treat its counts as accurate until you rebuild (\`docker compose build\`) and re-run this script."
+    echo "The \"built Docker images\" section below may reflect a stale build, or the staleness check itself may be unreliable (e.g. an uncommitted manifest edit). Do NOT treat its counts as accurate until you commit any pending manifest changes, rebuild (\`docker compose build\`), and re-run this script."
     echo
   fi
 
