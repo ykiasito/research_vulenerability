@@ -15,7 +15,10 @@ import com.vulncheck.app.service.csaf.SiemensCsafSyncService.SyncResult;
 import com.vulncheck.app.service.cveorg.CveOrgSyncService;
 import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.osv.OsvSyncService;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Controller;
@@ -34,7 +37,14 @@ import org.springframework.web.bind.annotation.RequestParam;
  */
 @Controller
 @RequiredArgsConstructor
+@Slf4j
 public class AdminController {
+
+    /** Guards {@link #cpeFullSync}: the sync itself runs on its own daemon thread (see {@link
+     *  com.vulncheck.app.service.CpeDictionaryBootstrapSync}, whose startup-triggered sync shares
+     *  this same flag's spirit but not its instance), so this prevents a second admin click from
+     *  starting a concurrent full mirror while one is already in flight. */
+    private final AtomicBoolean cpeFullSyncRunning = new AtomicBoolean(false);
 
     private final NvdCpeSyncService nvdCpeSyncService;
     private final UserApiKeyService userApiKeyService;
@@ -61,6 +71,44 @@ public class AdminController {
                 .orElseThrow(() -> new IllegalStateException("認証済みユーザーが見つかりません。"));
         int count = nvdCpeSyncService.syncByKeyword(keyword, userApiKeyService.getNvdApiKey(user.getId()));
         model.addAttribute("result", count + " 件のCPEエントリを同期しました（キーワード: " + keyword + "）。");
+        return "admin/cpe-dictionary";
+    }
+
+    /**
+     * Starts a full (no keyword filter) NVD CPE Dictionary mirror on its own daemon thread and
+     * returns immediately — the sync itself takes hours (see {@link NvdCpeSyncService#syncAll}).
+     * Mirrors {@link com.vulncheck.app.service.CpeDictionaryBootstrapSync}'s startup-triggered
+     * sync (same unauthenticated {@code Optional.empty()} call, same daemon-thread-and-forget
+     * shape) so this and the {@code CPE_FULL_SYNC_ON_STARTUP} env var remain two independent ways
+     * to trigger the same underlying operation. Guarded by {@link #cpeFullSyncRunning} so a second
+     * click while one is already running doesn't start a concurrent mirror competing for the same
+     * NVD rate limit.
+     */
+    @PostMapping("/admin/cpe-dictionary/sync-all")
+    public String cpeFullSync(Model model) {
+        if (!cpeFullSyncRunning.compareAndSet(false, true)) {
+            model.addAttribute("result", "フル同期を開始できませんでした: 別のフル同期が既に実行中です。");
+            return "admin/cpe-dictionary";
+        }
+
+        Thread worker = new Thread(() -> {
+            log.warn("Full NVD CPE dictionary sync starting (admin-triggered) — this takes hours");
+            long startedAt = System.currentTimeMillis();
+            try {
+                int upserted = nvdCpeSyncService.syncAll(Optional.empty());
+                log.warn("Full NVD CPE dictionary sync (admin-triggered) finished: {} entries upserted in {} minutes",
+                        upserted, (System.currentTimeMillis() - startedAt) / 60000);
+            } catch (Exception e) {
+                log.error("Full NVD CPE dictionary sync (admin-triggered) aborted", e);
+            } finally {
+                cpeFullSyncRunning.set(false);
+            }
+        }, "cpe-full-sync-admin");
+        worker.setDaemon(true);
+        worker.start();
+
+        model.addAttribute("result",
+                "フル同期を開始しました。完了まで数時間かかります。バックエンドのログで進捗を確認してください。");
         return "admin/cpe-dictionary";
     }
 

@@ -12,12 +12,29 @@
 
 <p th:if="${result}" th:text="${result}" style="color: green;"></p>
 
+<h2>キーワード同期</h2>
 <form th:action="@{/admin/cpe-dictionary/sync}" method="post">
     <div>
         <label for="keyword">キーワード</label>
         <input type="text" id="keyword" name="keyword" required="required" placeholder="例: lodash"/>
     </div>
     <button type="submit">同期実行</button>
+</form>
+
+<h2>フル同期（全件, 数時間規模）</h2>
+<p style="color: #b00;">
+    キーワードで絞り込まず、NVD CPE Dictionary（約1.8M件）全体をローカルのCPE辞書へ反映します。
+    NVDのレート制限（APIキー無しで5req/30s）に律速されるため、<strong>完了まで数時間かかります</strong>。
+    ボタンを押すとサーバー側のバックグラウンドスレッドで開始し、このページはすぐに応答を返します
+    （リクエスト自体が数時間ブロックされるわけではありません）。進捗・完了はバックエンドのログで
+    確認してください。
+</p>
+<p style="color: #b00;">
+    既にフル同期が実行中の場合は、このボタンを押しても新たな同期は開始されません（二重起動防止）。
+</p>
+<form th:action="@{/admin/cpe-dictionary/sync-all}" method="post"
+      onsubmit="return confirm('フル同期を開始します（完了まで数時間かかります）。よろしいですか？');">
+    <button type="submit">フル同期を開始</button>
 </form>
 
 <p><a th:href="@{/}">ホームに戻る</a></p>
