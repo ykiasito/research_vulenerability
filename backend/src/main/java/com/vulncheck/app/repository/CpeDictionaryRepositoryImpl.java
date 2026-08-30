@@ -88,7 +88,6 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         String sql = "SELECT * FROM ("
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at "
                 + "FROM cpe_dictionary WHERE product ~ ? "
-                + "ORDER BY vendor, product, id"
                 // id tiebreaks at both levels for the same reason as collect() below: without "id"
                 // trailing the inner ORDER BY, DISTINCT ON's own representative-row choice per
                 // (vendor, product) group is unspecified, and without it trailing the outer
@@ -96,6 +95,7 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 // length), which row survives the LIMIT is unspecified too. Both matter here because
                 // Stage1's initialism matching ("vs code" -> visual_studio_code) reads directly off
                 // whichever row this query returns.
+                + "ORDER BY vendor, product, id"
                 + ") deduped ORDER BY length(product) ASC, id LIMIT ?";
         List<CpeDictionaryEntry> results = new java.util.ArrayList<>();
         jdbcTemplate.query(sql, rs -> {
@@ -237,7 +237,6 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at, "
                 + "similarity(" + column + ", ?) AS score "
                 + "FROM cpe_dictionary WHERE " + column + " % ? AND similarity(" + column + ", ?) > ? "
-                + "ORDER BY vendor, product, score DESC, id"
                 // Determinism here needs id as a tiebreaker at *both* levels, not just the outer one:
                 // DISTINCT ON (vendor, product) itself picks whichever row sorts first within each
                 // group under the inner ORDER BY, so without "id" trailing "score DESC" there, the
@@ -249,6 +248,7 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 // top-`limit` candidate pool no longer depends on Postgres's otherwise-unspecified
                 // return order for equal ORDER BY keys (docs/spec/task-backlog.md item 33) -- both
                 // tiebreaks together are what make this reproducible for the golden benchmark.
+                + "ORDER BY vendor, product, score DESC, id"
                 + ") deduped ORDER BY score DESC, id LIMIT ?"
                 + ") t "
                 + "CROSS JOIN LATERAL ("

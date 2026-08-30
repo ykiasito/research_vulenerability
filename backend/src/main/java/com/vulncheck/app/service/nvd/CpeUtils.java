@@ -56,9 +56,49 @@ public final class CpeUtils {
         return new VendorProduct(parts.get(3), parts.get(4));
     }
 
-    /** Builds a fully-qualified CPE 2.3 application string for the given vendor/product/version. */
+    /** Builds a fully-qualified CPE 2.3 {@code part=a} (application) string for the given
+     *  vendor/product/version — for callers that only ever deal with applications/libraries (e.g.
+     *  {@code BundledComponentResearchService}'s embedded-component adjudication, which has no
+     *  source CPE to read a real part from in the first place). Callers that already have an
+     *  identified product's own CPE string — and so can and should preserve its real part instead of
+     *  assuming {@code a} — must use {@link #buildCpe(String, String, String, String)} together with
+     *  {@link #parsePart}. */
     public static String buildCpe(String vendor, String product, String version) {
-        return "cpe:2.3:a:" + vendor + ":" + product + ":" + version + ":*:*:*:*:*:*:*";
+        return buildCpe("a", vendor, product, version);
+    }
+
+    /**
+     * Builds a fully-qualified CPE 2.3 string for the given part/vendor/product/version.
+     *
+     * <p>task-backlog item 39 (senior review, 2026-08-30, PR#16 review): {@link
+     * #buildCpe(String, String, String)} always hardcoded {@code part=a}, so {@code
+     * NvdVulnerabilitySource#find} rebuilding a candidate's CPE through it silently queried NVD for
+     * a CPE name that doesn't exist for {@code part=o} (operating system) products — job 194's
+     * {@code cpe:2.3:o:paloaltonetworks:pan-os:10.2.4} and {@code cpe:2.3:o:mikrotik:routeros:6.49.10}
+     * were both queried as {@code part=a}, so NVD (which only has {@code part=o} rows for them)
+     * returned zero results: a silent false negative, not a visible error. This overload takes the
+     * real part explicitly instead.
+     */
+    public static String buildCpe(String part, String vendor, String product, String version) {
+        return "cpe:2.3:" + part + ":" + vendor + ":" + product + ":" + version + ":*:*:*:*:*:*:*";
+    }
+
+    /**
+     * Extracts just the part segment (index 2 — {@code a}/{@code o}/{@code h}) from a CPE 2.3
+     * string, defaulting to {@code "a"} when the string is null or too short to carry one — the
+     * same permissive default {@link #buildCpe(String, String, String)} has always applied, so a
+     * caller that can't determine a real part (e.g. a malformed or absent source CPE) keeps behaving
+     * exactly as before this method existed.
+     */
+    public static String parsePart(String cpeString) {
+        if (cpeString == null) {
+            return "a";
+        }
+        List<String> parts = splitCpeSegments(cpeString);
+        if (parts.size() <= 2 || parts.get(2).isBlank()) {
+            return "a";
+        }
+        return parts.get(2);
     }
 
     /**
