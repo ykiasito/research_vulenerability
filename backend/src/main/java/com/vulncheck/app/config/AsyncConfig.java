@@ -36,20 +36,19 @@ public class AsyncConfig {
     }
 
     /**
-     * Fans out Stage1 Tier1's per-item registry lookups (up to 11 registries, since
-     * {@code ChocolateyRegistryClient} was added 2026-08-26) concurrently instead of one at a
-     * time. Measured live 2026-08-24: sequential fan-out cost 40-80s/item on a cold local CPE
-     * cache (each registry has its own several-second network round trip; a slow one like Maven
-     * Central/crates.io/NuGet serializes behind every other), which alone blew past a 100-items/1h
-     * (~36s/item) throughput target. Pool sized to the current registry count (11) so a single
-     * item's full fan-out can run genuinely in parallel, capping per-item registry time at roughly
-     * the slowest single registry's latency instead of the sum of all of them.
+     * Fans out Stage1 Tier1's per-item registry lookups (up to 10 registries) concurrently instead
+     * of one at a time. Measured live 2026-08-24: sequential fan-out cost 40-80s/item on a cold
+     * local CPE cache (each registry has its own several-second network round trip; a slow one
+     * like Maven Central/crates.io/NuGet serializes behind every other), which alone blew past a
+     * 100-items/1h (~36s/item) throughput target. Pool sized to the current registry count (10) so
+     * a single item's full fan-out can run genuinely in parallel, capping per-item registry time at
+     * roughly the slowest single registry's latency instead of the sum of all of them.
      */
     @Bean(name = "registryLookupExecutor")
     public Executor registryLookupExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(11);
-        executor.setMaxPoolSize(22);
+        executor.setCorePoolSize(10);
+        executor.setMaxPoolSize(20);
         executor.setQueueCapacity(200);
         executor.setThreadNamePrefix("registry-lookup-");
         executor.initialize();

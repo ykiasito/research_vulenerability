@@ -365,9 +365,8 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
     }
 
     /** Hard cap on how much of a {@code maven-metadata.xml} response is read into memory —
-     *  defense in depth, mirroring the same cap {@link ChocolateyRegistryClient} applies to its own
-     *  XML feed. A real {@code maven-metadata.xml}, even for a package with hundreds of releases
-     *  (e.g. commons-io), is a tiny fraction of this. */
+     *  defense in depth. A real {@code maven-metadata.xml}, even for a package with hundreds of
+     *  releases (e.g. commons-io), is a tiny fraction of this. */
     private static final int MAX_METADATA_RESPONSE_BYTES = 512 * 1024;
 
     /**
@@ -516,13 +515,10 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         return nodes.getLength() > 0 ? (Element) nodes.item(0) : null;
     }
 
-    /** XXE-hardened {@link DocumentBuilder}, same settings {@code ChocolateyRegistryClient} uses
-     *  for its own XML feed (DOCTYPE declarations disallowed outright, external general/parameter
-     *  entity resolution disabled) — kept as a small private copy here rather than a shared helper,
-     *  since introducing a new shared registry-client base type for two call sites is out of scope
-     *  for this fix. A fresh instance is built per call since {@code DocumentBuilderFactory}/{@code
-     *  DocumentBuilder} are not documented as thread-safe, and this runs under a concurrent
-     *  item-processing executor. */
+    /** XXE-hardened {@link DocumentBuilder} (DOCTYPE declarations disallowed outright, external
+     *  general/parameter entity resolution disabled). A fresh instance is built per call since
+     *  {@code DocumentBuilderFactory}/{@code DocumentBuilder} are not documented as thread-safe,
+     *  and this runs under a concurrent item-processing executor. */
     private DocumentBuilder newHardenedDocumentBuilder() throws ParserConfigurationException {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
@@ -551,8 +547,8 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         }
     }
 
-    /** Reads {@code in} fully into memory, failing fast if it would exceed {@code maxBytes} — same
-     *  defense-in-depth pattern {@code ChocolateyRegistryClient} uses for its own XML feed. */
+    /** Reads {@code in} fully into memory, failing fast if it would exceed {@code maxBytes} —
+     *  defense in depth against an unexpectedly large response. */
     private static byte[] readBounded(InputStream in, int maxBytes) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream(8192);
         byte[] buffer = new byte[8192];
