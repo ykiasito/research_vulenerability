@@ -1452,10 +1452,12 @@ public class Stage1IdentificationService {
      * being altogether absent. This fallback only ever fires in the latter situation (no {@code
      * part=a} row exists anywhere in the pool), which structurally cannot recreate the former: a
      * real application CPE, whenever one is present, is always preferred and this fallback never
-     * even runs. It's needed because some real, in-scope products — Cisco IOS XE, PAN-OS, MikroTik
-     * RouterOS — are catalogued by NVD only as {@code part=o}, with no {@code part=a} entry at all,
-     * so the pre-fix gate silently discarded the only candidate that could ever have identified
-     * them. {@code part=h} (hardware) stays excluded unconditionally either way — the job 37
+     * even runs. It's needed because some real, in-scope products — PAN-OS, MikroTik RouterOS — are
+     * catalogued by NVD only as {@code part=o}, with no {@code part=a} entry at all (measured
+     * 2026-08-30: 779 PAN-OS rows and 744 MikroTik RouterOS rows in the dictionary, zero
+     * {@code part=a} among either), so the pre-fix gate silently discarded the only candidate that
+     * could ever have identified them. {@code part=h} (hardware) stays excluded unconditionally
+     * either way — the job 37
      * incident was specifically about hardware, and network-device software update advisories are
      * never filed against hardware CPEs.
      *

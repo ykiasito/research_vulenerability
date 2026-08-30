@@ -2105,15 +2105,30 @@ class Stage1IdentificationServiceTest {
         // name) must NOT be demoted, unlike the genuinely-wrong-vendor Audacity case above. Uses the
         // real golden-300 Citrix Workspace App measurement: item major 2405 vs. the correct
         // candidate's cataloged major 2006 is a ratio of ~1.20, comfortably under
-        // VERSION_COVERAGE_IMPLAUSIBILITY_RATIO's threshold of 2.
+        // VERSION_COVERAGE_IMPLAUSIBILITY_RATIO's threshold of 2. Two same-slug, different-vendor
+        // candidates (mirrors the "prefers" test above), because a single-candidate list makes the
+        // sort a no-op and the test would pass identically whether or not the trailing candidate was
+        // demoted. The trailing candidate is placed first and a second, fully-covering candidate is
+        // placed after it — both tie on every other ranking key (exact slug match, no ecosystem to
+        // gate target_sw on, blank item vendor), so the trailing candidate wins by stable sort ONLY
+        // if it is correctly left un-demoted; if the ratio guard wrongly demoted it, the covering
+        // candidate would sort first instead and this assertion would fail.
         CpeDictionaryEntry trailingCatalog =
                 cpeEntry("cpe:2.3:a:citrix:workspace:2006.0:*:*:*:*:*:*:*", "workspace");
         trailingCatalog.setMaxCatalogedMajor(2006);
+        CpeDictionaryEntry coveringCandidate =
+                cpeEntry("cpe:2.3:a:othervendor:workspace:3000.0:*:*:*:*:*:*:*", "workspace");
+        coveringCandidate.setMaxCatalogedMajor(3000);
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(trailingCatalog));
+                .thenReturn(List.of(trailingCatalog, coveringCandidate));
         stubSaveReturnsArgument();
 
-        ResearchJobItem item = item("Citrix Workspace App");
+        // Item name is the bare shared slug ("workspace"), not the full "Citrix Workspace App" —
+        // with two different-vendor candidates in play, a fuller query name would make
+        // plausibleContainmentOnly's leading-leftover-token check depend on which vendor happens to
+        // explain "citrix", which isn't what this test is about; the bare-slug name keeps both
+        // candidates equally admitted so the tie-break under test is the only thing deciding.
+        ResearchJobItem item = item("workspace");
         item.setVersion("2405.0");
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
@@ -2130,11 +2145,20 @@ class Stage1IdentificationServiceTest {
         // Backlog item 36 (senior review 2026-08-30): maxCatalogedMajor <= 0 (e.g. a partition whose
         // only numeric leading run ever parsed to zero) must default to plausible exactly like a
         // null maxCatalogedMajor does — it is not concrete evidence of anything, so it must never
-        // hard-demote a candidate that has no other tie-break signal to fall back on.
-        CpeDictionaryEntry candidate = cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
-        candidate.setMaxCatalogedMajor(0);
+        // hard-demote a candidate that has no other tie-break signal to fall back on. Two same-slug,
+        // different-vendor candidates for the same reason as the test above — a single-candidate list
+        // can't tell "correctly not demoted" apart from "demoted but nothing else to lose to". The
+        // zero-evidence candidate is placed first and a second, fully-covering candidate is placed
+        // after it; both tie on every other ranking key, so the zero-evidence candidate wins by
+        // stable sort ONLY if the <= 0 case is correctly treated as no evidence.
+        CpeDictionaryEntry zeroEvidence =
+                cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
+        zeroEvidence.setMaxCatalogedMajor(0);
+        CpeDictionaryEntry coveringCandidate =
+                cpeEntry("cpe:2.3:a:othervendor:widget-tool:20.0.0:*:*:*:*:*:*:*", "widget-tool");
+        coveringCandidate.setMaxCatalogedMajor(20);
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(candidate));
+                .thenReturn(List.of(zeroEvidence, coveringCandidate));
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("widget-tool");
@@ -2181,21 +2205,24 @@ class Stage1IdentificationServiceTest {
 
     @Test
     void fallsBackToAnOperatingSystemPartCpeWhenNoApplicationPartCandidateExistsAtAll() {
-        // golden-300 fix (2026-08-29, item 3): Cisco IOS XE / PAN-OS / MikroTik RouterOS are
-        // catalogued by NVD only as part=o (operating system), with no part=a entry at all — the
-        // pre-fix part=a-only gate silently discarded the only candidate that could ever have
-        // identified them. Safe because the fallback only ever engages when the pool has zero
-        // part=a rows (see the control test below for the case where one does exist).
-        CpeDictionaryEntry ciscoIosXe = cpeEntry("cpe:2.3:o:cisco:ios_xe:17.3:*:*:*:*:*:*:*", "ios_xe");
-        ciscoIosXe.setTitle("Cisco IOS XE 17.3");
+        // golden-300 fix (2026-08-29, item 3): PAN-OS / MikroTik RouterOS are catalogued by NVD only
+        // as part=o (operating system), with no part=a entry at all (measured 2026-08-30: 779 PAN-OS
+        // rows and 744 MikroTik RouterOS rows, zero part=a among either — senior review caught an
+        // earlier version of this comment wrongly including Cisco IOS XE, which the dictionary
+        // actually catalogues with 26 part=a rows alongside its 1,089 part=o rows) — the pre-fix
+        // part=a-only gate silently discarded the only candidate that could ever have identified
+        // them. Safe because the fallback only ever engages when the pool has zero part=a rows (see
+        // the control test below for the case where one does exist).
+        CpeDictionaryEntry panOs = cpeEntry("cpe:2.3:o:paloaltonetworks:pan-os:10.2:*:*:*:*:*:*:*", "pan-os");
+        panOs.setTitle("Palo Alto Networks PAN-OS 10.2");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(ciscoIosXe));
+                .thenReturn(List.of(panOs));
         stubSaveReturnsArgument();
 
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Cisco IOS XE"), USER_ID);
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("PAN-OS"), USER_ID);
 
         assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:o:cisco:ios_xe:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:o:paloaltonetworks:pan-os:1.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
