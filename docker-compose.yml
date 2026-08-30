@@ -53,6 +53,10 @@ services:
       # default; only raise for a throwaway diagnostic job made entirely of AI-eligible items (a
       # real job's items are mostly free static Tier1 matches, so the default holds there).
       APP_COST_CAP_PER_ITEM_USD: ${APP_COST_CAP_PER_ITEM_USD:-0.005}
+      # Thymeleaf template cache (see application.yml). Enabled by default; set to false in .env
+      # only for a deliberate template-focused debugging session (templates are baked into the
+      # image and never edited live in the running container otherwise).
+      THYMELEAF_CACHE_ENABLED: ${THYMELEAF_CACHE_ENABLED:-true}
     ports:
       - "8080:8080"
     volumes:
