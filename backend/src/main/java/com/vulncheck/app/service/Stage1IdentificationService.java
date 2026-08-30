@@ -255,7 +255,7 @@ public class Stage1IdentificationService {
         // hit ever got a chance to shortcut anything. Kicking the local lookup off concurrently
         // doesn't skip either signal (both are still always gathered, same coverage as before),
         // it just removes the pure waiting-on-nothing between them.
-        CompletableFuture<List<CpeDictionaryEntry>> localCpeFuture = CompletableFuture.supplyAsync(
+        CompletableFuture<LocalCpeMatches> localCpeFuture = CompletableFuture.supplyAsync(
                 () -> localCpeLookup(item.getVendor(), item.getProductName(), item.getVersion()), registryLookupExecutor);
 
         RegistryResolution registryResolution = resolveRegistryMatch(item, userId, item.getProductName(), item.getVersion());
@@ -801,8 +801,11 @@ public class Stage1IdentificationService {
             return true;
         }
         String normalizedItemVendor = normalizeForContainment(itemVendor);
-        return explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getProduct(), false)
-                || explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getTitle(), true);
+        // Always the strict Direction 2 rule here (backlog item 89's pass-2 relaxation is
+        // Stage1's own candidate-pool retrieval concern via plausibleContainmentOnly, not this
+        // separate Fix5 corroboration check).
+        return explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getProduct(), false, true)
+                || explainsQuery(normalizedItemVendor, normalizedRegistryQuery, candidate, candidate.getTitle(), true, true);
     }
 
     /**
@@ -956,10 +959,16 @@ public class Stage1IdentificationService {
     /**
      * Outcome of {@link #resolveCpeCandidates}: {@code variantDerived} tells {@link
      * #resolveCandidates} whether every entry in {@code candidates} came from the name-variant
-     * search ({@link #findByNameVariants}) rather than a literal dictionary/live-NVD hit. The two
-     * are never mixed within one result — the variant search only ever runs as a genuine last
-     * resort once both the literal search and the live NVD fallback have already come back empty —
-     * so a single flag for the whole list is enough; no per-entry provenance tracking is needed.
+     * search ({@link #findByNameVariants}) rather than a literal dictionary/live-NVD hit — OR
+     * (backlog item 89 P2) from {@link #plausibleContainmentOnly}'s relaxed second pass, which is
+     * just as much a mechanically-looser guess as a name-variant match and gets exactly the same
+     * "never auto-trust a lone AI-unverified candidate" treatment downstream (see {@link
+     * #resolveSingleCpeCandidate}). The two provenances are never mixed within one result — either
+     * the containment search's own first (strict) pass already succeeded, in which case this is
+     * {@code false} and nothing here is variant/pass2-derived at all, or it didn't, in which case
+     * every surviving candidate came from whichever single fallback (relaxed containment, or later
+     * the name-variant search) actually produced this list — so a single flag for the whole list is
+     * enough; no per-entry provenance tracking is needed.
      */
     private record CpeCandidateResult(List<CpeDictionaryEntry> candidates, boolean variantDerived) {
     }
@@ -1194,12 +1203,26 @@ public class Stage1IdentificationService {
      *  already discarded before the gate ever ran, the surviving {@code ietf:http} — merely untagged
      *  rather than actually correct — won by default. Ranking the full pool here and deferring the
      *  cut to after gating in {@link #rankAndGate} is what lets {@code hyper:http} survive to be
-     *  correctly chosen once the crates.io ecosystem context is known. */
-    private List<CpeDictionaryEntry> localCpeLookup(String vendor, String productName, String itemVersion) {
+     *  correctly chosen once the crates.io ecosystem context is known.
+     *
+     *  <p>Backlog item 89 P2: returns {@link LocalCpeMatches} rather than a bare list so {@link
+     *  #resolveCpeCandidates} can learn whether {@link #plausibleContainmentOnly}'s relaxed second
+     *  pass is what actually produced {@code candidates} here — see that method's own javadoc. */
+    private LocalCpeMatches localCpeLookup(String vendor, String productName, String itemVersion) {
         List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
                 productName, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
-        List<CpeDictionaryEntry> literalMatches = plausibleContainmentOnly(vendor, productName, pool);
-        return rankCpeCandidates(vendor, productName, literalMatches, Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
+        ContainmentResult containment = plausibleContainmentOnly(vendor, productName, pool);
+        List<CpeDictionaryEntry> ranked = rankCpeCandidates(
+                vendor, productName, containment.candidates(), Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
+        return new LocalCpeMatches(ranked, containment.usedRelaxedPass());
+    }
+
+    /** Backlog item 89 P2: pairs {@link #localCpeLookup}'s ranked candidate list with whether {@link
+     *  #plausibleContainmentOnly}'s relaxed second pass (rather than its strict first pass) is what
+     *  produced it — carried through {@link #resolveCpeCandidates} into {@link
+     *  CpeCandidateResult#variantDerived}, the same forced-AI-verification treatment a name-variant
+     *  match already gets. */
+    private record LocalCpeMatches(List<CpeDictionaryEntry> candidates, boolean usedRelaxedPass) {
     }
 
     /**
@@ -1308,11 +1331,17 @@ public class Stage1IdentificationService {
     /** Re-runs the same trigram-search + containment pipeline {@link #localCpeLookup} uses on the
      *  literal query, but against an alternate query string (a vendor-stripped remainder) instead of
      *  the item's raw product name. NOT used for the contraction/acronym direction — see {@link
-     *  #acronymVariantSearch}'s javadoc for why a synthetic acronym needs a stricter check. */
+     *  #acronymVariantSearch}'s javadoc for why a synthetic acronym needs a stricter check.
+     *
+     *  <p>Discards {@link ContainmentResult#usedRelaxedPass} deliberately: every candidate this
+     *  method can ever produce already gets forced AI verification regardless (see {@link
+     *  #resolveCpeCandidates}'s name-variant branch, which sets {@code variantDerived} unconditionally
+     *  whenever this whole search direction finds anything at all), so there is no separate flag to
+     *  carry through here. */
     private List<CpeDictionaryEntry> literalVariantSearch(String vendor, String variantQuery) {
         List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
                 variantQuery, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
-        return plausibleContainmentOnly(vendor, variantQuery, pool);
+        return plausibleContainmentOnly(vendor, variantQuery, pool).candidates();
     }
 
     /**
@@ -1479,6 +1508,38 @@ public class Stage1IdentificationService {
      * single row at version 1.2.6 (max cataloged major 1), while the item's own version is in the
      * 3.7.x line — concrete numeric evidence that candidate's catalogue coverage cannot possibly
      * be current, which a same-named-vendor overlap alone never carries.
+     *
+     * <p>Backlog item 89 (senior review 2026-08-30, real job195/196 data): three more keys inserted
+     * into the chain — {@code exactSlug -> targetSw -> K1 -> K2 -> versionPlausible -> vendorAgrees
+     * -> K3} — to close a further four golden-300 misses without any AI spend:
+     * <ul>
+     *   <li><b>K1</b> ({@link #unexplainedQueryTokenCount}, ascending): how many of the query's own
+     *       tokens neither the candidate's own text nor its CPE vendor account for. Fixes Adobe
+     *       Acrobat Reader DC — {@code exactSlug}/{@code targetSw} tie between {@code
+     *       adobe:acrobat_reader_dc} and {@code adobe:acrobat_reader} (the query "Adobe Acrobat
+     *       Reader DC" doesn't equal either candidate's bare product slug), but only the wrong,
+     *       shorter candidate leaves "dc" unexplained.</li>
+     *   <li><b>K2</b> ({@link #versionCoverageRank}, ascending {@code COVERS(0) < UNKNOWN(1) <
+     *       NOT_COVERS(2)}): a 3-value sibling of {@code versionPlausible}'s boolean soft check,
+     *       inserted <em>ahead of</em> {@code vendorAgrees} rather than merely near it, specifically
+     *       because {@code vendorAgrees} would otherwise win these ties for the wrong reason — e.g.
+     *       PDF-XChange Editor 10.2.1's item {@code vendor} field is literally "Tracker Software
+     *       Products", which makes {@code vendorAgrees} favor the wrong, version-stale {@code
+     *       tracker-software:pdf-xchange_editor} (max cataloged major 9) over the correct {@code
+     *       pdf-xchange:pdf-xchange_editor} (max cataloged major 10, actually covers the item).
+     *       Fixes Node.js the same way ({@code nodejs:node.js} covers major 20, {@code
+     *       joyent:node.js} has no cataloged evidence at all).</li>
+     *   <li><b>K3</b> ({@link #catalogedRowCount}, descending, the final tie-break): Greenshot
+     *       1.3.290 ties {@code getgreenshot:greenshot} and {@code greenshot:greenshot} on every key
+     *       above (both are exact-slug, both contain "greenshot" in their own CPE vendor so {@code
+     *       vendorAgrees} is true for both), leaving only which pair NVD has actually catalogued 80
+     *       rows for versus 1 to break the tie — a real coin-flip on {@code id} otherwise.</li>
+     * </ul>
+     * Performance (required by the same backlog item): every key above is now computed exactly once
+     * per candidate, into a {@link RankedCandidate} record, before sorting — not recomputed inside
+     * the {@link java.util.Comparator} on every one of the O(n log n) comparisons the way the
+     * pre-existing keys always were. K1 in particular re-tokenizes text, so leaving it comparator-side
+     * would have made the existing re-normalization cost newly visible at this candidate-pool size.
      */
     private List<CpeDictionaryEntry> rankCpeCandidates(String vendor, String exactMatchQuery,
             List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit, String itemVersion) {
@@ -1512,17 +1573,48 @@ public class Stage1IdentificationService {
 
         String normalizedVendor = normalizeForContainment(vendor);
         String normalizedExactMatchQuery = normalizeForContainment(exactMatchQuery);
-        return bestPerProduct.values().stream()
-                // Stable sort: preserves the underlying trigram ranking within each group, so this
-                // only promotes exact-slug-matching / target_sw-matching / vendor-agreeing candidates
-                // rather than re-ordering arbitrarily.
-                .sorted(java.util.Comparator
-                        .comparing((CpeDictionaryEntry e) -> exactProductSlugMatch(normalizedExactMatchQuery, e) ? 0 : 1)
-                        .thenComparing(e -> targetSwMatchesEcosystem(e, mappedTargetSw) ? 0 : 1)
-                        .thenComparing(e -> versionCoverageIsPlausible(e, itemVersion) ? 0 : 1)
-                        .thenComparing(e -> vendorAgrees(normalizedVendor, e) ? 0 : 1))
-                .limit(limit)
+        List<RankedCandidate> ranked = bestPerProduct.values().stream()
+                .map(entry -> new RankedCandidate(
+                        entry,
+                        exactProductSlugMatch(normalizedExactMatchQuery, entry),
+                        targetSwMatchesEcosystem(entry, mappedTargetSw),
+                        unexplainedQueryTokenCount(normalizedExactMatchQuery, entry),
+                        versionCoverageRank(entry, itemVersion),
+                        versionCoverageIsPlausible(entry, itemVersion),
+                        vendorAgrees(normalizedVendor, entry),
+                        catalogedRowCount(entry)))
                 .toList();
+        // Stable sort: preserves the underlying trigram ranking within each group (RankedCandidate
+        // is built directly off bestPerProduct.values()'s own already-ordered stream), so this only
+        // promotes candidates that actually win one of the keys below rather than re-ordering
+        // arbitrarily.
+        return ranked.stream()
+                .sorted(java.util.Comparator
+                        .comparing((RankedCandidate c) -> c.exactSlugMatch() ? 0 : 1)
+                        .thenComparing(c -> c.targetSwMatch() ? 0 : 1)
+                        .thenComparingInt(RankedCandidate::unexplainedTokenCount)
+                        .thenComparingInt(RankedCandidate::versionCoverageRank)
+                        .thenComparing(c -> c.versionPlausible() ? 0 : 1)
+                        .thenComparing(c -> c.vendorAgrees() ? 0 : 1)
+                        .thenComparing(java.util.Comparator.comparingInt(RankedCandidate::catalogedRowCount).reversed()))
+                .limit(limit)
+                .map(RankedCandidate::entry)
+                .toList();
+    }
+
+    /** Backlog item 89: every {@link #rankCpeCandidates} comparison key, computed exactly once per
+     *  candidate — see that method's own javadoc for what each field means and why precomputing them
+     *  into a record (rather than recomputing inside the {@link java.util.Comparator} on every
+     *  comparison) matters here. */
+    private record RankedCandidate(
+            CpeDictionaryEntry entry,
+            boolean exactSlugMatch,
+            boolean targetSwMatch,
+            int unexplainedTokenCount,
+            int versionCoverageRank,
+            boolean versionPlausible,
+            boolean vendorAgrees,
+            int catalogedRowCount) {
     }
 
     /**
@@ -1650,6 +1742,77 @@ public class Stage1IdentificationService {
                 : String.valueOf(entry.getCpeString());
     }
 
+    /**
+     * Backlog item 89, K1 ranking tie-break: how many of {@code normalizedExactMatchQuery}'s own
+     * tokens are accounted for by neither {@code entry}'s own text (product or title) nor its CPE
+     * vendor. Deliberately a fresh method rather than a change to {@link #explainsQuery} — this asks
+     * a different question ("how much of the query is unaccounted for", a graded signal for ranking
+     * among already-admitted candidates) from what {@link #explainsQuery} answers ("does this
+     * candidate explain the query at all", a boolean admission gate) — but reuses that method's own
+     * {@link #tokenize}/{@link #vendorExplains} building blocks rather than inventing new ones.
+     *
+     * <p>Checking both {@code product} and {@code title} tokens (not product alone) matters for the
+     * Adobe Acrobat Reader DC case this key was built for: the query "Adobe Acrobat Reader DC"
+     * includes the vendor word "Adobe", which {@code acrobat_reader_dc}'s bare product slug doesn't
+     * contain, but a real dictionary title ("Adobe Acrobat Reader DC") does — checking product alone
+     * would wrongly count "adobe" as unexplained for the *correct* candidate too, losing the signal
+     * that actually separates it from the wrong, shorter {@code acrobat_reader} candidate (which
+     * leaves "dc" unexplained by either its product or its title, and "dc" is too short/unrelated
+     * for {@link #vendorExplains} to credit to Adobe's own CPE vendor either).
+     */
+    private int unexplainedQueryTokenCount(String normalizedExactMatchQuery, CpeDictionaryEntry entry) {
+        List<String> queryTokens = tokenize(normalizedExactMatchQuery);
+        if (queryTokens.isEmpty()) {
+            return 0;
+        }
+        List<String> productTokens = tokenize(normalizeForContainment(entry.getProduct()));
+        List<String> titleTokens = tokenize(normalizeForContainment(entry.getTitle()));
+        String normalizedCpeVendor = normalizeForContainment(cpeVendorOf(entry));
+        int unexplained = 0;
+        for (String token : queryTokens) {
+            boolean explainedByCandidateText = productTokens.contains(token) || titleTokens.contains(token);
+            if (!explainedByCandidateText && !vendorExplains(normalizedCpeVendor, token)) {
+                unexplained++;
+            }
+        }
+        return unexplained;
+    }
+
+    /**
+     * Backlog item 89, K2 ranking tie-break: a 3-value sibling of {@link #versionCoverageIsPlausible}
+     * — {@code COVERS(0)} when {@code entry}'s cataloged history already reaches at least the item's
+     * own major version, {@code UNKNOWN(1)} when there's no usable evidence either way (mirrors that
+     * method's own "no evidence means always plausible" cases exactly), {@code NOT_COVERS(2)}
+     * otherwise. Never a hard reject (same as {@code versionCoverageIsPlausible}) — purely a ranking
+     * order among already-admitted candidates, and deliberately placed ahead of {@code vendorAgrees}
+     * in {@link #rankCpeCandidates}'s own key chain (see that method's own javadoc for why: a raw
+     * boolean {@code versionCoverageIsPlausible} tie-break sitting only after {@code vendorAgrees}
+     * isn't enough on its own here, because {@code vendorAgrees} itself would otherwise pick the
+     * wrong, version-stale candidate first for PDF-XChange Editor).
+     */
+    private int versionCoverageRank(CpeDictionaryEntry entry, String itemVersion) {
+        Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
+        if (maxCatalogedMajor == null || maxCatalogedMajor <= 0) {
+            return 1; // UNKNOWN — no cataloged evidence at all.
+        }
+        java.util.OptionalInt itemMajor = leadingMajorVersion(itemVersion);
+        if (itemMajor.isEmpty()) {
+            return 1; // UNKNOWN — item's own version isn't parseable.
+        }
+        return itemMajor.getAsInt() <= maxCatalogedMajor ? 0 : 2; // COVERS : NOT_COVERS
+    }
+
+    /** Backlog item 89, K3 ranking tie-break (the final one in the chain): {@code entry}'s own
+     *  {@link CpeDictionaryEntry#getCatalogedRowCount()}, defaulting to 0 when a candidate wasn't
+     *  sourced from the {@code collect()} query that populates it (e.g. the name-variant search) —
+     *  the same "no evidence" default {@link #catalogedRowCount} treats as the lowest priority, never
+     *  a hard reject. See {@link #rankCpeCandidates}'s own javadoc for the Greenshot tie this exists
+     *  to break. */
+    private int catalogedRowCount(CpeDictionaryEntry entry) {
+        Integer count = entry.getCatalogedRowCount();
+        return count == null ? 0 : count;
+    }
+
     private boolean vendorAgrees(String normalizedVendor, CpeDictionaryEntry entry) {
         if (normalizedVendor.isBlank()) {
             return false;
@@ -1687,7 +1850,7 @@ public class Stage1IdentificationService {
      */
     private CpeCandidateResult resolveCpeCandidates(String vendor, String productName, Long userId,
             Optional<String> registryEcosystem, Optional<String> registryPackageName,
-            List<CpeDictionaryEntry> localMatches, String itemVersion) {
+            LocalCpeMatches localMatches, String itemVersion) {
         // REVISE item 1: a registry-sourced item's own resolved package name — reduced to its one
         // meaningful segment the same way Fix 5's cpeCorroboratesRegistryPackage already does for a
         // Maven groupId:artifactId coordinate or a Go module path — is a strictly more precise exact
@@ -1697,9 +1860,13 @@ public class Stage1IdentificationService {
         String exactMatchQuery = registryPackageName.map(this::lastMeaningfulPackageSegment).orElse(productName);
         TargetSwContext targetSwContext = TargetSwContext.from(registryEcosystem, exactMatchQuery);
 
-        List<CpeDictionaryEntry> gatedLocalMatches = rankAndGate(vendor, localMatches, targetSwContext, itemVersion);
+        List<CpeDictionaryEntry> gatedLocalMatches = rankAndGate(vendor, localMatches.candidates(), targetSwContext, itemVersion);
         if (!gatedLocalMatches.isEmpty()) {
-            return new CpeCandidateResult(gatedLocalMatches, false);
+            // Backlog item 89 P2: localMatches.candidates() is either entirely strict-pass-derived or
+            // (only when the strict pass found nothing at all) entirely relaxed-pass-derived — see
+            // LocalCpeMatches's own javadoc — so localMatches's own flag is exactly right here,
+            // whether or not the target_sw gate above happened to drop some of those candidates.
+            return new CpeCandidateResult(gatedLocalMatches, localMatches.usedRelaxedPass());
         }
 
         String query = cpeQuery(vendor, productName);
@@ -1725,15 +1892,17 @@ public class Stage1IdentificationService {
         // Git", but re-querying the local dictionary with the original, longer string diluted
         // trigram similarity below both thresholds (0.276/0.286 vs. 0.3/0.6), silently discarding
         // the very entries the live call had just upserted a moment earlier.
-        List<CpeDictionaryEntry> refreshed =
-                rankAndGate(vendor, localCpeLookup(vendor, productName, itemVersion), targetSwContext, itemVersion);
+        LocalCpeMatches refreshedLocal = localCpeLookup(vendor, productName, itemVersion);
+        List<CpeDictionaryEntry> refreshed = rankAndGate(vendor, refreshedLocal.candidates(), targetSwContext, itemVersion);
         if (!refreshed.isEmpty()) {
-            return new CpeCandidateResult(refreshed, false);
+            return new CpeCandidateResult(refreshed, refreshedLocal.usedRelaxedPass());
         }
-        return new CpeCandidateResult(rankAndGate(vendor, plausibleContainmentOnly(vendor, productName,
+        ContainmentResult liveContainment = plausibleContainmentOnly(vendor, productName,
                 cpeDictionaryRepository.findFuzzyMatches(successfulQuery.get(),
-                        CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL)),
-                targetSwContext, itemVersion), false);
+                        CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL));
+        return new CpeCandidateResult(
+                rankAndGate(vendor, liveContainment.candidates(), targetSwContext, itemVersion),
+                liveContainment.usedRelaxedPass());
     }
 
     private String cpeQuery(String vendor, String productName) {
@@ -1874,8 +2043,20 @@ public class Stage1IdentificationService {
      * was. Requiring containment against the product name alone (vendor's role stays limited to
      * widening the initial pg_trgm search) closes this off without narrowing genuine matches,
      * since a real candidate's title/product almost always still contains the bare product name.
+     *
+     * <p>Backlog item 89 P2 (senior review 2026-08-30, real job195/196 data): when this strict first
+     * pass rejects every single candidate in {@code candidates}, retries the exact same in-memory
+     * pool (no DB re-query) with {@link #explainsQuery}'s Direction 2 trailing-vendor-explanation
+     * requirement relaxed — the rule that a single-token candidate matching at the very head of the
+     * query (nothing preceding it) must also have every *trailing* query token vendor-explained.
+     * That rule is what silently drops {@code Metasploit Framework} -&gt; {@code rapid7:metasploit}
+     * (the trailing "framework" isn't explained by rapid7's own CPE vendor), a genuine false
+     * negative once the strict pass finds nothing else to fall back on. Only ever fires when pass 1
+     * came back completely empty — never widens an already-nonempty strict result — and callers must
+     * treat a relaxed-pass result the same low-trust way {@link #findByNameVariants} results already
+     * are (see {@link ContainmentResult#usedRelaxedPass}).
      */
-    private List<CpeDictionaryEntry> plausibleContainmentOnly(String vendor, String query, List<CpeDictionaryEntry> candidates) {
+    private ContainmentResult plausibleContainmentOnly(String vendor, String query, List<CpeDictionaryEntry> candidates) {
         // A Go module path anchors on its VCS host ("github.com/gin-gonic/gin"), and that host
         // component has no CPE identity of its own — left in, it made containment matching anchor
         // on the near-universal "github"/"gitlab"/etc. vendor:vendor CPE entry instead of the
@@ -1885,10 +2066,24 @@ public class Stage1IdentificationService {
         // inventing a second one here.
         String normalizedQuery = normalizeForContainment(RegistryRoutingPolicy.stripHostPrefix(query));
         String normalizedItemVendor = normalizeForContainment(vendor);
-        return candidates.stream()
-                .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false)
-                        || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true))
+        List<CpeDictionaryEntry> strict = candidates.stream()
+                .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false, true)
+                        || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, true))
                 .toList();
+        if (!strict.isEmpty()) {
+            return new ContainmentResult(strict, false);
+        }
+        List<CpeDictionaryEntry> relaxed = candidates.stream()
+                .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false, false)
+                        || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, false))
+                .toList();
+        return new ContainmentResult(relaxed, !relaxed.isEmpty());
+    }
+
+    /** Backlog item 89 P2: outcome of {@link #plausibleContainmentOnly}. {@code usedRelaxedPass} is
+     *  {@code true} only when the strict first pass rejected every candidate and the relaxed second
+     *  pass is what actually produced {@code candidates} — see that method's own javadoc. */
+    private record ContainmentResult(List<CpeDictionaryEntry> candidates, boolean usedRelaxedPass) {
     }
 
     /**
@@ -1954,9 +2149,41 @@ public class Stage1IdentificationService {
      * way with the entire rest of the query silently unaccounted for. Requiring the trailing tokens
      * to be vendor-explained too, but only when there was no leading anchor to already vouch for the
      * match, closes this without re-breaking the AVG case (whose leading "avg" already proves it).
+     *
+     * <p>Backlog item 89 P3 (senior review 2026-08-30): Direction 1 itself has a mirror-image gap —
+     * when the *query* is the single-token side and it only aligns against a *leading* portion of a
+     * longer candidate product slug ("Slack" against {@code slack_archivebot_project}'s product
+     * {@code slack_archivebot}), the trailing leftover candidate tokens ("archivebot") were never
+     * policed at all, the same class of gap REVISE item 5 already closed for Direction 2. Closed the
+     * same way — leftover trailing candidate tokens must be explained — but by the *item's own*
+     * vendor field, never the candidate's own CPE vendor (which would trivially "explain" its own
+     * leftover fragment the same way REVISE item 4 already guards against for {@link
+     * #alignPrefixAtAnyBoundary}). Only checked for a single-token query, mirroring REVISE item 5's
+     * own single-token-candidate condition: a multi-token query that merely happens to align against
+     * a shorter leading run of the candidate already has its own internal structure proving the tie
+     * (the same reasoning REVISE item 2's {@code queryTokens.size() >= 2} guard above relies on), so
+     * widening this to every query would risk re-breaking a real multi-word match. Only checked when
+     * the item has a non-blank vendor field at all — same "no evidence means permissive" default this
+     * class uses everywhere else (e.g. {@link #versionCoverageIsPlausible}, {@link
+     * #passesTargetSwGate}'s blank-target_sw passthrough): a blank item vendor gives {@link
+     * #vendorExplains} nothing to ever confirm against, and a query like bare "apache" (item vendor
+     * routinely blank for a package with no inventory-recorded vendor) legitimately matching
+     * {@code apache:apache_http_server} must not be rejected purely because there's no vendor text to
+     * check the leftover "http"/"server" tokens against — measured live via this project's own test
+     * suite (see {@code Stage1IdentificationServiceTest}'s several blank-vendor single-token-query
+     * fixtures) once an unconditional version of this check was tried.
+     *
+     * <p>Backlog item 89 P2 (senior review 2026-08-30): {@code requireTrailingVendorExplanation}
+     * controls whether Direction 2's REVISE item 5 trailing-vendor-explanation rule (see above) is
+     * enforced at all — {@code true} everywhere except {@link #plausibleContainmentOnly}'s own
+     * relaxed second pass, which only ever runs after the strict pass (this flag {@code true})
+     * already rejected every candidate in the pool. Does not affect Direction 1 or this method's own
+     * new P3 check above, both of which stay unconditionally strict regardless of this flag — P2's
+     * relaxation is calibrated narrowly to the one rule it was measured against (Metasploit Framework
+     * -&gt; rapid7:metasploit), not a general loosening of every containment rule at once.
      */
     private boolean explainsQuery(String normalizedItemVendor, String normalizedQuery, CpeDictionaryEntry entry,
-            String candidateText, boolean isTitleField) {
+            String candidateText, boolean isTitleField, boolean requireTrailingVendorExplanation) {
         String candidate = normalizeForContainment(candidateText);
         if (normalizedQuery.isBlank() || candidate.isBlank()) {
             return false;
@@ -1999,7 +2226,22 @@ public class Stage1IdentificationService {
         if (candidateTokensConsumed <= 0 && !isTitleField && queryTokens.size() >= 2) {
             candidateTokensConsumed = alignPrefixAtAnyBoundary(queryTokens, candidateTokens, normalizedItemVendor);
         }
-        if (candidateTokensConsumed > 0 && (!isTitleField || candidateTokensConsumed > vendorTokenCount(entry))) {
+        boolean direction1Match = candidateTokensConsumed > 0
+                && (!isTitleField || candidateTokensConsumed > vendorTokenCount(entry));
+        // Backlog item 89 P3: a single-token query that only consumed a *leading* portion of a
+        // longer candidate leaves candidateTokens[candidateTokensConsumed..] unaccounted for — see
+        // this method's own javadoc above for why this is checked only for a single-token query, only
+        // against the item's own vendor field, and only when that vendor field is non-blank at all.
+        if (direction1Match && queryTokens.size() == 1 && candidateTokensConsumed < candidateTokens.size()
+                && !normalizedItemVendor.isBlank()) {
+            for (int i = candidateTokensConsumed; i < candidateTokens.size(); i++) {
+                if (!vendorExplains(normalizedItemVendor, candidateTokens.get(i))) {
+                    direction1Match = false;
+                    break;
+                }
+            }
+        }
+        if (direction1Match) {
             return true;
         }
 
@@ -2023,7 +2265,11 @@ public class Stage1IdentificationService {
         // multi-token candidate, or one with a nonempty (and therefore already vendor-explained)
         // leading run, is left exactly as before — see this method's own javadoc for the AVG
         // AntiVirus Free / Windows Terminal contrast this distinction is calibrated against.
-        if (start == 0 && candidateTokens.size() == 1) {
+        //
+        // Backlog item 89 P2: this specific rule is what plausibleContainmentOnly's relaxed second
+        // pass exists to lift (requireTrailingVendorExplanation=false) — see this method's own
+        // javadoc for why only this rule, not the whole method, is relaxable.
+        if (requireTrailingVendorExplanation && start == 0 && candidateTokens.size() == 1) {
             for (int i = start + candidateTokens.size(); i < queryTokens.size(); i++) {
                 if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
                     return false;

@@ -256,6 +256,38 @@ class CpeDictionaryRepositoryImplTest {
     }
 
     /**
+     * docs/spec/task-backlog.md item 89 (K3 ranking tie-break): {@code cataloged_row_count} must
+     * reflect every row sharing a (vendor, product) pair, the same unfiltered whole-partition way
+     * {@code max_cataloged_major} already does above — three rows here, each with a distinct enough
+     * title that a real caller's trigram filter could plausibly have missed some of them, but the
+     * count added to the same unconditional LATERAL aggregate must still come back as the true total.
+     */
+    @Test
+    void catalogedRowCountCountsEveryRowInTheVendorProductPartitionRegardlessOfTrigramFilter() {
+        insert(
+                "cpe:2.3:a:zzzrevise89rowcountvendor:zzzrevise89rowcountproduct:1.0:*:*:*:*:*:*:*",
+                "Zzzrevise89rowcountproduct One",
+                "zzzrevise89rowcountvendor",
+                "zzzrevise89rowcountproduct");
+        insert(
+                "cpe:2.3:a:zzzrevise89rowcountvendor:zzzrevise89rowcountproduct:2.0:*:*:*:*:*:*:*",
+                "Zzzrevise89rowcountproduct Two",
+                "zzzrevise89rowcountvendor",
+                "zzzrevise89rowcountproduct");
+        insert(
+                "cpe:2.3:a:zzzrevise89rowcountvendor:zzzrevise89rowcountproduct:3.0:*:*:*:*:*:*:*",
+                "Zzzrevise89rowcountproduct Three",
+                "zzzrevise89rowcountvendor",
+                "zzzrevise89rowcountproduct");
+
+        List<CpeDictionaryEntry> results = cpeDictionaryRepository.findFuzzyMatches(
+                "zzzrevise89rowcountproduct", 0.3, 0.3, 10);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getCatalogedRowCount()).isEqualTo(3);
+    }
+
+    /**
      * Regression test for a PR #15 REVISE finding: the inner {@code DISTINCT ON (vendor, product)}
      * subquery's own {@code ORDER BY vendor, product, score DESC} had no tiebreaker after
      * {@code score}, so which single row {@code DISTINCT ON} kept as a (vendor, product) group's
