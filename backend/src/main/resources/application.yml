@@ -81,6 +81,20 @@ app:
 
 server:
   port: 8080
+  servlet:
+    session:
+      cookie:
+        # Secure attribute on the session cookie (JSESSIONID) — restricts it to HTTPS-only
+        # transport. Off by default: the current docker-compose setup has no TLS termination, so
+        # local dev and any HTTP-only environment would lose the ability to log in (a Secure cookie
+        # is never sent back by the browser over plain HTTP) if this defaulted to true. MUST be set
+        # to true via SESSION_COOKIE_SECURE once the deployment sits behind TLS (see
+        # docs/spec/ec2-deployment-guide.md) — otherwise the session cookie can leak in plaintext.
+        secure: ${SESSION_COOKIE_SECURE:false}
+        # Already Spring Boot/Tomcat's default even when unset (true) — pinned explicitly here so
+        # this block documents the full, intentional cookie-hardening posture (Secure + HttpOnly)
+        # in one place instead of leaving HttpOnly's protection implicit.
+        http-only: true
 
 logging:
   level:
