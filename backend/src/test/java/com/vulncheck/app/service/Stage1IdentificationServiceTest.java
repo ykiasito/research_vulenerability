@@ -2205,21 +2205,24 @@ class Stage1IdentificationServiceTest {
 
     @Test
     void fallsBackToAnOperatingSystemPartCpeWhenNoApplicationPartCandidateExistsAtAll() {
-        // golden-300 fix (2026-08-29, item 3): Cisco IOS XE / PAN-OS / MikroTik RouterOS are
-        // catalogued by NVD only as part=o (operating system), with no part=a entry at all — the
-        // pre-fix part=a-only gate silently discarded the only candidate that could ever have
-        // identified them. Safe because the fallback only ever engages when the pool has zero
-        // part=a rows (see the control test below for the case where one does exist).
-        CpeDictionaryEntry ciscoIosXe = cpeEntry("cpe:2.3:o:cisco:ios_xe:17.3:*:*:*:*:*:*:*", "ios_xe");
-        ciscoIosXe.setTitle("Cisco IOS XE 17.3");
+        // golden-300 fix (2026-08-29, item 3): PAN-OS / MikroTik RouterOS are catalogued by NVD only
+        // as part=o (operating system), with no part=a entry at all (measured 2026-08-30: 779 PAN-OS
+        // rows and 744 MikroTik RouterOS rows, zero part=a among either — senior review caught an
+        // earlier version of this comment wrongly including Cisco IOS XE, which the dictionary
+        // actually catalogues with 26 part=a rows alongside its 1,089 part=o rows) — the pre-fix
+        // part=a-only gate silently discarded the only candidate that could ever have identified
+        // them. Safe because the fallback only ever engages when the pool has zero part=a rows (see
+        // the control test below for the case where one does exist).
+        CpeDictionaryEntry panOs = cpeEntry("cpe:2.3:o:paloaltonetworks:pan-os:10.2:*:*:*:*:*:*:*", "pan-os");
+        panOs.setTitle("Palo Alto Networks PAN-OS 10.2");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(ciscoIosXe));
+                .thenReturn(List.of(panOs));
         stubSaveReturnsArgument();
 
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Cisco IOS XE"), USER_ID);
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("PAN-OS"), USER_ID);
 
         assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:o:cisco:ios_xe:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:o:paloaltonetworks:pan-os:1.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
