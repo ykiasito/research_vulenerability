@@ -24,7 +24,10 @@ spring:
     baseline-on-migrate: true
 
   thymeleaf:
-    cache: false
+    # Enabled by default (production-appropriate: templates are baked into the image, never
+    # edited live in the running container, so re-parsing on every render is pure overhead). Set
+    # THYMELEAF_CACHE_ENABLED=false only for a deliberate template-focused debugging session.
+    cache: ${THYMELEAF_CACHE_ENABLED:true}
 
   servlet:
     multipart:
