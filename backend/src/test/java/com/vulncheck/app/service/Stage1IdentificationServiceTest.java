@@ -2105,15 +2105,30 @@ class Stage1IdentificationServiceTest {
         // name) must NOT be demoted, unlike the genuinely-wrong-vendor Audacity case above. Uses the
         // real golden-300 Citrix Workspace App measurement: item major 2405 vs. the correct
         // candidate's cataloged major 2006 is a ratio of ~1.20, comfortably under
-        // VERSION_COVERAGE_IMPLAUSIBILITY_RATIO's threshold of 2.
+        // VERSION_COVERAGE_IMPLAUSIBILITY_RATIO's threshold of 2. Two same-slug, different-vendor
+        // candidates (mirrors the "prefers" test above), because a single-candidate list makes the
+        // sort a no-op and the test would pass identically whether or not the trailing candidate was
+        // demoted. The trailing candidate is placed first and a second, fully-covering candidate is
+        // placed after it — both tie on every other ranking key (exact slug match, no ecosystem to
+        // gate target_sw on, blank item vendor), so the trailing candidate wins by stable sort ONLY
+        // if it is correctly left un-demoted; if the ratio guard wrongly demoted it, the covering
+        // candidate would sort first instead and this assertion would fail.
         CpeDictionaryEntry trailingCatalog =
                 cpeEntry("cpe:2.3:a:citrix:workspace:2006.0:*:*:*:*:*:*:*", "workspace");
         trailingCatalog.setMaxCatalogedMajor(2006);
+        CpeDictionaryEntry coveringCandidate =
+                cpeEntry("cpe:2.3:a:othervendor:workspace:3000.0:*:*:*:*:*:*:*", "workspace");
+        coveringCandidate.setMaxCatalogedMajor(3000);
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(trailingCatalog));
+                .thenReturn(List.of(trailingCatalog, coveringCandidate));
         stubSaveReturnsArgument();
 
-        ResearchJobItem item = item("Citrix Workspace App");
+        // Item name is the bare shared slug ("workspace"), not the full "Citrix Workspace App" —
+        // with two different-vendor candidates in play, a fuller query name would make
+        // plausibleContainmentOnly's leading-leftover-token check depend on which vendor happens to
+        // explain "citrix", which isn't what this test is about; the bare-slug name keeps both
+        // candidates equally admitted so the tie-break under test is the only thing deciding.
+        ResearchJobItem item = item("workspace");
         item.setVersion("2405.0");
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
@@ -2130,11 +2145,20 @@ class Stage1IdentificationServiceTest {
         // Backlog item 36 (senior review 2026-08-30): maxCatalogedMajor <= 0 (e.g. a partition whose
         // only numeric leading run ever parsed to zero) must default to plausible exactly like a
         // null maxCatalogedMajor does — it is not concrete evidence of anything, so it must never
-        // hard-demote a candidate that has no other tie-break signal to fall back on.
-        CpeDictionaryEntry candidate = cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
-        candidate.setMaxCatalogedMajor(0);
+        // hard-demote a candidate that has no other tie-break signal to fall back on. Two same-slug,
+        // different-vendor candidates for the same reason as the test above — a single-candidate list
+        // can't tell "correctly not demoted" apart from "demoted but nothing else to lose to". The
+        // zero-evidence candidate is placed first and a second, fully-covering candidate is placed
+        // after it; both tie on every other ranking key, so the zero-evidence candidate wins by
+        // stable sort ONLY if the <= 0 case is correctly treated as no evidence.
+        CpeDictionaryEntry zeroEvidence =
+                cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
+        zeroEvidence.setMaxCatalogedMajor(0);
+        CpeDictionaryEntry coveringCandidate =
+                cpeEntry("cpe:2.3:a:othervendor:widget-tool:20.0.0:*:*:*:*:*:*:*", "widget-tool");
+        coveringCandidate.setMaxCatalogedMajor(20);
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(candidate));
+                .thenReturn(List.of(zeroEvidence, coveringCandidate));
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("widget-tool");
