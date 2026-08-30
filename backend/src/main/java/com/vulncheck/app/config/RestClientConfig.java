@@ -4,23 +4,39 @@ import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.time.Duration;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.web.client.ClientHttpRequestFactories;
 import org.springframework.boot.web.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.client.ClientHttpRequestFactory;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 @Configuration
 public class RestClientConfig {
 
+    /**
+     * Builds a plain {@link SimpleClientHttpRequestFactory} (backed by {@link
+     * HttpURLConnection}) with the given timeouts. Deliberately not the deprecated {@code
+     * ClientHttpRequestFactories.get(...)} helper: as of Spring Boot 3.4 its auto-detection picks
+     * {@code JdkClientHttpRequestFactory} ({@link java.net.http.HttpClient}) whenever it's on the
+     * classpath, which changes read-timeout semantics from "socket idle timeout" to "timeout for
+     * the whole request" — a silent behavior change that a BOM bump alone would otherwise
+     * introduce. Explicitly constructing {@link SimpleClientHttpRequestFactory} keeps the
+     * pre-3.4 transport and timeout semantics regardless of what's on the classpath.
+     *
+     * <p>Package-private (rather than {@code private}) so the unit test can call it directly and
+     * assert on the concrete factory type and its effective timeouts.
+     */
+    static SimpleClientHttpRequestFactory simpleRequestFactory(Duration connectTimeout, Duration readTimeout) {
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout((int) connectTimeout.toMillis());
+        requestFactory.setReadTimeout((int) readTimeout.toMillis());
+        return requestFactory;
+    }
+
     @Bean
     public RestClient externalApiRestClient() {
-        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
-                .withConnectTimeout(Duration.ofSeconds(5))
-                .withReadTimeout(Duration.ofSeconds(10));
-        ClientHttpRequestFactory requestFactory = ClientHttpRequestFactories.get(settings);
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(10));
 
         return RestClient.builder()
                 .requestFactory(requestFactory)
@@ -38,10 +54,8 @@ public class RestClientConfig {
      */
     @Bean
     public RestClient nvdSyncRestClient() {
-        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
-                .withConnectTimeout(Duration.ofSeconds(10))
-                .withReadTimeout(Duration.ofMinutes(5));
-        ClientHttpRequestFactory requestFactory = ClientHttpRequestFactories.get(settings);
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(10), Duration.ofMinutes(5));
 
         return RestClient.builder()
                 .requestFactory(requestFactory)
@@ -147,10 +161,8 @@ public class RestClientConfig {
      */
     @Bean
     public RestClient llmServiceRestClient(@Value("${app.llm-service-url}") String llmServiceUrl) {
-        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
-                .withConnectTimeout(Duration.ofSeconds(5))
-                .withReadTimeout(Duration.ofSeconds(60));
-        ClientHttpRequestFactory requestFactory = ClientHttpRequestFactories.get(settings);
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(60));
 
         return RestClient.builder()
                 .baseUrl(llmServiceUrl)
