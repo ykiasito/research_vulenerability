@@ -155,6 +155,16 @@
     </tbody>
 </table>
 
+<p style="font-size: 0.9em; color: #555;">
+    <strong>CSVエクスポートの research_incomplete_reason 列</strong>について:
+    空欄 = 調査済み（脆弱性なし、または実際に見つかった脆弱性あり） /
+    <code>SOURCES_FAILED</code> = 脆弱性情報源への問い合わせが全て失敗し、実際には未確認 /
+    <code>IDENTIFICATION_TOO_WEAK</code> = 識別信頼度が低いためAI調査を実施していない /
+    <code>AI_NOT_AVAILABLE</code> = AI用のAPIキーが未登録のためAI調査を実施していない /
+    <code>BUDGET_EXHAUSTED</code> = ジョブの予算上限に達しAI調査を実施していない。
+    画面上の「影響」列と同じ区別を、社内で回覧するCSVでも確認できるようにしたものです。
+</p>
+
 <p>
     <a th:unless="${job.status == 'PENDING' || job.status == 'PROCESSING'}"
        th:href="@{/jobs/{id}/export.csv(id=${job.id})}">CSVエクスポート</a>
