@@ -48,15 +48,24 @@ public class Stage4WebSearchResearchService {
     private final JobItemVulnerabilityRepository jobItemVulnerabilityRepository;
     private final JobCostBudgetService jobCostBudgetService;
 
-    public int research(ResearchJobItem item, String ecosystem, String packageName, Long userId) {
+    /** Outcome of a {@link #research} call. {@code incompleteReason} is one of {@code
+     *  ResearchJobItem#INCOMPLETE_REASON_AI_NOT_AVAILABLE}/{@code
+     *  ResearchJobItem#INCOMPLETE_REASON_BUDGET_EXHAUSTED} when this Stage4 pass never actually ran
+     *  (so the caller can record that on the item, distinguishing "not checked" from "checked, clean"
+     *  — see {@code ResearchJobItem#researchIncompleteReason}'s javadoc), or {@code null} when the
+     *  pass ran to completion (regardless of how many findings it persisted). */
+    public record Stage4ResearchResult(int persistedCount, String incompleteReason) {
+    }
+
+    public Stage4ResearchResult research(ResearchJobItem item, String ecosystem, String packageName, Long userId) {
         Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
         if (apiKey.isEmpty()) {
             log.info("Stage4 skipped for item {}: no Claude API key configured for user {}", item.getId(), userId);
-            return 0;
+            return new Stage4ResearchResult(0, ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE);
         }
         if (!jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.STAGE4_WEB_SEARCH_RESEARCH_COST_USD)) {
             log.info("Stage4 skipped for item {}: job cost budget exhausted", item.getId());
-            return 0;
+            return new Stage4ResearchResult(0, ResearchJobItem.INCOMPLETE_REASON_BUDGET_EXHAUSTED);
         }
 
         log.info("Stage4 firing for item {} (ecosystem={}, package={})", item.getId(), ecosystem, packageName);
@@ -82,7 +91,7 @@ public class Stage4WebSearchResearchService {
         log.info("Stage4 item {}: LLM returned {} findings, {} persisted (blank identifiers skipped)",
                 item.getId(), findings.size(), persisted);
 
-        return findings.size();
+        return new Stage4ResearchResult(findings.size(), null);
     }
 
     private String scopedId(String identifier, String packageName, Long jobItemId) {

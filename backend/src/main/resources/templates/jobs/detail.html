@@ -105,6 +105,8 @@
             <span th:if="${vulns != null and !vulns.isEmpty()}" style="color: #b00020; font-weight: bold;" title="既知の脆弱性が見つかりました">🔴 影響あり</span>
             <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'SOURCES_FAILED'}" style="color: #b8860b; font-weight: bold;" title="脆弱性情報源への問い合わせがすべて失敗し、実際には未確認です">⚠ 要再確認（調査失敗）</span>
             <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'IDENTIFICATION_TOO_WEAK'}" style="color: #7a5c00; font-weight: bold;" title="識別信頼度が低いため、AIによる脆弱性調査は実施していません">🟡 未検証（識別信頼度低）</span>
+            <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'AI_NOT_AVAILABLE'}" style="color: #7a5c00; font-weight: bold;" title="AI用のAPIキーが未登録のため、AIによる脆弱性調査は実施していません">🟡 未調査（AI調査未実施）</span>
+            <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'BUDGET_EXHAUSTED'}" style="color: #7a5c00; font-weight: bold;" title="ジョブの予算上限に達したため、AIによる脆弱性調査は実施していません">🟡 未調査（予算上限）</span>
             <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == null}" style="color: #0a7d2c; font-weight: bold;" title="既知の脆弱性は見つかりませんでした">🟢 影響なし</span>
             <span th:if="${(vulns == null or vulns.isEmpty()) and item.status != 'IDENTIFIED' and item.hintIdentifier != null}" style="color: #0a7d2c;" title="AIヒントによる簡易調査のみ">🟢 影響なし（簡易調査）</span>
             <span th:if="${(vulns == null or vulns.isEmpty()) and item.status != 'IDENTIFIED' and item.hintIdentifier == null}" style="color: #999;" title="製品を特定できなかったため判定できません">⚪ 判定不可</span>
@@ -113,6 +115,8 @@
             <span th:if="${vulns == null or vulns.isEmpty()}">
                 <span th:if="${item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'SOURCES_FAILED'}" style="color: #b8860b; font-weight: bold;">脆弱性情報源への問い合わせがすべて失敗したため、未確認です（実際には調査できていません。再調査が必要です）</span>
                 <span th:if="${item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'IDENTIFICATION_TOO_WEAK'}" style="color: #7a5c00; font-weight: bold;">未検証（識別信頼度が低いため脆弱性調査は実施していません。製品の識別自体が弱い推測のため、AIによる検証パスをスキップしています）</span>
+                <span th:if="${item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'AI_NOT_AVAILABLE'}" style="color: #7a5c00; font-weight: bold;">未調査（AI用のAPIキーが登録されていないため、AIによる脆弱性調査が実行されていません。設定画面でAPIキーを登録すると調査できます）</span>
+                <span th:if="${item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'BUDGET_EXHAUSTED'}" style="color: #7a5c00; font-weight: bold;">未調査（このジョブのAI予算上限に達したため、調査がスキップされました。再調査するには新しいジョブとして実行してください）</span>
                 <span th:if="${item.status == 'IDENTIFIED' and item.researchIncompleteReason == null}">脆弱性なし</span>
                 <span th:if="${item.status != 'IDENTIFIED' and item.hintIdentifier != null}">脆弱性なし（識別子による簡易調査）</span>
                 <span th:if="${item.status != 'IDENTIFIED' and item.hintIdentifier == null}">-</span>

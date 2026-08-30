@@ -68,9 +68,10 @@ class Stage4WebSearchResearchServiceTest {
     void skipsEntirelyWithoutAClaudeApiKey() {
         when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
-        int count = service().research(item(), "npm", "some-tool", USER_ID);
+        Stage4WebSearchResearchService.Stage4ResearchResult result = service().research(item(), "npm", "some-tool", USER_ID);
 
-        assertThat(count).isZero();
+        assertThat(result.persistedCount()).isZero();
+        assertThat(result.incompleteReason()).isEqualTo(ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE);
         verifyNoInteractions(llmServiceClient, vulnerabilityRepository, jobItemVulnerabilityRepository);
     }
 
@@ -79,9 +80,10 @@ class Stage4WebSearchResearchServiceTest {
         when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
         when(jobCostBudgetService.tryReserve(any(), any())).thenReturn(false);
 
-        int count = service().research(item(), "npm", "some-tool", USER_ID);
+        Stage4WebSearchResearchService.Stage4ResearchResult result = service().research(item(), "npm", "some-tool", USER_ID);
 
-        assertThat(count).isZero();
+        assertThat(result.persistedCount()).isZero();
+        assertThat(result.incompleteReason()).isEqualTo(ResearchJobItem.INCOMPLETE_REASON_BUDGET_EXHAUSTED);
         verifyNoInteractions(llmServiceClient, vulnerabilityRepository, jobItemVulnerabilityRepository);
     }
 
@@ -94,9 +96,10 @@ class Stage4WebSearchResearchServiceTest {
                         new WebSearchVulnFindingDto("Unpatched RCE in admin panel", "MEDIUM", "desc2", "https://example.com/b", null)));
         when(vulnerabilityRepository.insertIfAbsentAndGetId(anyString(), anyString(), any(), any(), any(), any())).thenReturn(500L);
 
-        int count = service().research(item(), "npm", "some-tool", USER_ID);
+        Stage4WebSearchResearchService.Stage4ResearchResult result = service().research(item(), "npm", "some-tool", USER_ID);
 
-        assertThat(count).isEqualTo(2);
+        assertThat(result.persistedCount()).isEqualTo(2);
+        assertThat(result.incompleteReason()).isNull();
         verify(vulnerabilityRepository).insertIfAbsentAndGetId(
                 eq("CVE-2024-12345"), eq("llm_web_search"), eq("HIGH"), eq("desc"), eq("https://example.com/a"), any());
         verify(vulnerabilityRepository).insertIfAbsentAndGetId(
@@ -110,9 +113,10 @@ class Stage4WebSearchResearchServiceTest {
         when(llmServiceClient.webSearchResearch(eq("sk-ant-test"), any(), any(), any(), any()))
                 .thenReturn(List.of(new WebSearchVulnFindingDto("  ", null, "desc", "https://example.com", null)));
 
-        int count = service().research(item(), "npm", "some-tool", USER_ID);
+        Stage4WebSearchResearchService.Stage4ResearchResult result = service().research(item(), "npm", "some-tool", USER_ID);
 
-        assertThat(count).isEqualTo(1);
+        assertThat(result.persistedCount()).isEqualTo(1);
+        assertThat(result.incompleteReason()).isNull();
         verify(vulnerabilityRepository, never()).insertIfAbsentAndGetId(anyString(), anyString(), any(), any(), any(), any());
         verify(jobItemVulnerabilityRepository, never()).linkIfAbsent(any(), any(), anyString(), any());
     }
@@ -124,9 +128,11 @@ class Stage4WebSearchResearchServiceTest {
                 .thenReturn(List.of(new WebSearchVulnFindingDto("CVE-2024-99999", "HIGH", "desc", "https://example.com", null)));
         when(vulnerabilityRepository.insertIfAbsentAndGetId(anyString(), anyString(), any(), any(), any(), any())).thenReturn(501L);
 
-        int count = service().research(item(), "VS Code Marketplace", "ms-python.python", USER_ID);
+        Stage4WebSearchResearchService.Stage4ResearchResult result =
+                service().research(item(), "VS Code Marketplace", "ms-python.python", USER_ID);
 
-        assertThat(count).isEqualTo(1);
+        assertThat(result.persistedCount()).isEqualTo(1);
+        assertThat(result.incompleteReason()).isNull();
         verify(vulnerabilityRepository).insertIfAbsentAndGetId(
                 eq("CVE-2024-99999"), eq("llm_web_search"), eq("HIGH"), eq("desc"), eq("https://example.com"), any());
         verify(jobItemVulnerabilityRepository).linkIfAbsent(eq(9L), eq(501L), eq("llm_web_search"), eq("https://example.com"));
