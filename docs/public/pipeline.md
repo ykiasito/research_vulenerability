@@ -50,7 +50,7 @@ Stage1で `IdentifiedProduct` が得られたアイテムのみ対象。3つの 
 
 ## Stage4: AI最終手段調査（`Stage4WebSearchResearchService`）
 
-**中核方針に基づくゲート条件**: 以下のいずれかの場合のみ発火。それ以外（Stage2が1件でも見つけた場合）は**発火しない** — 「影響のある脆弱性が1件でも見つかれば静的調査だけで完結してよい」という方針を反映した設計であり、取りこぼしがあっても仕様（詳細は[known-limitations.md](./known-limitations.md)）。
+**中核方針に基づくゲート条件**: 以下のいずれかの場合のみ発火。それ以外（Stage2が1件でも見つけた場合）は**発火しない** — 「影響のある脆弱性が1件でも見つかれば静的調査だけで完結してよい」という方針を反映した設計であり、取りこぼしがあっても仕様（意図的な設計判断であり不具合ではない）。
 
 1. Stage1で識別済み・かつStage2が0件だった場合 → `ecosystem`/`packageName` を検索スコープにする
 2. Stage1で識別自体ができなかった（UNIDENTIFIED）が、Tier3が `platform_hint` を残していた場合 → `hint_platform`/`hint_identifier` を検索スコープにする（この場合だけがUNIDENTIFIEDアイテムに脆弱性の答えを出せる唯一の経路）
