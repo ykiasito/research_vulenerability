@@ -88,7 +88,14 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         String sql = "SELECT * FROM ("
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at "
                 + "FROM cpe_dictionary WHERE product ~ ? "
-                + "ORDER BY vendor, product, id"
+                + "ORDER BY vendor, product, "
+                // Backlog item 36 / 38: same part preference key as collect() below, and for the
+                // same reason -- this DISTINCT ON has no score column to tie on at all, so without
+                // this key a (vendor, product) pair with both a part=a and a part=o row is decided
+                // purely by which has the lower id, discarding the other before it ever reaches
+                // Stage1IdentificationService#rankCpeCandidates's own part preference (see that
+                // method's javadoc) has a chance to choose between them.
+                + "CASE split_part(cpe_string, ':', 3) WHEN 'a' THEN 0 WHEN 'o' THEN 1 ELSE 2 END, id"
                 // id tiebreaks at both levels for the same reason as collect() below: without "id"
                 // trailing the inner ORDER BY, DISTINCT ON's own representative-row choice per
                 // (vendor, product) group is unspecified, and without it trailing the outer
@@ -237,7 +244,25 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at, "
                 + "similarity(" + column + ", ?) AS score "
                 + "FROM cpe_dictionary WHERE " + column + " % ? AND similarity(" + column + ", ?) > ? "
-                + "ORDER BY vendor, product, score DESC, id"
+                + "ORDER BY vendor, product, score DESC, "
+                // Backlog item 36 / 38 (senior review 2026-08-30): a part preference key, inserted
+                // ahead of the "id" tiebreak below -- without it, a (vendor, product) pair that
+                // happens to have a part=a (application) row and a part=o (operating system) row
+                // tied on score is a coin flip decided purely by which one has the lower id, with no
+                // regard for which part Stage1IdentificationService actually prefers. Confirmed live
+                // against the real dictionary: cisco:ios_xe has a title-similarity-1.0 row for both
+                // part=o (id 83468) and part=a (id 875652), so whichever of the two happened to sort
+                // first here was the only one DISTINCT ON ever kept -- the other was discarded before
+                // Stage1IdentificationService#rankCpeCandidates's own part=a-preferred/part=o-fallback
+                // logic (see that method's javadoc) ever got a chance to choose between them, because
+                // DISTINCT ON never let both into the pool at once. This CASE realigns the
+                // representative-row choice with that same preference (part=a first, part=o second,
+                // anything else last) so the two layers of part handling agree instead of the outer
+                // one silently overriding the inner one. split_part (not the escape-aware
+                // regexp_replace variant used for target_sw/version below) is safe here because the
+                // part segment (index 3, 1-indexed) always precedes the escapable vendor segment
+                // (index 4) in a CPE 2.3 URI, so it can never itself contain an escaped colon.
+                + "CASE split_part(cpe_string, ':', 3) WHEN 'a' THEN 0 WHEN 'o' THEN 1 ELSE 2 END, id"
                 // Determinism here needs id as a tiebreaker at *both* levels, not just the outer one:
                 // DISTINCT ON (vendor, product) itself picks whichever row sorts first within each
                 // group under the inner ORDER BY, so without "id" trailing "score DESC" there, the
