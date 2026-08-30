@@ -41,7 +41,16 @@ import csv
 import re
 
 with open("test-data/golden-300.csv", newline="") as f:
-    expected_rows = list(csv.DictReader(f))
+    expected_reader = csv.DictReader(f)
+    # ground_truth_source drives the part=a|o|h check below (task-backlog.md item 40) --
+    # fail loudly on a malformed/renamed CSV instead of expected_cpe_part() silently
+    # returning None for every row and the part check silently no-op'ing.
+    if "ground_truth_source" not in (expected_reader.fieldnames or []):
+        raise ValueError(
+            "test-data/golden-300.csv is missing the 'ground_truth_source' column -- "
+            f"found columns: {expected_reader.fieldnames}"
+        )
+    expected_rows = list(expected_reader)
 
 with open("test-data/job168_results.csv", newline="") as f:
     actual_rows = list(csv.DictReader(f))
