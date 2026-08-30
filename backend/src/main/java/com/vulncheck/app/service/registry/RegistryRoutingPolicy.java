@@ -20,15 +20,9 @@ import org.springframework.stereotype.Component;
  * could not have matched:
  *
  * <ul>
- *   <li><b>Whitespace</b> — narrows to {@code chocolatey} only, not a full skip. This was "no
- *       registry allows it, it is a CPE case" until {@code ChocolateyRegistryClient} was added
- *       (2026-08-26): Chocolatey's package ids/display names cover exactly the multi-word desktop
- *       product names this used to write off entirely (e.g. "OBS Studio", "Advanced IP Scanner"),
- *       normalized lowercase+hyphenated inside that client. The other nine — all language/library
- *       package managers — still provably can't have a whitespace name, so they're still skipped;
- *       only Chocolatey is asked. Stale reasoning here is exactly how this regressed once before
- *       (this rule silently discarded 89 of 1,429 items' worth of requests, see the class javadoc
- *       history above) — if a future registry is added, re-check this comment against it too.</li>
+ *   <li><b>Whitespace</b> — no registry here permits a whitespace-containing package name, so this
+ *       is a full skip (asks nothing at all) rather than a narrowing — a name with a space is a
+ *       CPE-only case.</li>
  *   <li><b>{@code @scope/name}</b> — npm's scoped-package syntax, which no other registry here
  *       uses.</li>
  *   <li><b>{@code host.tld/path}</b> — a Go module path ({@code github.com/go-redis/redis},
@@ -43,19 +37,11 @@ import org.springframework.stereotype.Component;
  *       the other nine.</li>
  * </ul>
  *
- * <p>The four rules above are checked <em>before</em> the whitespace rule (2026-08-29, following
- * job 167's throughput measurement — see {@code docs/spec/nfr-status-2026-08.md} §3): each of them
- * is some other registry's own unambiguous identifier grammar, none of which Chocolatey's own id
- * grammar ({@code ChocolateyRegistryClient#ID_PATTERN}, which admits none of {@code @}, {@code /},
- * {@code :}) can ever satisfy — so a match rules Chocolatey out with certainty even when the name
- * also happens to contain whitespace (e.g. a Maven coordinate typed with spaces around the colon,
- * or a Go module path whose final segment contains a space). Checking whitespace first, as this
- * class used to, would route exactly this kind of name to Chocolatey only, silently losing the
- * request that should have gone to the real ecosystem — and, at 1,000-item scale, adding one more
- * item competing for Chocolatey's single process-wide, strictly-paced request queue (job 167:
- * ~1,075 Chocolatey requests resolved only 144 items, yet accounted for 68% of the job's total
- * registry rate-limiter wait — see the same nfr-status section) for a name that could never have
- * matched there in the first place.
+ * <p>The four rules above are checked <em>before</em> the whitespace rule: each of them is some
+ * other registry's own unambiguous identifier grammar, so a match (e.g. a Maven coordinate typed
+ * with spaces around the colon, or a Go module path whose final segment contains a space) must
+ * still route to that real ecosystem rather than being discarded outright just because the name
+ * also happens to contain whitespace.
  *
  * <p>Anything else — a bare name like "lodash" or "redis" — stays genuinely ambiguous and is still
  * asked of every registry, because it legitimately could be any of them. That ambiguity is real,
@@ -80,9 +66,9 @@ public class RegistryRoutingPolicy {
         }
         String name = productName.trim();
 
-        // Checked ahead of the whitespace/chocolatey rule below — see class javadoc for why: each
-        // of these four shapes is some other registry's own unambiguous grammar, which rules out
-        // chocolatey with certainty regardless of whether the name also contains whitespace.
+        // Checked ahead of the whitespace rule below — see class javadoc for why: each of these
+        // four shapes is some other registry's own unambiguous grammar, so a match must still
+        // route to that real ecosystem regardless of whether the name also contains whitespace.
         if (NPM_SCOPED.matcher(name).matches()) {
             return only(allLookups, "npm");
         }
@@ -91,8 +77,7 @@ public class RegistryRoutingPolicy {
         }
         if (EMPTY_VENDOR_SLASH_PACKAGE.matcher(name).matches()) {
             // A slash-package shape with an empty vendor segment: not a legal Composer identifier
-            // (vendor is required), not a legal Go module path (no host.tld/ prefix), and provably
-            // not chocolatey either (its id grammar forbids '/' outright, see class javadoc) — no
+            // (vendor is required) and not a legal Go module path either (no host.tld/ prefix) — no
             // current registry's grammar admits this, so there is nothing left worth asking.
             return List.of();
         }
@@ -103,12 +88,9 @@ public class RegistryRoutingPolicy {
             return only(allLookups, "maven");
         }
         if (WHITESPACE.matcher(name).find()) {
-            // Deliberately NOT using the only() helper below: only() falls back to "ask everyone"
-            // when its target ecosystem is absent, which is exactly wrong here — the other nine
-            // registries provably cannot hold a whitespace-containing name (see class javadoc), so
-            // if chocolatey itself isn't wired for some reason this must stay empty, not silently
-            // re-open the whitespace request to every HTTP registry.
-            return allLookups.stream().filter(lookup -> "chocolatey".equals(lookup.ecosystem())).toList();
+            // No registry here permits a whitespace-containing package name (see class javadoc) —
+            // a provable "ask nothing" rather than falling through to "ask everyone".
+            return List.of();
         }
         return allLookups;
     }

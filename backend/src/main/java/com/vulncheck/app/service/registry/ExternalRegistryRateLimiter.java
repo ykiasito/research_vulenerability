@@ -42,13 +42,10 @@ import org.springframework.stereotype.Component;
 public class ExternalRegistryRateLimiter {
 
     // Map.ofEntries rather than Map.of: the latter tops out at 10 key-value pairs, and this map
-    // now has 12 (crossed once "chocolatey" was added).
+    // has 11.
     private static final Map<String, Long> DEFAULT_MIN_INTERVALS_MS = Map.ofEntries(
             Map.entry("crates.io", 1100L),   // hard published rule: max 1 req/sec
             Map.entry("maven", 1000L),       // actively rate-limits high-volume/bot-like consumers
-            Map.entry("chocolatey", 1000L),  // no published limit; same conservative tier as Maven
-                                              // Central rather than assuming unlimited on a newly-
-                                              // added external source (see class javadoc precedent)
             Map.entry("hex", 700L),          // published: 100 req/min/IP -> 600ms avg, padded
             Map.entry("npm", 300L),
             Map.entry("pypi", 200L),

@@ -283,81 +283,10 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
-    void chocolateyEcosystemIsExemptFromTheStaticWeakRegistryMatchRejectionRuleButStillNotTrustedAsIdentifiedAlone() {
-        // REVISE item 5 (senior review 2026-08-26, job 39): unlike the npm/pypi/crates.io cases
-        // the 14/14-wrong static rule was calibrated on, every one of job 39's 32 target items has
-        // a non-blank vendor — without this exemption the static rule would reject every single
-        // unconfirmed-version Chocolatey match this existence-fallback fix produces, i.e. this
-        // exemption still applies and registryMatch is not statically rejected here.
-        //
-        // golden-300 fix (2026-08-29, item 1): but surviving that static-rejection rule is no longer
-        // enough on its own to become IDENTIFIED — a *sole* Chocolatey match (no corroborating CPE)
-        // has no downstream vulnerability query path at all, so it must not be trusted as IDENTIFIED
-        // either (see Stage1IdentificationService's "golden-300 fix (item 1)" comment and
-        // docs/spec/known-limitations.md). This test's outcome changed from present/IDENTIFIED to
-        // empty/UNIDENTIFIED as part of that fix.
-        PackageRegistryLookup chocolateyLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("chocolatey", "handbrake", "pkg:chocolatey/handbrake@1.9.9",
-                        new BigDecimal("0.5"), false));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "chocolatey";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-
-        ResearchJobItem item = item("HandBrake");
-        item.setVendor("HandBrake Team");
-
-        Optional<IdentifiedProduct> result = service(List.of(chocolateyLookup)).identify(item, USER_ID);
-
-        assertThat(result).isEmpty();
-        verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void chocolateyMatchCorroboratedByARealCpeIsStillTrustedAsIdentified() {
-        // Control for the golden-300 item 1 fix above: a Chocolatey match that IS independently
-        // corroborated by a real CPE candidate is unaffected — that CPE brings its own
-        // vulnerability-query path with it, so this is not the "no verification path at all" case
-        // the fix targets. Version-confirmed (unlike the sole-match test above) so trustRegistryMatch
-        // is true on its own original terms too, same shape as the existing npm/gson corroboration
-        // test (keepsACpeThatIndependentlyCorroboratesTheTrustedRegistryMatchsOwnPackageName).
-        PackageRegistryLookup chocolateyLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("chocolatey", "handbrake", "pkg:chocolatey/handbrake@1.9.9",
-                        new BigDecimal("0.95"), true));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "chocolatey";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(cpeEntry("cpe:2.3:a:handbrake:handbrake:1.9.9:*:*:*:*:*:*:*", "handbrake")));
-        stubSaveReturnsArgument();
-
-        ResearchJobItem item = item("HandBrake");
-        item.setVendor("HandBrake Team");
-
-        Optional<IdentifiedProduct> result = service(List.of(chocolateyLookup)).identify(item, USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getEcosystem()).isEqualTo("chocolatey");
-        assertThat(result.get().getPackageName()).isEqualTo("handbrake");
-        assertThat(result.get().getCpe()).isNotNull();
-    }
-
-    @Test
-    void nonChocolateyEcosystemsStillGetTheStaticWeakRegistryMatchRejectionRuleWithANonBlankVendor() {
-        // Control for the exemption above: a non-chocolatey ecosystem's unconfirmed match with a
-        // non-blank vendor and no AI verdict is still statically rejected, unchanged.
+    void unconfirmedRegistryMatchWithNonBlankVendorAndNoAiVerdictIsStaticallyRejected() {
+        // REVISE item 3 (senior review 2026-08-26, job 38): an unconfirmed-version registry match
+        // with a non-blank item vendor and no AI verdict available is statically rejected (measured
+        // 14/14 wrong with a non-blank vendor vs 5/5 correct with a blank one).
         PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
             @Override
             public Optional<RegistryMatch> lookup(String name, String version) {
@@ -2067,88 +1996,10 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
-    void rejectsAPlatformScopedCpeUnderAChocolateyMatchEvenThoughItsEcosystemHasNoTargetSwMapping() {
-        // Backlog item 15, P1 (senior review 2026-08-30): chocolatey has no ECOSYSTEM_TO_TARGET_SW
-        // mapping, same as hex/maven — but unlike those two (component registries where the
-        // default-allow is defensible), chocolatey is a standalone-desktop-application catalog, so
-        // STANDALONE_APPLICATION_ECOSYSTEMS must make passesTargetSwGate hard-reject here instead of
-        // defaulting to true. Mirrors job191's real Slack false-positive: a sole Chocolatey match
-        // whose only corroborating CPE is actually NVD's "Slack app for WordPress" plugin entry
-        // (target_sw=wordpress), not the Slack desktop app itself.
-        PackageRegistryLookup chocolateyLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("chocolatey", "slack", "pkg:chocolatey/slack@4.36.134",
-                        new BigDecimal("0.95"), true));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "chocolatey";
-            }
-        };
-        CpeDictionaryEntry wordpressSlack = cpeEntry("cpe:2.3:a:slack:slack:1.0:*:*:*:*:wordpress:*:*", "slack");
-        wordpressSlack.setTitle("Slack App for WordPress 1.0");
-        wordpressSlack.setTargetSwValues(java.util.Set.of("wordpress"));
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(wordpressSlack));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
-
-        ResearchJobItem item = item("Slack");
-        item.setVendor("Slack Technologies");
-
-        Optional<IdentifiedProduct> result = service(List.of(chocolateyLookup)).identify(item, USER_ID);
-
-        // The wordpress-scoped CPE is rejected by the gate, and the sole Chocolatey match (already
-        // untrusted as IDENTIFIED on its own — see the golden-300 item 1 fix) has no corroborating
-        // CPE left, so this must end up completely UNIDENTIFIED, matching the pre-existing
-        // "reject a wrong CPE" outcome shape (rejectsAPlatformScopedCpeWhenTheItemHasNoRegistryMatchAtAll)
-        // rather than silently persisting the wrong candidate at 0.95 confidence.
-        assertThat(result).isEmpty();
-        verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void stillAcceptsAChocolateyMatchWhoseCpeTargetSwIsWildcardOrWindows() {
-        // Non-regression control for the fix above: golden-300's 18 correct Chocolatey matches are
-        // all target_sw=* (senior review, measured live) — the wildcard/non-scoping short-circuit
-        // in passesTargetSwGate fires before STANDALONE_APPLICATION_ECOSYSTEMS is ever consulted, so
-        // this case must keep resolving to IDENTIFIED at 0.95 exactly as before this fix.
-        PackageRegistryLookup chocolateyLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("chocolatey", "handbrake", "pkg:chocolatey/handbrake@1.9.9",
-                        new BigDecimal("0.95"), true));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "chocolatey";
-            }
-        };
-        CpeDictionaryEntry handbrake = cpeEntry("cpe:2.3:a:handbrake:handbrake:1.9.9:*:*:*:*:*:*:*", "handbrake");
-        handbrake.setTargetSwValues(java.util.Set.of("*", "windows"));
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(handbrake));
-        stubSaveReturnsArgument();
-
-        ResearchJobItem item = item("HandBrake");
-        item.setVendor("HandBrake Team");
-
-        Optional<IdentifiedProduct> result = service(List.of(chocolateyLookup)).identify(item, USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getEcosystem()).isEqualTo("chocolatey");
-        assertThat(result.get().getCpe()).isNotNull();
-        assertThat(result.get().getConfidence()).isEqualByComparingTo("0.95");
-    }
-
-    @Test
     void hexAndMavenStillDefaultAllowAnArbitraryScopingTargetSwValue() {
-        // Non-regression control: STANDALONE_APPLICATION_ECOSYSTEMS is deliberately narrow to
-        // chocolatey only — hex/maven's own orElse(true)-shaped default-allow (see
+        // Non-regression control: hex/maven's own orElse(true)-shaped default-allow (see
         // ECOSYSTEM_TO_TARGET_SW's javadoc) for an arbitrary non-wildcard, non-jenkins target_sw
-        // value must be completely unaffected by this fix.
+        // value is unconditional now that no ecosystem hard-rejects via this path.
         PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
             @Override
             public Optional<RegistryMatch> lookup(String name, String version) {
