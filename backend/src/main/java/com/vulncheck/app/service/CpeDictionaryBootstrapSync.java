@@ -1,5 +1,6 @@
 package com.vulncheck.app.service;
 
+import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +24,12 @@ import org.springframework.stereotype.Component;
  * deliberately unauthenticated (no NVD API key): a key would only shorten the per-request rate-limit
  * wait from 6.5s to 0.7s, which is a small share of a sync dominated by ~30s-per-page transfer time,
  * and this way the sync needs no credential wiring at all.
+ *
+ * <p>Shares {@link NvdCpeSyncService}'s single {@code fullSyncRunning} guard (via {@link
+ * NvdCpeSyncService#tryBeginFullSync}) with the admin-triggered full sync ({@code
+ * AdminController#cpeFullSync}) — both are the same underlying operation on the same NVD rate
+ * limit and the same {@code cpe_dictionary} upserts, so only one may run at a time regardless of
+ * which trigger started it.
  */
 @Component
 @RequiredArgsConstructor
@@ -39,14 +46,24 @@ public class CpeDictionaryBootstrapSync implements ApplicationRunner {
         if (!enabled) {
             return;
         }
+        if (!nvdCpeSyncService.tryBeginFullSync()) {
+            log.warn("Full NVD CPE dictionary sync (startup-triggered) skipped: another full sync is already running");
+            return;
+        }
         Thread worker = new Thread(() -> {
             log.warn("Full NVD CPE dictionary sync starting — this takes hours; set "
                     + "CPE_FULL_SYNC_ON_STARTUP=false once it has completed so it doesn't re-run on every boot");
             long startedAt = System.currentTimeMillis();
             try {
-                int upserted = nvdCpeSyncService.syncAll(Optional.empty());
-                log.warn("Full NVD CPE dictionary sync finished: {} entries upserted in {} minutes",
-                        upserted, (System.currentTimeMillis() - startedAt) / 60000);
+                SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
+                long minutes = (System.currentTimeMillis() - startedAt) / 60000;
+                if (outcome.completed()) {
+                    log.warn("Full NVD CPE dictionary sync finished: {} entries upserted in {} minutes",
+                            outcome.upserted(), minutes);
+                } else {
+                    log.error("Full NVD CPE dictionary sync aborted early after {} entries in {} minutes — "
+                            + "dictionary is only partially synced", outcome.upserted(), minutes);
+                }
             } catch (Exception e) {
                 log.error("Full NVD CPE dictionary sync aborted", e);
             }
