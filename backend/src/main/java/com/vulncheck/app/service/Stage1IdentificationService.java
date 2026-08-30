@@ -1642,6 +1642,12 @@ public class Stage1IdentificationService {
                         .thenComparing(c -> c.targetSwMatch() ? 0 : 1)
                         .thenComparingInt(RankedCandidate::unexplainedTokenCount)
                         .thenComparingInt(RankedCandidate::versionCoverageRank)
+                        // REVISE item 2 (senior review, PR #51): versionPlausible()==false is now
+                        // always equivalent to versionCoverageRank()==2 (K2 already incorporates
+                        // versionCoverageIsPlausible's own ratio guard — see that method's javadoc),
+                        // so this key is redundant with the one just above it. Left in rather than
+                        // removed since it's harmless (a genuine tie-break no-op) and removing it is
+                        // out of scope for this fix.
                         .thenComparing(c -> c.versionPlausible() ? 0 : 1)
                         .thenComparing(c -> c.vendorAgrees() ? 0 : 1)
                         .thenComparing(java.util.Comparator.comparingInt(RankedCandidate::catalogedRowCount).reversed()))
@@ -1837,6 +1843,19 @@ public class Stage1IdentificationService {
      * boolean {@code versionCoverageIsPlausible} tie-break sitting only after {@code vendorAgrees}
      * isn't enough on its own here, because {@code vendorAgrees} itself would otherwise pick the
      * wrong, version-stale candidate first for PDF-XChange Editor).
+     *
+     * <p>REVISE item 2 (senior review, PR #51): a candidate whose cataloged major merely trails the
+     * item's own major version — but stays within {@link #versionCoverageIsPlausible}'s own ratio
+     * guard — is NOT the same as a candidate with zero cataloged evidence at all, and must not share
+     * the same (worst) rank. {@code versionCoverageIsPlausible} exists precisely to protect that
+     * "trails a bit but still plausible" candidate (see its own javadoc, backlog item 36, measured
+     * against 13.2% of golden-300's correct answers) from being treated as equivalent to "no evidence
+     * whatsoever" — collapsing both into {@code NOT_COVERS(2)} here silently defeated that guard one
+     * key earlier in the same chain. Only a candidate that exceeds the ratio guard (implausibly far
+     * beyond anything ever cataloged, e.g. Citrix Workspace's item major 2405 against a same-slug
+     * competitor with zero catalog history) is ranked {@code NOT_COVERS(2)}; "no evidence" and
+     * "trails but plausible" both share {@code UNKNOWN(1)}, exactly like {@code
+     * versionCoverageIsPlausible} itself treats them.
      */
     private int versionCoverageRank(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
@@ -1847,7 +1866,13 @@ public class Stage1IdentificationService {
         if (itemMajor.isEmpty()) {
             return 1; // UNKNOWN — item's own version isn't parseable.
         }
-        return itemMajor.getAsInt() <= maxCatalogedMajor ? 0 : 2; // COVERS : NOT_COVERS
+        if (itemMajor.getAsInt() <= maxCatalogedMajor) {
+            return 0; // COVERS.
+        }
+        // REVISE item 2: only demote to NOT_COVERS when even versionCoverageIsPlausible's own ratio
+        // guard rejects it — a candidate merely trailing behind (still within the guard) stays at
+        // UNKNOWN, the same rank "no evidence at all" gets, rather than falling to the worst rank.
+        return versionCoverageIsPlausible(entry, itemVersion) ? 1 : 2;
     }
 
     /** Backlog item 89, K3 ranking tie-break (the final one in the chain): {@code entry}'s own

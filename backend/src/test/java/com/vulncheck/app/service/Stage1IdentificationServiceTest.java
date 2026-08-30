@@ -2213,24 +2213,23 @@ class Stage1IdentificationServiceTest {
         // candidate's cataloged major 2006 is a ratio of ~1.20, comfortably under
         // VERSION_COVERAGE_IMPLAUSIBILITY_RATIO's threshold of 2.
         //
-        // Backlog item 89 (senior review 2026-08-30): K2 (versionCoverageRank), inserted ahead of
-        // this boolean ratio guard in rankCpeCandidates's own key chain, now ranks a candidate that
-        // fully COVERS the item's version strictly above one that merely trails-but-is-plausible — by
-        // design, this is exactly what makes Node.js/PDF-XChange Editor resolve correctly (see that
-        // method's own javadoc). So a same-slug candidate with genuinely full coverage is no longer a
-        // suitable "everything else ties" competitor for isolating the ratio guard in isolation; the
-        // second candidate here instead trails FAR behind the item (ratio ~24, past the
-        // implausibility threshold) so both candidates tie on K2 (NOT_COVERS) and the ratio guard
-        // below it is what actually decides between "just a few majors behind" (still plausible) and
-        // "wildly implausible" (not) — the scenario this test still exists to cover.
+        // REVISE item 2 (senior review, PR #51): restored to the original regression shape — a
+        // same-slug competitor with NO cataloged evidence at all (null maxCatalogedMajor), not a
+        // fully-covering one. A brief, now-fixed regression (backlog item 89's K2 ranking key,
+        // versionCoverageRank) collapsed "trails but plausible" and "no evidence whatsoever" into
+        // the same worst rank, which made a fully-covering competitor an unsuitable "everything
+        // else ties" opponent here (K2 alone would legitimately prefer it, masking whether this
+        // ratio guard itself still works) — see versionCoverageRank's own javadoc. With K2 now
+        // correctly ranking both candidates UNKNOWN (tied), the ratio guard (versionPlausible) is
+        // also tied (no-evidence defaults to plausible too), so the trailing candidate wins purely
+        // by stable sort, exactly as this test originally relied on.
         CpeDictionaryEntry trailingCatalog =
                 cpeEntry("cpe:2.3:a:citrix:workspace:2006.0:*:*:*:*:*:*:*", "workspace");
         trailingCatalog.setMaxCatalogedMajor(2006);
-        CpeDictionaryEntry implausiblyStaleCandidate =
-                cpeEntry("cpe:2.3:a:othervendor:workspace:100.0:*:*:*:*:*:*:*", "workspace");
-        implausiblyStaleCandidate.setMaxCatalogedMajor(100);
+        CpeDictionaryEntry noEvidenceCompetitor =
+                cpeEntry("cpe:2.3:a:othervendor:workspace:1.0.0:*:*:*:*:*:*:*", "workspace");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(trailingCatalog, implausiblyStaleCandidate));
+                .thenReturn(List.of(trailingCatalog, noEvidenceCompetitor));
         stubSaveReturnsArgument();
 
         // Item name is the bare shared slug ("workspace"), not the full "Citrix Workspace App" —
@@ -2257,25 +2256,20 @@ class Stage1IdentificationServiceTest {
         // null maxCatalogedMajor does — it is not concrete evidence of anything, so it must never be
         // punished as if it were concrete evidence the item's version is out of reach.
         //
-        // Backlog item 89 (senior review 2026-08-30): K2 (versionCoverageRank), inserted ahead of
-        // this boolean ratio guard, ranks COVERS above UNKNOWN above NOT_COVERS — a same-slug
-        // candidate with genuine full coverage evidence now legitimately outranks a zero/no-evidence
-        // one (this is the desired Node.js-shaped behavior, see rankCpeCandidates's own javadoc), so
-        // pairing zero-evidence against a *fully covering* competitor no longer isolates "zero is
-        // treated as no evidence" — it would just prove K2 prefers real evidence, a different (and
-        // already-covered) fact. What this test still needs to prove is the narrower claim: a zero
-        // max cataloged major must rank as UNKNOWN, not as bad as genuine NOT_COVERS evidence — so the
-        // competing candidate here is instead one the item's version concretely exceeds (itemMajor 9
-        // vs. cataloged major 1), which K2 alone ranks as NOT_COVERS(2), strictly worse than
-        // zero-evidence's UNKNOWN(1).
+        // REVISE item 2 (senior review, PR #51): restored to the original regression shape — a
+        // same-slug competitor with NO cataloged evidence at all (null maxCatalogedMajor), not a
+        // fully-covering one (see the sibling test above for why a fully-covering competitor no
+        // longer isolates anything once K2, versionCoverageRank, exists). With the {@code <= 0}
+        // case correctly treated as "no evidence", both candidates tie all the way down the key
+        // chain (K2, the ratio guard, vendor agreement, cataloged row count), so the zero-evidence
+        // candidate wins purely by stable sort, exactly as this test originally relied on.
         CpeDictionaryEntry zeroEvidence =
                 cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
         zeroEvidence.setMaxCatalogedMajor(0);
-        CpeDictionaryEntry concretelyExceededCandidate =
+        CpeDictionaryEntry noEvidenceCompetitor =
                 cpeEntry("cpe:2.3:a:othervendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
-        concretelyExceededCandidate.setMaxCatalogedMajor(1);
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(zeroEvidence, concretelyExceededCandidate));
+                .thenReturn(List.of(zeroEvidence, noEvidenceCompetitor));
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("widget-tool");
