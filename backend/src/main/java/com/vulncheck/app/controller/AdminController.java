@@ -8,6 +8,7 @@ import com.vulncheck.app.repository.OsvSyncFailureRepository;
 import com.vulncheck.app.repository.OsvSyncStateRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.NvdCpeSyncService;
+import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
 import com.vulncheck.app.service.UserApiKeyService;
 import com.vulncheck.app.service.csaf.RedHatCsafSyncService;
 import com.vulncheck.app.service.csaf.SiemensCsafSyncService;
@@ -90,9 +91,15 @@ public class AdminController {
             log.warn("Full NVD CPE dictionary sync starting (admin-triggered) — this takes hours");
             long startedAt = System.currentTimeMillis();
             try {
-                int upserted = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
-                log.warn("Full NVD CPE dictionary sync (admin-triggered) finished: {} entries upserted in {} minutes",
-                        upserted, (System.currentTimeMillis() - startedAt) / 60000);
+                SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
+                long minutes = (System.currentTimeMillis() - startedAt) / 60000;
+                if (outcome.completed()) {
+                    log.warn("Full NVD CPE dictionary sync (admin-triggered) finished: {} entries upserted in {} minutes",
+                            outcome.upserted(), minutes);
+                } else {
+                    log.error("Full NVD CPE dictionary sync (admin-triggered) aborted early after {} entries in {} "
+                            + "minutes — dictionary is only partially synced", outcome.upserted(), minutes);
+                }
             } catch (Exception e) {
                 log.error("Full NVD CPE dictionary sync (admin-triggered) aborted", e);
             }

@@ -27,6 +27,11 @@ import org.springframework.web.util.UriComponentsBuilder;
  * (~1.3M entries) still isn't practical even with a key, so {@link #syncByKeyword} remains the
  * practical entry point, while {@link #syncAllAndRelease} is the same pagination loop with no
  * keyword filter for when a full mirror is actually wanted.
+ *
+ * <p>{@link #syncAllAndRelease} returns a {@link SyncOutcome} rather than a bare upserted count so
+ * callers can tell a clean finish from an early abort (a page fetch failing part-way through a
+ * ~180-page, multi-hour sync) — treating both as "finished" made an aborted, only-partially-synced
+ * dictionary look complete in the admin/startup logs, silently degrading Stage1 accuracy.
  */
 @Service
 @RequiredArgsConstructor
@@ -44,6 +49,13 @@ public class NvdCpeSyncService {
     private final CpeDictionaryRepository cpeDictionaryRepository;
     private final NvdRateLimiter nvdRateLimiter;
 
+    /** Result of an unfiltered full-dictionary sync. {@code completed} is false when the
+     *  pagination loop had to abort early (a page fetch failed after {@code startIndex}
+     *  advanced past 0) rather than exhausting {@code totalResults} — callers must not log this
+     *  as a plain success, since the dictionary is then only partially synced. */
+    public record SyncOutcome(int upserted, boolean completed) {
+    }
+
     /** Full-sync "already running" guard, shared across every caller of {@link #tryBeginFullSync}
      *  (admin-triggered and startup-triggered) — matching this codebase's existing convention of
      *  an {@code AtomicBoolean running} guard held by the service itself (see {@code
@@ -55,7 +67,7 @@ public class NvdCpeSyncService {
 
     /** Syncs only CPEs matching the given keyword — the practical way to populate/test locally. */
     public int syncByKeyword(String keyword, Optional<String> apiKey) {
-        return sync(keyword, apiKey);
+        return sync(keyword, apiKey).upserted();
     }
 
     /**
@@ -75,7 +87,7 @@ public class NvdCpeSyncService {
      * slot is released here unconditionally (success or exception) so a failed sync doesn't
      * permanently wedge the guard.
      */
-    public int syncAllAndRelease(Optional<String> apiKey) {
+    public SyncOutcome syncAllAndRelease(Optional<String> apiKey) {
         try {
             return sync(null, apiKey);
         } finally {
@@ -106,7 +118,7 @@ public class NvdCpeSyncService {
         return upserted;
     }
 
-    private int sync(String keyword, Optional<String> apiKey) {
+    private SyncOutcome sync(String keyword, Optional<String> apiKey) {
         int startIndex = 0;
         int totalUpserted = 0;
         int totalResults = Integer.MAX_VALUE;
@@ -115,7 +127,10 @@ public class NvdCpeSyncService {
             nvdRateLimiter.awaitTurn(apiKey.isPresent());
             JsonNode page = fetchPage(keyword, startIndex, RESULTS_PER_PAGE, apiKey, nvdSyncRestClient);
             if (page == null) {
-                break;
+                // fetchPage() treats a failed request (429/5xx/etc, see NvdRateLimiter) as an
+                // empty result rather than throwing, so this is an early abort, not a clean
+                // exhaustion of totalResults — callers must not report this as "finished".
+                return new SyncOutcome(totalUpserted, false);
             }
 
             totalResults = page.path("totalResults").asInt(0);
@@ -142,7 +157,7 @@ public class NvdCpeSyncService {
             }
         }
 
-        return totalUpserted;
+        return new SyncOutcome(totalUpserted, true);
     }
 
     private JsonNode fetchPage(String keyword, int startIndex, int resultsPerPage, Optional<String> apiKey) {

@@ -1,5 +1,6 @@
 package com.vulncheck.app.service;
 
+import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -54,9 +55,15 @@ public class CpeDictionaryBootstrapSync implements ApplicationRunner {
                     + "CPE_FULL_SYNC_ON_STARTUP=false once it has completed so it doesn't re-run on every boot");
             long startedAt = System.currentTimeMillis();
             try {
-                int upserted = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
-                log.warn("Full NVD CPE dictionary sync finished: {} entries upserted in {} minutes",
-                        upserted, (System.currentTimeMillis() - startedAt) / 60000);
+                SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
+                long minutes = (System.currentTimeMillis() - startedAt) / 60000;
+                if (outcome.completed()) {
+                    log.warn("Full NVD CPE dictionary sync finished: {} entries upserted in {} minutes",
+                            outcome.upserted(), minutes);
+                } else {
+                    log.error("Full NVD CPE dictionary sync aborted early after {} entries in {} minutes — "
+                            + "dictionary is only partially synced", outcome.upserted(), minutes);
+                }
             } catch (Exception e) {
                 log.error("Full NVD CPE dictionary sync aborted", e);
             }

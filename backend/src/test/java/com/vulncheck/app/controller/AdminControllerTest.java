@@ -15,6 +15,7 @@ import com.vulncheck.app.repository.OsvSyncFailureRepository;
 import com.vulncheck.app.repository.OsvSyncStateRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.NvdCpeSyncService;
+import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
 import com.vulncheck.app.service.UserApiKeyService;
 import com.vulncheck.app.service.csaf.RedHatCsafSyncService;
 import com.vulncheck.app.service.csaf.SiemensCsafSyncService;
@@ -84,7 +85,7 @@ class AdminControllerTest {
         when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenAnswer(invocation -> {
             started.countDown();
             release.await(5, TimeUnit.SECONDS);
-            return 42;
+            return new SyncOutcome(42, true);
         });
 
         AdminController controller = newController();
@@ -116,7 +117,7 @@ class AdminControllerTest {
         when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenAnswer(invocation -> {
             started.countDown();
             release.await(5, TimeUnit.SECONDS);
-            return 1;
+            return new SyncOutcome(1, true);
         });
 
         AdminController controller = newController();
