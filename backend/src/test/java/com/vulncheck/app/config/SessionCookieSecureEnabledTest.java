@@ -16,6 +16,11 @@ import org.springframework.http.ResponseEntity;
  * session cookie must actually carry the {@code Secure} attribute. A separate {@code
  * @SpringBootTest} context (distinct {@code properties}) is used rather than toggling the flag
  * within one test class, since the property is only read once at context startup.
+ *
+ * <p>Like {@link SessionCookieSecureDefaultTest}, this verifies what Tomcat actually emits on the
+ * wire once binding has already happened, not the production YAML's placeholder wiring itself
+ * (which {@code src/test/resources/application.yml} shadows for any {@code @SpringBootTest}
+ * context) — that wiring is covered separately by {@link SessionCookieConfigBindingTest}.
  */
 @SpringBootTest(
         webEnvironment = WebEnvironment.RANDOM_PORT,

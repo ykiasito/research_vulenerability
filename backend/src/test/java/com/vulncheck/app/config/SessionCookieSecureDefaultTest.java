@@ -36,6 +36,12 @@ import org.springframework.http.ResponseEntity;
  * back with no session/cookie at all. Redirect-following is disabled on the {@link
  * TestRestTemplate} (reusing {@link RestClientConfig#noRedirectRequestFactory}) so the 302's own
  * headers are what gets asserted on, not whatever {@code /login} itself returns.
+ *
+ * <p>This verifies what Tomcat actually emits on the wire once binding has already happened; it
+ * cannot catch a mistake in the production YAML's placeholder wiring itself, since {@code
+ * backend/src/test/resources/application.yml} shadows {@code
+ * backend/src/main/resources/application.yml} for this {@code @SpringBootTest} context — that
+ * wiring is covered separately by {@link SessionCookieConfigBindingTest}.
  */
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
 class SessionCookieSecureDefaultTest {
