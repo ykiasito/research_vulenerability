@@ -1,4 +1,10 @@
-fastapi==0.115.0
+fastapi==0.141.1
 uvicorn[standard]==0.30.6
+# starlette is a transitive dep of fastapi, but is pinned explicitly here because fastapi==0.115.0's
+# own version cap (<0.39.0) silently resolved to starlette 0.38.6, which carries 12 known CVEs
+# (3 HIGH, incl. CVE-2024-47874 DoS and several request.url Host/path spoofing issues fixed only in
+# 1.x). fastapi had to be bumped too since no 0.115.x release lifts that cap far enough — the cap was
+# only lifted around fastapi 0.133 (see task-backlog.md item 46 for the version-by-version check).
+starlette==1.6.0
 anthropic==1.0.0
 pydantic>=2.0.0,<3.0.0
