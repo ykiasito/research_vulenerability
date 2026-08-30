@@ -97,6 +97,21 @@ public class JobCostBudgetService {
                             + "spend cap will use this non-default value until it is changed back",
                     costCapPerItemUsd, DEFAULT_COST_CAP_PER_ITEM_USD);
         }
+        // REVISE item 3 (senior review, PR #51): app.tier2-budget-floor-per-item-usd's own javadoc
+        // (see #tier2BudgetFloorPerItemUsd) documents that raising it above 0 is a separate,
+        // not-yet-settled product decision (docs/spec/task-backlog.md item 91) gated on no call site
+        // actually drawing from the floor pool it carves out yet — but nothing enforced or even
+        // warned about that until now, so a config value raised ahead of that wiring would silently
+        // do nothing but shrink every job's own common AI budget pool for no benefit. Warn loudly
+        // rather than fail startup: the floor carve-out itself is harmless arithmetic (see
+        // #startJobBudget), just a pure loss while unwired.
+        if (tier2BudgetFloorPerItemUsd.signum() > 0) {
+            log.warn("app.tier2-budget-floor-per-item-usd is set to {} but no call site consumes this "
+                            + "reserved floor pool yet (docs/spec/task-backlog.md item 91 wiring is not "
+                            + "done) — this setting currently only shrinks every job's common AI budget "
+                            + "pool with no offsetting benefit; set it back to 0 until the wiring lands",
+                    tier2BudgetFloorPerItemUsd);
+        }
     }
 
     // Claude Haiku 4.5 list pricing ($1.00 / $5.00 per MTok input/output) and the Claude API web
