@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.vulncheck</groupId>
+    <artifactId>vulncheck-server</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <name>vulncheck-server</name>
+    <description>Software vulnerability research server</description>
+
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-thymeleaf</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.thymeleaf.extras</groupId>
+            <artifactId>thymeleaf-extras-springsecurity6</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <!-- Spring Boot 3.5.16's dependency management still pins 42.7.11, which is vulnerable to
+             CVE-2026-54291 (SCRAM-SHA-256-PLUS auth downgrade allows MITM to bypass channel binding).
+             Pin explicitly to the fixed line until the parent BOM catches up. -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.13</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-csv</artifactId>
+            <version>1.11.0</version>
+        </dependency>
+        <!-- GHSA baseline sync (GhsaSyncService) reads github/advisory-database's main-branch tarball
+             (codeload.github.com's *.tar.gz format, GNU/PAX long-name entries included) — see
+             docs/spec/ghsa-mirror-plan.md §4-1/§5-2. java.util.zip has no TAR support, and GitHub's
+             archive uses GNU/PAX long-name extensions for entries this app cares about (github-reviewed
+             advisory paths routinely exceed ustar's 100-char name field), so a hand-rolled reader would
+             need to reimplement those extensions — commons-compress's TarArchiveInputStream already
+             handles them correctly. -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-compress</artifactId>
+            <version>1.27.1</version>
+        </dependency>
+        <!-- RedHatCsafSyncService's baseline sync streams Red Hat's real csaf_advisories_*.tar.zst
+             archive (docs/spec/csaf-vendor-advisory-plan.md §5-6/go-no-go review item 5) — confirmed
+             live 2026-08-27 that this archive is real, ~103.4MB compressed, .zst-compressed tar.
+             commons-compress's ZstdCompressorInputStream declares its own com.github.luben:zstd-jni
+             dependency as <optional>true</optional> (native zstd bindings, not a pure-Java codec), so
+             it must be pulled in explicitly here or CSAF archive decompression fails at runtime with
+             a ClassNotFoundException, not a compile error. -->
+        <dependency>
+            <groupId>com.github.luben</groupId>
+            <artifactId>zstd-jni</artifactId>
+            <version>1.5.5-5</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>vulncheck-server</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

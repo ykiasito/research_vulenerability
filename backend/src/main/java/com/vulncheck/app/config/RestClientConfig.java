@@ -1,0 +1,171 @@
+package com.vulncheck.app.config;
+
+import java.net.HttpURLConnection;
+import java.time.Duration;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
+import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.web.client.RestClient;
+
+@Configuration
+public class RestClientConfig {
+
+    /**
+     * Builds a plain {@link SimpleClientHttpRequestFactory} (backed by {@link
+     * HttpURLConnection}) with the given timeouts. Deliberately not the deprecated {@code
+     * ClientHttpRequestFactories.get(...)} helper: as of Spring Boot 3.4 its auto-detection picks
+     * {@code JdkClientHttpRequestFactory} ({@link java.net.http.HttpClient}) whenever it's on the
+     * classpath, which changes read-timeout semantics from "socket idle timeout" to "timeout for
+     * the whole request" — a silent behavior change that a BOM bump alone would otherwise
+     * introduce. Explicitly constructing {@link SimpleClientHttpRequestFactory} keeps the
+     * pre-3.4 transport and timeout semantics regardless of what's on the classpath.
+     *
+     * <p>Package-private (rather than {@code private}) so the unit test can call it directly and
+     * assert on the concrete factory type and its effective timeouts.
+     */
+    static SimpleClientHttpRequestFactory simpleRequestFactory(Duration connectTimeout, Duration readTimeout) {
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout((int) connectTimeout.toMillis());
+        requestFactory.setReadTimeout((int) readTimeout.toMillis());
+        return requestFactory;
+    }
+
+    /**
+     * Same as {@link #simpleRequestFactory}, but with automatic HTTP redirect following disabled —
+     * for clients that must inspect and re-validate each redirect hop against their own host
+     * allowlist rather than following blindly (SSRF hardening; see each caller's javadoc).
+     *
+     * <p>Uses Spring Boot's native {@code ClientHttpRequestFactorySettings.Redirects.DONT_FOLLOW}
+     * (available since Boot 3.4, {@code org.springframework.boot.http.client} package — not the
+     * older {@code org.springframework.boot.web.client.ClientHttpRequestFactorySettings}, which has
+     * no redirects control at all) instead of a hand-written {@link SimpleClientHttpRequestFactory}
+     * subclass. Confirmed by decompiling {@code
+     * SimpleClientHttpRequestFactoryBuilder$SimpleClientHttpsRequestFactory} in spring-boot
+     * 3.5.16.jar: it calls {@link HttpURLConnection#setInstanceFollowRedirects}{@code (false)} when
+     * {@code settings.redirects() == DONT_FOLLOW} — the exact same mechanism a hand-written subclass
+     * would use, so this is not a behavior change.
+     */
+    static SimpleClientHttpRequestFactory noRedirectRequestFactory(Duration connectTimeout, Duration readTimeout) {
+        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.defaults()
+                .withConnectTimeout(connectTimeout)
+                .withReadTimeout(readTimeout)
+                .withRedirects(ClientHttpRequestFactorySettings.Redirects.DONT_FOLLOW);
+        return ClientHttpRequestFactoryBuilder.simple().build(settings);
+    }
+
+    @Bean
+    public RestClient externalApiRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(10));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (product identification)")
+                .build();
+    }
+
+    /**
+     * For the paginating NVD CPE dictionary sync only — NOT for per-item lookups. A full-dictionary
+     * page (10,000 CPEs, ~3MB) measured 29.5s to return from NVD, which the 10s read timeout on
+     * {@link #externalApiRestClient} would kill outright, so a full sync could never complete on
+     * that client. Deliberately a separate bean rather than relaxing the shared one: the short
+     * timeout is exactly what we want for a per-item live lookup, where a hung NVD should fail fast
+     * and let the item fall through instead of stalling the whole job for minutes.
+     */
+    @Bean
+    public RestClient nvdSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(10), Duration.ofMinutes(5));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (cpe dictionary sync)")
+                .build();
+    }
+
+    /**
+     * For CSAF vendor advisory sync ({@code SiemensCsafSyncService}, and later a Red Hat
+     * equivalent). Deliberately NOT the shared {@link #externalApiRestClient} — the CSAF sync
+     * flow follows vendor-supplied URLs (provider-metadata -> ROLIE feed -> per-document links)
+     * that are themselves an SSRF-shaped risk (see the plan's §6), so this client disables
+     * automatic HTTP redirect following (see {@link #noRedirectRequestFactory}) so the sync
+     * service can inspect and re-validate each hop's host against its own allowlist itself rather
+     * than silently trusting wherever {@link HttpURLConnection}'s default redirect handling would
+     * otherwise follow. The descriptive User-Agent (with a contact address) follows §5-7's
+     * requirement — a background sync loop is a more continuous, higher-frequency access pattern
+     * than this app's existing per-item lookups, so a vendor who notices unusual traffic has a way
+     * to reach the operator.
+     */
+    @Bean
+    public RestClient csafSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                noRedirectRequestFactory(Duration.ofSeconds(10), Duration.ofSeconds(30));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (csaf vendor advisory sync; +mailto:security-tooling@vulncheck-server.invalid)")
+                .build();
+    }
+
+    /**
+     * For GHSA advisory mirror sync ({@code GhsaSyncService}) — same no-auto-redirect rationale as
+     * {@link #csafSyncRestClient}: {@code GET /repos/github/advisory-database/tarball/main} (the
+     * baseline archive endpoint) returns an HTTP 302 to {@code codeload.github.com} (confirmed live
+     * 2026-08-27 — see {@code docs/spec/ghsa-mirror-plan.md} §2-4/§5-2), which the sync service must
+     * inspect and re-validate against its own host allowlist ({@code api.github.com}/{@code
+     * raw.githubusercontent.com}/{@code codeload.github.com}) rather than following blindly. Only
+     * for the REST API calls and per-document {@code raw.githubusercontent.com} fetches, which are
+     * all small (a JSON document or a paginated list response) — the tarball body itself is streamed
+     * through a plain {@link java.net.URLConnection} with an unbounded read timeout, mirroring
+     * {@code CveOrgSyncService#download}, once the redirect target is resolved and validated.
+     */
+    @Bean
+    public RestClient ghsaSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                noRedirectRequestFactory(Duration.ofSeconds(10), Duration.ofSeconds(30));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (ghsa sync)")
+                .build();
+    }
+
+    /**
+     * For OSV.dev mirror sync ({@code OsvSyncService}) — used only for the bounded, small requests
+     * (delta's per-document {@code {directory}/{id}.json} fetches, ≤5MB each). The 10 per-ecosystem
+     * baseline {@code {ecosystem}/all.zip} downloads and the {@code modified_id.csv} fetch (up to
+     * hundreds of MB combined) instead stream through a plain {@link java.net.URLConnection} with an
+     * unbounded read timeout, mirroring {@code CveOrgSyncService#download}/{@code
+     * GhsaSyncService#openStream} — the same reason {@link #ghsaSyncRestClient} isn't used for the
+     * GHSA tarball body either. No-auto-redirect, same SSRF-hardening rationale as {@link
+     * #ghsaSyncRestClient}.
+     */
+    @Bean
+    public RestClient osvSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                noRedirectRequestFactory(Duration.ofSeconds(10), Duration.ofSeconds(30));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (osv sync)")
+                .build();
+    }
+
+    /**
+     * Points at the Python LLM microservice (Stage1 Tier2/Tier3, Stage4). Longer read timeout
+     * than the external-API client — a web_search-enabled Claude call can take well over 10s.
+     */
+    @Bean
+    public RestClient llmServiceRestClient(@Value("${app.llm-service-url}") String llmServiceUrl) {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(60));
+
+        return RestClient.builder()
+                .baseUrl(llmServiceUrl)
+                .requestFactory(requestFactory)
+                .build();
+    }
+}

@@ -1,0 +1,11 @@
+-- V24__job_cost_ledger_item_index.sql
+-- REVISE (senior review 2026-08-28): job_cost_ledger.job_item_id had a foreign key
+-- (ON DELETE CASCADE to research_job_items, see V23) but no index of its own. Postgres does not
+-- automatically index foreign key columns, so deleting a research_job_items row forces a full
+-- table scan of job_cost_ledger to find the dependent rows to cascade-delete, and any future
+-- per-item cost lookup (join on job_item_id) would pay the same cost. This index fixes both.
+--
+-- V23 is already applied to vulncheck_test with its checksum recorded, so it must not be edited —
+-- this is a separate, additive migration instead (same additive-only rollback constraint as V23;
+-- see its own header comment).
+CREATE INDEX idx_job_cost_ledger_job_item_id ON job_cost_ledger (job_item_id);

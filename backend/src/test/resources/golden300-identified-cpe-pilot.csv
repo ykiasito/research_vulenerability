@@ -1,0 +1,5 @@
+product_name,version,vendor,usage_text,install_url
+Cisco IOS XE,17.9.4a,Cisco,used as the operating system on the organization's core network routers/switches,
+PAN-OS,10.2.4,Palo Alto Networks,used as the operating system on the organization's perimeter firewall appliances,
+MikroTik RouterOS,6.49.10,MikroTik,used as the operating system on branch-office routers,
+Metasploit Framework,6.3.55,Rapid7,used by the security team to validate exploitability of findings during penetration tests,

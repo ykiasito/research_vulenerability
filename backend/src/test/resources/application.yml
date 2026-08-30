@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: vulncheck-server
+
+  # Hardcoded on purpose (no ${SPRING_DATASOURCE_URL:...} env fallback): this file exists
+  # specifically so that `mvn test` can never silently fall back to (or be pointed at) the real
+  # dev database. Tests must always run against the dedicated vulncheck_test database.
+  datasource:
+    url: jdbc:postgresql://postgres:5432/vulncheck_test
+    # Dedicated non-superuser role, scoped to only the vulncheck_test database/public schema
+    # (2026-08-29) — separate from the production `vulncheck` superuser role so a test run can never
+    # touch anything outside its own sandboxed database, even by accident.
+    username: vulncheck_test
+    password: vulncheck_test
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  thymeleaf:
+    cache: false
+
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 5MB
+
+app:
+  # Test-only key, not the retired production default (SecretEncryptionService now fail-fasts on
+  # that hash) and not used anywhere outside `mvn test` against vulncheck_test. This repository is
+  # public, so this literal is public knowledge by definition — never reuse it (or generate a fresh
+  # one and reuse that) outside of tests, and never point this key at any real/production database.
+  secret-encryption-key: 6tdyAv3iE6mznN5rAvyzoSPSfZ2No6Y1Tq4hlubAB0s=
+  llm-service-url: http://llm-service:8000
+  admin-email: ""
+  job-retention-days: 30
+  cpe-full-sync-on-startup: false
+
+server:
+  port: 8080
+
+logging:
+  level:
+    org.springframework.security: INFO

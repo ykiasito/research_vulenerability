@@ -1,0 +1,11 @@
+-- V26__research_job_items_raw_product_name.sql
+-- Preserves the user's original CSV product-name text verbatim (including any "(...)"/"※"
+-- annotation noise, e.g. "swA(補足)" or "swB※備考") so results/export can show what the user
+-- actually typed, while product_name keeps holding the ProductNameAnnotationStripper-cleaned
+-- value used for Stage1 identification (dictionary trigram search / registry lookups) — see
+-- ResearchJobService#createJob, the single point where a CSV cell becomes an entity.
+--
+-- Additive-only, nullable: rows created before this migration have no raw text to backfill from
+-- (the annotated original was never persisted) and stay NULL forever; display/export code falls
+-- back to product_name for those rows (see ResearchJobItem#getDisplayProductName).
+ALTER TABLE research_job_items ADD COLUMN raw_product_name TEXT;

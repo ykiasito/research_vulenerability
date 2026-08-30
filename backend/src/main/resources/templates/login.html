@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>ログイン - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>ログイン</h1>
+
+<p th:if="${param.error}" style="color: red;">メールアドレスまたはパスワードが正しくありません。</p>
+<p th:if="${param.logout}" style="color: green;">ログアウトしました。</p>
+<p th:if="${param.registered}" style="color: green;">登録が完了しました。ログインしてください。</p>
+
+<form th:action="@{/login}" method="post">
+    <div>
+        <label for="username">メールアドレス</label>
+        <input type="email" id="username" name="username" required="required"/>
+    </div>
+    <div>
+        <label for="password">パスワード</label>
+        <input type="password" id="password" name="password" required="required"/>
+    </div>
+    <button type="submit">ログイン</button>
+</form>
+
+<p><a th:href="@{/register}">新規登録はこちら</a></p>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>ジョブ一覧 - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>調査ジョブ一覧</h1>
+
+<p><a th:href="@{/jobs/new}">新規CSVアップロード</a></p>
+<p style="font-size: 0.85em; color: #555;">作成から30日経過したジョブは自動的に削除されます。</p>
+
+<table border="1" cellpadding="4">
+    <thead>
+    <tr>
+        <th>ID</th>
+        <th>ファイル名</th>
+        <th>ステータス</th>
+        <th>作成日時</th>
+        <th></th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr th:each="job : ${jobs}">
+        <td><a th:href="@{'/jobs/' + ${job.id}}" th:text="${job.id}"></a></td>
+        <td th:text="${job.csvFilename}"></td>
+        <td th:text="${job.status}"></td>
+        <td th:text="${job.createdAt}"></td>
+        <td>
+            <form th:action="@{'/jobs/' + ${job.id} + '/delete'}" method="post"
+                  onsubmit="return confirm('このジョブと結果を削除します。よろしいですか？');">
+                <button type="submit">削除</button>
+            </form>
+        </td>
+    </tr>
+    <tr th:if="${jobs.isEmpty()}">
+        <td colspan="5">まだジョブがありません。</td>
+    </tr>
+    </tbody>
+</table>
+
+<p><a th:href="@{/}">ホームに戻る</a></p>
+</body>
+</html>

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>CSAF（Siemens）同期 - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>Siemens CSAFベンダーアドバイザリー同期</h1>
+
+<p th:if="${result}" th:text="${result}" style="color: green;"></p>
+
+<h2>同期状態</h2>
+<p th:if="${syncState == null}" style="color: #b00;">未同期です（一度も全件同期を実行していません）。</p>
+<p th:if="${syncState != null}">
+    最終同期日時: <span th:text="${syncState.lastSyncedAt}"></span><br/>
+    同期カーソル（最後に処理したROLIEエントリのupdated日時）: <span th:text="${syncState.lastCursor}"></span>
+</p>
+
+<h2>差分同期（日次・小規模）</h2>
+<p>
+    前回の同期カーソルより新しいアドバイザリーのみを取得します。通常は数件程度です。
+    本番では毎日03:45 UTCに自動実行されます。
+</p>
+<form th:action="@{/admin/csaf-siemens/sync-delta}" method="post">
+    <button type="submit">差分同期を今すぐ実行</button>
+</form>
+
+<h2>全件同期（初回・カーソル無視）</h2>
+<p style="color: #b00;">
+    ROLIEフィードの全エントリ（2026-08時点で831件）を処理します。1文書につき2リクエスト（本文＋ハッシュ）を
+    レート制限（500ms間隔）ごしに順次取得するため、想定所要時間は<strong>30〜40分</strong>規模です。
+</p>
+<p style="color: #b00;">
+    このボタンはリクエストが完了するまで応答を返さない同期処理のため、ブラウザ／HTTPリクエスト自体は
+    その前にタイムアウトする可能性が高いです。タイムアウトしても同期はサーバー側で継続して実行されて
+    いるため、時間を置いてこのページを再読み込みし、上の「同期状態」欄で進捗・完了を確認してください
+    （タイムアウト＝失敗ではありません）。
+</p>
+<form th:action="@{/admin/csaf-siemens/sync-baseline}" method="post"
+      onsubmit="return confirm('全件同期を実行します。よろしいですか？');">
+    <button type="submit">全件同期を実行</button>
+</form>
+
+<p><a th:href="@{/}">ホームに戻る</a></p>
+</body>
+</html>

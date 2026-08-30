@@ -1,0 +1,113 @@
+spring:
+  application:
+    name: vulncheck-server
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/vulncheck}
+    username: ${SPRING_DATASOURCE_USERNAME:vulncheck}
+    # No default: a committed dev-only password default is the same class of problem as the
+    # encryption key default below. MUST be set via SPRING_DATASOURCE_PASSWORD in every environment.
+    password: ${SPRING_DATASOURCE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  thymeleaf:
+    # Enabled by default (production-appropriate: templates are baked into the image, never
+    # edited live in the running container, so re-parsing on every render is pure overhead). Set
+    # THYMELEAF_CACHE_ENABLED=false only for a deliberate template-focused debugging session.
+    cache: ${THYMELEAF_CACHE_ENABLED:true}
+
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 5MB
+
+app:
+  # No default (see SecretEncryptionService): a committed dev-only default here was previously the
+  # de facto encryption key in every deployment because docker-compose.yml never wired this env var
+  # through. MUST be set via APP_SECRET_ENCRYPTION_KEY — SecretEncryptionService fails fast at
+  # startup if it's blank or matches a retired default's hash.
+  secret-encryption-key: ${APP_SECRET_ENCRYPTION_KEY:}
+  # docker-compose service name by default; override for non-compose environments.
+  llm-service-url: ${LLM_SERVICE_URL:http://llm-service:8000}
+  # The one account granted ROLE_ADMIN (see AppUserDetailsService) — /admin/** requires it. Empty
+  # by default (no admin at all) so a fresh deployment never accidentally leaves admin endpoints
+  # open to every authenticated user. Set to the operator's own login email.
+  admin-email: ${ADMIN_EMAIL:}
+  # Research jobs (and everything under them) older than this are deleted daily at 04:00 UTC.
+  # 0 or negative disables the cleanup entirely.
+  job-retention-days: ${JOB_RETENTION_DAYS:30}
+  # One-shot full NVD CPE Dictionary mirror (~1.8M entries) on startup. Off by default: it runs for
+  # hours and only needs to happen once per environment. See CpeDictionaryBootstrapSync.
+  cpe-full-sync-on-startup: ${CPE_FULL_SYNC_ON_STARTUP:false}
+  # High-confidence AI verification backstop (see HighConfidenceVerificationService) — an extra
+  # AI+web_search check for Stage1 items that reached a high-confidence CPE match purely via static
+  # (Tier1) logic, never reviewed by Tier2/Tier3's AI disambiguation. Off by default so this never
+  # changes existing behavior/cost for a job unless explicitly turned on. Note (REVISE item 7,
+  # senior review 2026-08-29, PR #1): this check runs synchronously on the item-processing thread
+  # (itemProcessingExecutor, max 8 parallel) like every other AI tier — enabling it can plausibly add
+  # on the order of 7-8 minutes of wall-clock throughput to a 1,000-item job.
+  high-confidence-verification:
+    enabled: ${HIGH_CONFIDENCE_VERIFICATION_ENABLED:false}
+    # Only a static match at or above this confidence is eligible.
+    confidence-threshold: ${HIGH_CONFIDENCE_VERIFICATION_THRESHOLD:0.95}
+    # Multiplier applied to confidence when the AI verdict is "incorrect". An INCORRECT verdict with
+    # no surviving registry-based fallback signal is always demoted fully to UNIDENTIFIED regardless
+    # of this factor (REVISE item 4, senior review 2026-08-29, PR #1 — see
+    # HighConfidenceVerificationService#applyIncorrectVerdict's javadoc for why a configurable
+    # demotion floor was removed).
+    downgrade-factor: ${HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR:0.5}
+    # Per-job AI-spend cap per item for this feature's OWN ledger (see
+    # JobCostBudgetService#verificationCostCapPerItemUsd) — deliberately separate from, and not
+    # counted against, app.cost-cap-per-item-usd below. Defaults to 0 (verification effectively
+    # never affordable) so simply flipping `enabled` above to true never silently exhausts a job's
+    # always-on AI budget for every other tier — must be set to a real value alongside `enabled`.
+    cost-cap-per-item-usd: ${HIGH_CONFIDENCE_VERIFICATION_COST_CAP_PER_ITEM_USD:0}
+  # Per-job AI-spend cap per item (see JobCostBudgetService#costCapPerItemUsd) — $5/1,000 items by
+  # default. Only override for a throwaway diagnostic job deliberately made of AI-eligible items.
+  cost-cap-per-item-usd: ${APP_COST_CAP_PER_ITEM_USD:0.005}
+
+server:
+  port: 8080
+  servlet:
+    session:
+      cookie:
+        # Secure attribute on the session cookie (JSESSIONID) — restricts it to HTTPS-only
+        # transport. Off by default: the current docker-compose setup has no TLS termination, so
+        # local dev and any HTTP-only environment would lose the ability to log in (a Secure cookie
+        # is never sent back by the browser over plain HTTP) if this defaulted to true. MUST be set
+        # to true via SESSION_COOKIE_SECURE once the deployment sits behind TLS (see
+        # docs/spec/ec2-deployment-guide.md) — otherwise the session cookie can leak in plaintext.
+        secure: ${SESSION_COOKIE_SECURE:false}
+        # Already Spring Boot/Tomcat's default even when unset (true) — pinned explicitly here so
+        # this block documents the full, intentional cookie-hardening posture (Secure + HttpOnly)
+        # in one place instead of leaving HttpOnly's protection implicit.
+        http-only: true
+
+logging:
+  level:
+    org.springframework.security: INFO
+  # Writes to console AND this file (Spring Boot's default logback config adds a FILE appender
+  # automatically once logging.file.name is set — no custom logback.xml needed). The directory is
+  # bind-mounted to the host via docker-compose.yml so log files survive container
+  # restarts/recreates and are readable directly from the host filesystem, not just via
+  # `docker compose logs`. Override via LOG_FILE for non-compose environments.
+  file:
+    name: ${LOG_FILE:/var/log/app/backend.log}
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 14
+      total-size-cap: 500MB

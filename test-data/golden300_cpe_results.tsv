@@ -1,0 +1,338 @@
+=== Cisco IOS XE === total=1224 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Cisco%20IOS%20XE&resultsPerPage=15
+    cpe:2.3:o:cisco:ios:12.0\(1\)xe:*:*:*:*:*:*:*  |  Cisco IOS 12.0.1 XE
+    cpe:2.3:o:cisco:ios_xe:2.4.0:*:*:*:*:*:*:*  |  Cisco IOS XE 2.4.0
+=== PAN-OS === total=780 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=PAN-OS&resultsPerPage=15
+    cpe:2.3:o:paloaltonetworks:pan-os:4.0.9:*:*:*:*:*:*:*  |  paloaltonetworks pan-os 4.0.9
+=== MikroTik RouterOS === total=744 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=MikroTik%20RouterOS&resultsPerPage=15
+    cpe:2.3:o:mikrotik:routeros:5.15:*:*:*:*:*:*:*  |  MikroTik RouterOS 5.15
+=== Android Studio === total=42 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Android%20Studio&resultsPerPage=15
+    cpe:2.3:a:studiohitori:twitrocker2_android:1.0.23:*:*:*:*:*:*:*  |  StudioHitori TwitRocker2 for Android 1.0.23
+    cpe:2.3:a:picsart:picsart_-_photo_studio:4.5.5:*:*:*:*:android:*:*  |  picsart PicsArt - Photo Studio (aka com.picsart.studio) for Android 4.5.5
+    cpe:2.3:a:ingen-studios:conquest_of_fantasia:1.0.1:*:*:*:*:android:*:*  |  ingen studios Conquest Of Fantasia (aka air.com.ingen.studios.cof.sg) for Android 1.0.1
+    cpe:2.3:a:hippostudio:hippo_studio:1:*:*:*:*:android:*:*  |  hippostudio Hippo Studio (aka com.appgreen.hippostudio) for android 1.0
+    cpe:2.3:a:infinitestudio:infinite_design:3.0.16:*:*:*:*:android:*:*  |  Infinite Studio Infinite Design 3.0.16 for Android
+=== OWASP ZAP === total=18 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=OWASP%20ZAP&resultsPerPage=15
+    cpe:2.3:a:jenkins:owasp_zap:-:*:*:*:*:jenkins:*:*  |  Jenkins OWASP ZAP for Jenkins
+    cpe:2.3:a:jenkins:official_owasp_zap:-:*:*:*:*:jenkins:*:*  |  Jenkins Official OWASP ZAP for Jenkins
+=== Metasploit Framework === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Metasploit%20Framework&resultsPerPage=15
+=== Unreal Engine === total=1 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Unreal%20Engine&resultsPerPage=15
+    cpe:2.3:a:americasarmy:proving_grounds:-:*:*:*:*:unreal_engine:*:*  |  Americasarmy Proving Grounds - for Unreal Engine
+=== Windows Terminal === total=43 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Windows%20Terminal&resultsPerPage=15
+    cpe:2.3:o:microsoft:windows_2000_terminal_services:-:*:*:*:*:*:*:*  |  Microsoft Windows 2000 Terminal Services
+    cpe:2.3:o:microsoft:windows_nt:4.0:sp1:terminal_server:*:*:*:*:*  |  Microsoft Windows NT Terminal Server 4.0 SP1
+    cpe:2.3:o:microsoft:windows-nt:4.0:gold:terminal_srv:*:*:*:*:*  |  Microsoft Windows 4.0 gold terminal_srv
+=== android_studio === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=android_studio&resultsPerPage=15
+=== Google Android Studio IDE === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Google%20Android%20Studio%20IDE&resultsPerPage=15
+=== zaproxy === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=zaproxy&resultsPerPage=15
+=== metasploit === total=205 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=metasploit&resultsPerPage=15
+    cpe:2.3:a:rapid7:metasploit:4.13.19:*:*:*:*:*:*:*  |  Rapid7 Metasploit 4.13.19
+=== unreal_engine === total=1 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=unreal_engine&resultsPerPage=15
+    cpe:2.3:a:americasarmy:proving_grounds:-:*:*:*:*:unreal_engine:*:*  |  Americasarmy Proving Grounds - for Unreal Engine
+=== windows_terminal === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=windows_terminal&resultsPerPage=15
+=== 7-Zip === total=296 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=7-Zip&resultsPerPage=15
+    cpe:2.3:a:7-zip:7-zip:4.57:*:*:*:*:*:*:*  |  7-Zip 4.57
+=== Notepad++ === total=381 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Notepad%2B%2B&resultsPerPage=15
+    cpe:2.3:a:don_ho:notepad\+\+:5.5:*:*:*:*:*:*:*  |  Notepad++ 5.5
+=== VLC media player === total=159 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=VLC%20media%20player&resultsPerPage=15
+    cpe:2.3:a:videolan:vlc_media_player:-:*:*:*:*:*:*:*  |  VideoLAN VLC Media Player
+=== Mozilla Firefox === total=1540 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Mozilla%20Firefox&resultsPerPage=15
+    cpe:2.3:a:mozilla:firefox:-:*:*:*:*:*:*:*  |  Mozilla Firefox
+=== Google Chrome === total=10344 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Google%20Chrome&resultsPerPage=15
+    cpe:2.3:a:google:chrome:0.2.149.29:*:*:*:*:*:*:*  |  Google Chrome 0.2.149.29
+=== VirtualBox === total=280 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=VirtualBox&resultsPerPage=15
+    cpe:2.3:a:oracle:vm_virtualbox:4.0:*:*:*:*:*:*:*  |  Oracle VM VirtualBox 4.0
+    cpe:2.3:a:oracle:xvm_virtualbox:-:*:*:*:*:*:*:*  |  Oracle XVM Virtualbox
+=== Wireshark === total=400 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Wireshark&resultsPerPage=15
+    cpe:2.3:a:wireshark:wireshark:0.99.2:*:*:*:*:*:*:*  |  Wireshark 0.99.2
+=== PuTTY === total=70 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=PuTTY&resultsPerPage=15
+    cpe:2.3:a:simon_tatham:putty:-:*:*:*:*:*:*:*  |  PuTTY
+=== WinRAR === total=50 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=WinRAR&resultsPerPage=15
+    cpe:2.3:a:rarlab:winrar:-:*:*:*:*:*:*:*  |  RARLAB WinRAR
+=== TeamViewer === total=82 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=TeamViewer&resultsPerPage=15
+    cpe:2.3:a:teamviewer:teamviewer:5.0.8703:*:*:*:*:*:*:*  |  TeamViewer 5.0.8703
+=== Zoom === total=2657 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Zoom&resultsPerPage=15
+    cpe:2.3:a:aisquared:zoomtext:9.1:*:*:*:*:*:*:*  |  Aisquared Zoomtext 9.1
+    cpe:2.3:a:inmatrix:zoom_player:8.6:*:*:*:*:*:*:*  |  Inmatrix Zoom Player 8.6
+    cpe:2.3:a:digitalzoomstudio:video_gallery:-:-:-:*:-:wordpress:*:*  |  Digital Zoom Studio (DZS) Video Gallery plugin for WordPress
+    cpe:2.3:a:zoom:zoom_cloud_meetings:\@7f060008:*:*:*:*:android:*:*  |  ZOOM Cloud Meetings (aka us.zoom.videomeetings) for Android @7F060008
+    cpe:2.3:o:bostonscientific:zoom_latitude_prm_3120_firmware:-:*:*:*:*:*:*:*  |  Boston Scientific Zoom Latitude PRM 3120 Firmware
+    cpe:2.3:h:bostonscientific:zoom_latitude_prm_3120:-:*:*:*:*:*:*:*  |  Boston Scientific Zoom Latitude PRM 3120
+    cpe:2.3:o:zoomtel:5352_firmware:5.5.8.6y:*:*:*:*:*:*:*  |  Zoom Telephonics 5352 Firmware 5.5.8.6y
+    cpe:2.3:h:zoomtel:5352:-:*:*:*:*:*:*:*  |  Zoom Telephonics 5352
+=== Slack === total=304 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Slack&resultsPerPage=15
+    cpe:2.3:o:slackware:slackware_linux:10.0:*:*:*:*:*:*:*  |  Slackware Linux 10.0
+=== Skype === total=200 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Skype&resultsPerPage=15
+    cpe:2.3:a:skype:skype:4.1.0.179:*:*:*:*:*:*:*  |  Skype  4.1.0.179
+=== Docker Desktop === total=330 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Docker%20Desktop&resultsPerPage=15
+    cpe:2.3:a:docker:desktop:-:*:*:*:edge:*:*:*  |  Docker Desktop for Edge
+=== Postman === total=399 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Postman&resultsPerPage=15
+    cpe:2.3:a:getpostman:postman:4.3.2:*:*:*:*:*:*:*  |  GetPostman Postman 4.3.2
+=== IntelliJ IDEA === total=230 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=IntelliJ%20IDEA&resultsPerPage=15
+    cpe:2.3:a:jetbrains:intellij_idea:10.5.2:*:*:*:*:*:*:*  |  JetBrains IntelliJ IDEA 10.5.2
+=== Eclipse IDE === total=57 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Eclipse%20IDE&resultsPerPage=15
+    cpe:2.3:a:eclipse:eclipse_ide:3.3.2:*:*:*:*:*:*:*  |  The Eclipse Foundation Eclipse IDE 3.3.2
+=== MySQL Workbench === total=30 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=MySQL%20Workbench&resultsPerPage=15
+    cpe:2.3:a:mysql:mysql_workbench:5.0.30:*:*:*:oss:*:*:*  |  Mysql Workbench Oss 5.0.30
+    cpe:2.3:a:oracle:mysql_workbench_ce:5.2.26:*:*:*:*:*:*:*  |  Oracle Mysql Workbench Ce 5.2.26
+    cpe:2.3:a:oracle:mysql_workbench:6.3.8:*:*:*:*:*:*:*  |  Oracle MySQL Workbench 6.3.8
+=== GIMP === total=322 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=GIMP&resultsPerPage=15
+    cpe:2.3:a:gnu:gimp:-:*:*:*:*:*:*:*  |  GIMP
+    cpe:2.3:a:gimp:gimp:2.6.6:*:*:*:*:*:*:*  |  GIMP 2.6.6
+=== Blender === total=232 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Blender&resultsPerPage=15
+    cpe:2.3:a:tweet-blender:tweet-blender:4.0.2:-:-:*:-:wordpress:*:*  |  Tweet Blender 4.0.2 for WordPress
+=== zoom meetings client === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=zoom%20meetings%20client&resultsPerPage=15
+=== zoom rooms === total=198 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=zoom%20rooms&resultsPerPage=15
+    cpe:2.3:a:zoom:rooms:5.3.0:*:*:*:*:windows:*:*  |  Zoom Rooms 5.3.0 for Windows
+=== slack technologies === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=slack%20technologies&resultsPerPage=15
+=== blender foundation === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=blender%20foundation&resultsPerPage=15
+=== zoom meetings === total=122 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=zoom%20meetings&resultsPerPage=15
+    cpe:2.3:a:zoom:zoom_cloud_meetings:\@7f060008:*:*:*:*:android:*:*  |  ZOOM Cloud Meetings (aka us.zoom.videomeetings) for Android @7F060008
+    cpe:2.3:a:zoom:meetings:4.6.11:*:*:*:*:windows:*:*  |  Zoom Meetings 4.6.11 for Windows
+=== slack desktop === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=slack%20desktop&resultsPerPage=15
+=== blender 3d === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=blender%203d&resultsPerPage=15
+=== blender.org === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=blender.org&resultsPerPage=15
+=== Audacity === total=68 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Audacity&resultsPerPage=15
+    cpe:2.3:a:audacity:audacity:1.2.6:*:*:*:*:*:*:*  |  Audacity 1.2.6
+    cpe:2.3:a:audacityteam:audacity:0.8:*:*:*:*:*:*:*  |  Audacity Team Audacity 0.8
+=== OBS Studio === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=OBS%20Studio&resultsPerPage=15
+=== Adobe Acrobat Reader DC === total=57 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Adobe%20Acrobat%20Reader%20DC&resultsPerPage=15
+    cpe:2.3:a:adobe:acrobat_reader_dc:2015.008.20082:*:*:*:continuous:*:*:*  |  Adobe Acrobat Reader DC 2015.008.20082 Continuous Edition
+=== Git for Windows === total=424 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Git%20for%20Windows&resultsPerPage=15
+    cpe:2.3:a:git_for_windows_project:git_for_windows:1.8.5:*:*:*:*:*:*:*  |  Git For Windows Project Git For Windows 1.8.5
+=== WinSCP === total=224 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=WinSCP&resultsPerPage=15
+    cpe:2.3:a:winscp:winscp:3.8.2:*:*:*:*:*:*:*  |  Winscp 3.8.2
+=== FileZilla === total=392 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=FileZilla&resultsPerPage=15
+    cpe:2.3:a:filezilla-project:filezilla:3.40.0:-:*:*:*:*:*:*  |  FileZilla-project FileZilla 3.40.0
+    cpe:2.3:a:filezilla-project:filezilla_client:3.40.0:-:*:*:*:*:*:*  |  FileZilla-project FileZilla Client 3.40.0
+=== KeePass === total=257 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=KeePass&resultsPerPage=15
+    cpe:2.3:a:keepass:password_safe:1.6:*:*:*:*:*:*:*  |  Keepass Password Safe 1.6
+    cpe:2.3:a:keepass:keepass:1.18:*:*:*:*:*:*:*  |  KeePass 1.18
+=== CCleaner === total=39 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=CCleaner&resultsPerPage=15
+    cpe:2.3:a:piriform:ccleaner:2.27:*:*:*:*:*:*:*  |  Piriform Ccleaner 2.27
+=== Malwarebytes === total=141 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Malwarebytes&resultsPerPage=15
+    cpe:2.3:a:malwarebytes:malwarebytes_anti-exploit:1.04.1.1012:*:*:*:consumer:*:*:*  |  Malwarebytes Malwarebytes Anti-Exploit Consumer 1.04.1.1012
+    cpe:2.3:a:malwarebytes:malwarebytes_anti-malware:2.02:*:*:*:consumer:*:*:*  |  Malwarebytes Malwarebytes Anti-Malware Consumer 2.02
+    cpe:2.3:a:malwarebytes:antimalware:3.6.1.2711:*:*:*:*:*:*:*  |  Malwarebytes Antimalware 3.6.1.2711
+    cpe:2.3:a:malwarebytes:adwcleaner:7.2.6.0:*:*:*:*:*:*:*  |  Malwarebytes Adwcleaner 7.2.6.0
+    cpe:2.3:a:malwarebytes:malwarebytes:3.3.1.2183:*:*:*:premium:*:*:*  |  Malwarebytes 3.3.1.2183 Premium Edition
+=== Kaspersky Total Security === total=10 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Kaspersky%20Total%20Security&resultsPerPage=15
+    cpe:2.3:a:kaspersky:total_security_2015:15.0.2.361:*:*:*:*:*:*:*  |  Kaspersky Total Security 2015 15.0.2.361
+    cpe:2.3:a:kaspersky:total_security:16.0.0.614:*:*:*:*:*:*:*  |  Kaspersky Total Security 16.0.0.614
+=== McAfee Total Protection === total=17 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=McAfee%20Total%20Protection&resultsPerPage=15
+    cpe:2.3:a:mcafee:total_protection:-:*:*:*:*:*:*:*  |  McAfee Total Protection
+=== Sophos Endpoint === total=48 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Sophos%20Endpoint&resultsPerPage=15
+    cpe:2.3:a:sophos:endpoint_protection:10.7:*:*:*:*:*:*:*  |  Sophos Endpoint Protection 10.7
+    cpe:2.3:a:sophos:intercept_x_endpoint:-:*:*:*:*:*:*:*  |  Sophos Intercept X Endpoint
+    cpe:2.3:a:sophos:taegis_endpoint_agent:1.3.10:*:*:*:*:linux:*:*  |  Sophos Taegis Endpoint Agent 1.3.10 for Linux 
+=== Symantec Endpoint Protection === total=284 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Symantec%20Endpoint%20Protection&resultsPerPage=15
+    cpe:2.3:a:symantec:endpoint_protection:11:*:*:*:*:*:*:*  |  Symantec Endpoint Protection Version 11.0
+=== Citrix Workspace App === total=4 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Citrix%20Workspace%20App&resultsPerPage=15
+    cpe:2.3:a:citrix:workspace_app:1909:*:*:*:*:windows:*:*  |  Citrix Workspace App 1909 for Windows
+=== VMware Workstation Pro === total=34 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=VMware%20Workstation%20Pro&resultsPerPage=15
+    cpe:2.3:a:vmware:workstation_pro:12.1.1:*:*:*:*:*:*:*  |  VMware Workstation Pro 12.1.1
+=== VMware vSphere === total=259 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=VMware%20vSphere&resultsPerPage=15
+    cpe:2.3:a:vmware:vsphere_host_update_utility:4.0.0.10021:*:*:*:*:*:*:*  |  VMware vSphere Host Update Utility 4.0.0.10021
+    cpe:2.3:a:vmware:vsphere_client:4.0.0.10021:*:*:*:*:*:*:*  |  VMware vSphere Client 4.0.0.10021
+    cpe:2.3:a:vmware:vsphere_profile-driven_storage:5.0.0.16964:*:*:*:*:*:*:*  |  Vmware Vsphere Profile-driven Storage 5.0.0.16964
+    cpe:2.3:a:vmware:vsphere_update_manager:5.0.0.8039:*:*:*:*:*:*:*  |  Vmware Vsphere Update Manager 5.0.0.8039
+=== Microsoft Office === total=352 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Microsoft%20Office&resultsPerPage=15
+    cpe:2.3:a:microsoft:office:-:*:*:*:*:*:*:*  |  Microsoft Office
+    cpe:2.3:a:microsoft:office_word_viewer:-:*:*:*:*:*:*:*  |  Microsoft Office Word Viewer
+=== Node.js === total=122712 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Node.js&resultsPerPage=15
+    cpe:2.3:a:joyent:node.js:0.6.1:*:*:*:*:*:*:*  |  Joyent Node.js 0.6.1
+    cpe:2.3:a:ucdok:tomato:0.0.6:*:*:*:*:node.js:*:*  |  ucdok tomato module for node.js 0.0.6
+    cpe:2.3:a:spumko_project:hapi_server_framework:2.2.0:*:*:*:*:node.js:*:*  |  Spumko project Hapi Server Framework for Node.js 2.2.0
+    cpe:2.3:a:hapijs:crumb:2.2.0:*:*:*:*:node.js:*:*  |  Hapi Crumb for Node.js 2.2.0
+    cpe:2.3:a:nodejs:node.js:0.10.18:*:*:*:*:*:*:*  |  nodejs Node.js 0.10.18
+    cpe:2.3:a:serve-static_project:serve-static:1.7.1:*:*:*:*:node.js:*:*  |  serve-static project serve-static for Node.js 1.7.1
+    cpe:2.3:a:dns-sync_project:dns-sync:0.1.0:*:*:*:*:node.js:*:*  |  dns-sync project dns-sync for Node.js 0.1.0
+=== PostgreSQL === total=1867 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=PostgreSQL&resultsPerPage=15
+    cpe:2.3:a:postgresql:postgresql:-:*:*:*:*:*:*:*  |  PostgreSQL
+=== Python === total=21750 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Python&resultsPerPage=15
+    cpe:2.3:a:python:python:2.4.3:*:*:*:*:*:*:*  |  Python Python 2.4.3
+=== OpenSSL === total=755 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=OpenSSL&resultsPerPage=15
+    cpe:2.3:a:openssl:openssl:-:*:*:*:*:*:*:*  |  OpenSSL Project OpenSSL
+    cpe:2.3:a:redhat:openssl:-:*:*:*:*:*:*:*  |  Red Hat openssl
+=== nginx === total=3314 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=nginx&resultsPerPage=15
+    cpe:2.3:a:igor_sysoev:nginx:0.1.27:*:*:*:*:*:*:*  |  Nginx 0.1.27
+=== Apache HTTP Server === total=574 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Apache%20HTTP%20Server&resultsPerPage=15
+    cpe:2.3:a:apache:http_server:2.0.9:*:*:*:*:*:*:*  |  Apache Software Foundation Apache HTTP Server 2.0.9a
+=== MongoDB === total=4425 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=MongoDB&resultsPerPage=15
+    cpe:2.3:a:mongodb:mongodb:2.4.0:*:*:*:*:*:*:*  |  MongoDB 2.4.0
+=== Redis === total=1827 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Redis&resultsPerPage=15
+    cpe:2.3:a:att:labs\'_natural_voices_desktop_redist:1.4.0916:*:*:*:*:*:*:*  |  Att Labs' Natural Voices Desktop Redist 1.4.0916
+    cpe:2.3:a:symantec:veritas_jre_redistribution:1.5.0.1:*:*:*:*:*:*:*  |  Symantec Veritas Jre Redistribution 1.5.0.1
+    cpe:2.3:a:pivotal_software:redis:2.8.0:*:*:*:*:*:*:*  |  Piviotal Software Redis 2.8.0
+=== RabbitMQ === total=2021 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=RabbitMQ&resultsPerPage=15
+    cpe:2.3:a:pivotal_software:rabbitmq_management:3.4.2:*:*:*:*:*:*:*  |  Pivotal Software RabbitMQ Management 3.4.2
+    cpe:2.3:a:pivotal_software:rabbitmq:3.3.5:*:*:*:*:*:*:*  |  Pivotal Software RabbitMQ 3.3.5
+=== Jenkins === total=18000 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Jenkins&resultsPerPage=15
+    cpe:2.3:a:cloudbees:jenkins:1.437:*:*:*:*:*:*:*  |  CloudBees Jenkins 1.438
+=== GitLab === total=4203 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=GitLab&resultsPerPage=15
+    cpe:2.3:a:gitlab:gitlab:6.0:*:*:*:*:*:*:*  |  GitLab 6.0
+=== Grafana === total=2403 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Grafana&resultsPerPage=15
+    cpe:2.3:a:grafana:grafana:4.6.0:*:*:*:*:*:*:*  |  Grafana 4.6.0
+=== Kibana === total=1023 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Kibana&resultsPerPage=15
+    cpe:2.3:a:elasticsearch:kibana:4.1.2:*:*:*:*:*:*:*  |  Elasticsearch Kibana 4.1.2
+=== Elasticsearch === total=1433 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Elasticsearch&resultsPerPage=15
+    cpe:2.3:a:elasticsearch:logstash:1.4.2:*:*:*:*:*:*:*  |  Elasticsearch Logstash 1.4.2
+=== Splunk === total=825 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Splunk&resultsPerPage=15
+    cpe:2.3:a:splunk:splunk:4.0:*:*:*:*:*:*:*  |  Splunk 4.0
+=== Tableau Desktop === total=277 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Tableau%20Desktop&resultsPerPage=15
+    cpe:2.3:a:schneider_electric:tableau_desktop:10.1.3:*:*:*:*:*:*:*  |  Schneider Electric Tableau Desktop 10.1.3
+    cpe:2.3:a:tableau:tableau_desktop:10.0:*:*:*:*:*:*:*  |  Tableau Desktop 10.0
+=== Adobe Photoshop === total=184 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Adobe%20Photoshop&resultsPerPage=15
+    cpe:2.3:a:adobe:photoshop:-:*:*:*:*:*:*:*  |  Adobe Photoshop
+    cpe:2.3:a:adobe:photoshop_elements:-:*:*:*:*:*:*:*  |  Adobe Photoshop Elements
+    cpe:2.3:a:adobe:photoshop_album:3.0:-:starter:*:*:*:*:*  |  Adobe Photoshop Album Starter Edition 3.0
+    cpe:2.3:a:adobe:photoshop_cs3:10.0:*:*:*:*:*:*:*  |  Adobe Photoshop CS3 10.0
+    cpe:2.3:a:adobe:photoshop_cs4:11.0:*:*:*:*:*:*:*  |  Adobe Photoshop CS4 11.0
+=== Adobe Illustrator === total=116 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Adobe%20Illustrator&resultsPerPage=15
+    cpe:2.3:a:adobe:illustrator:10.0:*:*:*:*:*:*:*  |  Adobe Illustrator 10.0
+=== AutoCAD === total=464 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=AutoCAD&resultsPerPage=15
+    cpe:2.3:a:autodesk:autocad:-:*:*:*:*:*:*:*  |  Autodesk AutoCAD
+    cpe:2.3:a:autodesk:autocad_electrical:-:*:*:*:*:*:*:*  |  Autodesk AutoCAD Electrical
+    cpe:2.3:a:autodesk:autocad_lt:-:*:*:*:*:*:*:*  |  Autodesk AutoCAD LT
+    cpe:2.3:a:autodesk:autocad_mechanical:-:*:*:*:*:*:*:*  |  Autodesk AutoCAD Mechanical
+    cpe:2.3:a:autodesk:autocad_civil_3d:-:*:*:*:*:*:*:*  |  Autodesk Building Civil 3D
+=== SolidWorks === total=67 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=SolidWorks&resultsPerPage=15
+    cpe:2.3:a:solidworks:product_data_management:2014:sp2:*:*:*:*:*:*  |  SolidWorks Product Data Management (PDM) 2014 SP2
+    cpe:2.3:a:3ds:3dexperience_solidworks:2021:-:*:*:*:*:*:*  |  3DS (Dassault Systèmes) 3dexperience Solidworks 2021 
+    cpe:2.3:a:3ds:solidworks:2023:-:*:*:*:*:*:*  |  3DS (Dassault Systèmes) SOLIDWORKS 2023
+=== Ansible === total=1351 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Ansible&resultsPerPage=15
+    cpe:2.3:a:ansibleworks:ansible:1.1:*:*:*:*:*:*:*  |  AnsibleWorks Ansible 1.1
+    cpe:2.3:a:ansible:tower:2.0.4:*:*:*:*:*:*:*  |  Ansible Tower 2.0.4
+    cpe:2.3:a:redhat:ansible_tower:1.2.2:*:*:*:*:*:*:*  |  Red Hat Ansible Tower 1.2.2
+=== Microsoft Visual Studio === total=2831 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Microsoft%20Visual%20Studio&resultsPerPage=15
+    cpe:2.3:a:microsoft:visual_studio_.net:-:*:*:*:*:*:*:*  |  Microsoft Visual Studio .NET
+    cpe:2.3:a:microsoft:visual_studio:-:*:*:*:*:*:*:*  |  Microsoft Visual Studio
+=== WinZip === total=86 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=WinZip&resultsPerPage=15
+    cpe:2.3:a:winzip:winzip:-:*:*:*:*:*:*:*  |  WinZip WinZip
+=== Total Commander === total=1 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Total%20Commander&resultsPerPage=15
+    cpe:2.3:a:ghisler:total_commander:9.51:*:*:*:*:*:*:*  |  Ghisler Total Commander 9.51
+=== HashiCorp Terraform === total=255 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=HashiCorp%20Terraform&resultsPerPage=15
+    cpe:2.3:a:hashicorp:terraform:0.1.0:*:*:*:*:aws:*:*  |  HashiCorp Terraform 0.1.0 for AWS
+=== elasticsearch elasticsearch server === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=elasticsearch%20elasticsearch%20server&resultsPerPage=15
+=== WinDirStat === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=WinDirStat&resultsPerPage=15
+=== Rufus Pete Batard === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Rufus%20Pete%20Batard&resultsPerPage=15
+=== ExamDiff Pro === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=ExamDiff%20Pro&resultsPerPage=15
+=== IrfanView === total=440 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=IrfanView&resultsPerPage=15
+    cpe:2.3:a:irfanview:irfanview:-:*:*:*:*:*:*:*  |  Irfanview
+=== voidtools Everything === total=81 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=voidtools%20Everything&resultsPerPage=15
+    cpe:2.3:a:voidtools:everything:1.4.1.980:*:*:*:*:*:*:*  |  voidtools Everything 1.4.1.980
+=== ImgBurn === total=3 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=ImgBurn&resultsPerPage=15
+    cpe:2.3:a:imgburn:imgburn:2.5.1.0:*:*:*:*:*:*:*  |  Imgburn 2.5.1.0
+=== PDF-XChange Editor === total=168 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=PDF-XChange%20Editor&resultsPerPage=15
+    cpe:2.3:a:tracker-software:pdf-xchange_editor:3.0.305.0:*:*:*:*:*:*:*  |  Tracker Software PDF-XChange Editor 3.0.305.0
+=== Bulk Rename Utility === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Bulk%20Rename%20Utility&resultsPerPage=15
+=== WizTree === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=WizTree&resultsPerPage=15
+=== Directory Opus === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Directory%20Opus&resultsPerPage=15
+=== ExifTool === total=979 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=ExifTool&resultsPerPage=15
+    cpe:2.3:a:exiftool_project:exiftool:1.00:*:*:*:*:*:*:*  |  ExifTool Project ExifTool 1.00
+=== MKVToolNix === total=180 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=MKVToolNix&resultsPerPage=15
+    cpe:2.3:a:mkvtoolnix:mkvinfo:0.4.3:*:*:*:*:*:*:*  |  MKVToolNix mkvinfo 0.4.3
+=== ShareX === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=ShareX&resultsPerPage=15
+=== ClipboardFusion === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=ClipboardFusion&resultsPerPage=15
+=== Notepad3 === total=1 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Notepad3&resultsPerPage=15
+    cpe:2.3:a:rizonesoft:notepad3:1.0.2.350:*:*:*:*:*:*:*  |  Rizonesoft Notepad3 1.0.2.350
+=== elastic elasticsearch === total=1433 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=elastic%20elasticsearch&resultsPerPage=15
+    cpe:2.3:a:elasticsearch:logstash:1.4.2:*:*:*:*:*:*:*  |  Elasticsearch Logstash 1.4.2
+=== mkvtoolnix mkvmerge === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=mkvtoolnix%20mkvmerge&resultsPerPage=15
+=== Greenshot === total=80 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Greenshot&resultsPerPage=15
+    cpe:2.3:a:getgreenshot:greenshot:1.2.8.12:*:*:*:*:*:*:*  |  Getgreenshot Greenshot 1.2.8.12
+=== AutoHotkey === total=150 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=AutoHotkey&resultsPerPage=15
+    cpe:2.3:a:autohotkey:autohotkey:1.1.32.00:*:*:*:*:*:*:*  |  AutoHotkey 1.1.32.00
+=== Q-Dir === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Q-Dir&resultsPerPage=15
+=== XYplorer === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=XYplorer&resultsPerPage=15
+=== Ditto clipboard manager === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Ditto%20clipboard%20manager&resultsPerPage=15
+=== Process Hacker === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Process%20Hacker&resultsPerPage=15
+=== Recuva === total=1 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Recuva&resultsPerPage=15
+    cpe:2.3:a:piriform:recuva:1.41:*:*:*:*:*:*:*  |  Piriform Recuva 1.41
+=== FastStone Image Viewer === total=141 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=FastStone%20Image%20Viewer&resultsPerPage=15
+    cpe:2.3:a:faststone_soft:faststone_image_viewer:4.6:*:*:*:*:*:*:*  |  Faststone Soft Faststone Image Viewer 4.6
+    cpe:2.3:a:faststone:faststone_image_viewer:6.2:*:*:*:*:*:*:*  |  FastStone Image Viewer 6.2
+    cpe:2.3:a:faststone:image_viewer:1.4:*:*:*:*:*:*:*  |  FastStone Image Viewer 1.4
+=== jenkins jenkins project === total=157 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=jenkins%20jenkins%20project&resultsPerPage=15
+    cpe:2.3:a:jenkins:matrix_project:1.0:-:*:*:*:jenkins:*:*  |  Jenkins Matrix Project 1.0 for Jenkins
+=== ansible core redhat === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=ansible%20core%20redhat&resultsPerPage=15
+=== nginx f5 === total=1736 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=nginx%20f5&resultsPerPage=15
+    cpe:2.3:a:f5:nginx_controller:-:*:*:*:*:*:*:*  |  F5 NGINX Controller
+=== NebulaSync Workstation Manager === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=NebulaSync%20Workstation%20Manager&resultsPerPage=15
+=== QuantumLeap Ledger Suite === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=QuantumLeap%20Ledger%20Suite&resultsPerPage=15
+=== Chronoscribe Desktop === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Chronoscribe%20Desktop&resultsPerPage=15
+=== Vaporlight IDE === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Vaporlight%20IDE&resultsPerPage=15
+=== Driftwood Analytics Console === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Driftwood%20Analytics%20Console&resultsPerPage=15
+=== Emberfall Endpoint Guard === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Emberfall%20Endpoint%20Guard&resultsPerPage=15
+=== Palisade VPN Client === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Palisade%20VPN%20Client&resultsPerPage=15
+=== Lumenpost Mail Client === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Lumenpost%20Mail%20Client&resultsPerPage=15
+=== Cinderloop Automation Studio === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Cinderloop%20Automation%20Studio&resultsPerPage=15
+=== Wraithline Packet Inspector === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Wraithline%20Packet%20Inspector&resultsPerPage=15
+=== Fernglow Design Suite === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Fernglow%20Design%20Suite&resultsPerPage=15
+=== Trellisware Config Manager === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Trellisware%20Config%20Manager&resultsPerPage=15
+=== Quietstorm Backup Agent === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Quietstorm%20Backup%20Agent&resultsPerPage=15
+=== Bramblecore Compiler === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Bramblecore%20Compiler&resultsPerPage=15
+=== Glasspine Terminal === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Glasspine%20Terminal&resultsPerPage=15
+=== NebulaSync Workstation Manager === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=NebulaSync%20Workstation%20Manager&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== QuantumLeap Ledger Suite === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=QuantumLeap%20Ledger%20Suite&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Chronoscribe Desktop === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Chronoscribe%20Desktop&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Vaporlight IDE === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Vaporlight%20IDE&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Driftwood Analytics Console === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Driftwood%20Analytics%20Console&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Emberfall Endpoint Guard === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Emberfall%20Endpoint%20Guard&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Palisade VPN Client === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Palisade%20VPN%20Client&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Lumenpost Mail Client === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Lumenpost%20Mail%20Client&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Cinderloop Automation Studio === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Cinderloop%20Automation%20Studio&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Wraithline Packet Inspector === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Wraithline%20Packet%20Inspector&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Fernglow Design Suite === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Fernglow%20Design%20Suite&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Trellisware Config Manager === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Trellisware%20Config%20Manager&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Quietstorm Backup Agent === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Quietstorm%20Backup%20Agent&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Bramblecore Compiler === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Bramblecore%20Compiler&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Glasspine Terminal === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Glasspine%20Terminal&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== slack desktop === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=slack%20desktop&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== blender === total=232 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=blender&resultsPerPage=200&startIndex=0
+    cpe:2.3:a:tweet-blender:tweet-blender:4.0.2:-:-:*:-:wordpress:*:*  |  Tweet Blender 4.0.2 for WordPress
+    cpe:2.3:a:blender:blender:2.78c:*:*:*:*:*:*:*  |  Blender 2.78c
+    (2 distinct vendor:product pairs across 232 total results)
+=== OBS Studio === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=OBS%20Studio&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== WinDirStat === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=WinDirStat&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== rufus === total=154 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=rufus&resultsPerPage=200&startIndex=0
+    cpe:2.3:a:akeo:rufus:1.0.3:*:*:*:*:*:*:*  |  Akeo Rufus 1.0.3
+    cpe:2.3:a:rufus_project:rufus:1.0.3:*:*:*:*:*:*:*  |  Rufus Project Rufus 1.0.3
+    (2 distinct vendor:product pairs across 154 total results)
+=== ExamDiff Pro === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=ExamDiff%20Pro&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Bulk Rename Utility === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Bulk%20Rename%20Utility&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== WizTree === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=WizTree&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Directory Opus === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Directory%20Opus&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== ShareX === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=ShareX&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== ClipboardFusion === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=ClipboardFusion&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Q-Dir === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Q-Dir&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== XYplorer === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=XYplorer&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Ditto clipboard manager === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Ditto%20clipboard%20manager&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)
+=== Process Hacker === total=0 url=https://services.nvd.nist.gov/rest/json/cpes/2.0?keywordSearch=Process%20Hacker&resultsPerPage=200&startIndex=0
+    (0 distinct vendor:product pairs across 0 total results)

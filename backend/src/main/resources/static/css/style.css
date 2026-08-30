@@ -1,0 +1,107 @@
+/* Minimal shared stylesheet for the vulnerability research server. Plain CSS, no framework. */
+
+:root {
+    --color-bg: #f6f8fa;
+    --color-surface: #ffffff;
+    --color-text: #1f2933;
+    --color-muted: #5b6b79;
+    --color-border: #d9e0e6;
+    --color-primary: #1d5c78;
+    --color-primary-dark: #143f52;
+    --color-link: #1d6fa5;
+    --color-success: #1a7a4c;
+    --color-error: #b3261e;
+    --color-header-bg: #eef2f5;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 1.5em 2em 3em;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    line-height: 1.6;
+    max-width: 1200px;
+}
+
+h1 {
+    color: var(--color-primary-dark);
+    border-bottom: 2px solid var(--color-primary);
+    padding-bottom: 0.3em;
+    font-size: 1.5em;
+}
+
+h2, h3 {
+    color: var(--color-primary-dark);
+}
+
+a {
+    color: var(--color-link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+p.error, .error {
+    color: var(--color-error);
+}
+
+p.success, .success {
+    color: var(--color-success);
+}
+
+button, input[type="submit"] {
+    background: var(--color-primary);
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    padding: 0.5em 1.1em;
+    font-size: 0.95em;
+    cursor: pointer;
+}
+
+button:hover, input[type="submit"]:hover {
+    background: var(--color-primary-dark);
+}
+
+input[type="text"], input[type="email"], input[type="password"], input[type="file"], select, textarea {
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 0.4em 0.6em;
+    font-size: 0.95em;
+    background: var(--color-surface);
+    color: var(--color-text);
+}
+
+label {
+    font-weight: 600;
+    color: var(--color-muted);
+}
+
+table {
+    border-collapse: collapse;
+    background: var(--color-surface);
+    width: 100%;
+}
+
+th, td {
+    border: 1px solid var(--color-border);
+    padding: 0.5em 0.7em;
+    text-align: left;
+    vertical-align: top;
+}
+
+th {
+    background: var(--color-header-bg);
+    color: var(--color-primary-dark);
+}
+
+tr:hover td {
+    background: #fafcfd;
+}

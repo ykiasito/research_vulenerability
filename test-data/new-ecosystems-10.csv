@@ -1,0 +1,11 @@
+product_name,version,vendor,usage_text,install_url
+rails,5.2.0,,RubyGemsのWebフレームワーク。既知の脆弱バージョンでの疎通確認,
+loofah,2.2.0,,RubyGemsのHTMLサニタイザ。CVE-2019-15587の既知脆弱バージョン,
+time,0.2.23,,RustのCrate。RUSTSEC-2020-0071の既知脆弱バージョン,
+actix-web,3.0.0,,RustのWebフレームワーク。識別確認ケース,
+phpmailer/phpmailer,5.2.16,,PHPのメール送信ライブラリ。CVE-2016-10033の既知脆弱バージョン,
+symfony/symfony,4.4.0,,PHPのWebフレームワーク。識別確認ケース,
+phoenix,1.4.0,,Elixir/ErlangのWebフレームワーク。識別確認ケース,
+plug,1.7.0,,Elixir/ErlangのHTTPミドルウェア。識別確認ケース,
+http,0.12.0,,DartのHTTPクライアント。識別確認ケース,
+shelf,0.7.0,,DartのWebサーバーミドルウェア。識別確認ケース,

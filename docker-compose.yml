@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vulncheck}
+      POSTGRES_USER: ${POSTGRES_USER:-vulncheck}
+      # No default: a committed dev-only password default is exactly the class of problem this
+      # rotation is fixing for the encryption key too. MUST be set via .env (never committed).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vulncheck} -d ${POSTGRES_DB:-vulncheck}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-vulncheck}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-vulncheck}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      # No default on purpose (unlike the vars below): SecretEncryptionService fail-fasts at
+      # startup if this is blank or matches a retired default's hash. Set via .env, generate with
+      # `openssl rand -base64 32`.
+      APP_SECRET_ENCRYPTION_KEY: ${APP_SECRET_ENCRYPTION_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      JOB_RETENTION_DAYS: ${JOB_RETENTION_DAYS:-30}
+      # One-shot: mirrors the full NVD CPE Dictionary on boot (hours). Leave false; flip to true
+      # once per environment, then set it back. See CpeDictionaryBootstrapSync.
+      CPE_FULL_SYNC_ON_STARTUP: ${CPE_FULL_SYNC_ON_STARTUP:-false}
+      # Off by default (see HighConfidenceVerificationService) — only flip to true for a deliberate,
+      # budget-monitored diagnostic run, then set back to false. Runs synchronously on the
+      # item-processing thread like every other AI tier, so enabling it can plausibly add on the
+      # order of 7-8 minutes of wall-clock throughput to a 1,000-item job (REVISE item 7, senior
+      # review 2026-08-29, PR #1).
+      HIGH_CONFIDENCE_VERIFICATION_ENABLED: ${HIGH_CONFIDENCE_VERIFICATION_ENABLED:-false}
+      HIGH_CONFIDENCE_VERIFICATION_THRESHOLD: ${HIGH_CONFIDENCE_VERIFICATION_THRESHOLD:-0.95}
+      HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR: ${HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR:-0.5}
+      # This feature's OWN per-item cost cap (separate ledger, see
+      # JobCostBudgetService#verificationCostCapPerItemUsd) — defaults to 0 so enabling the feature
+      # above never silently exhausts APP_COST_CAP_PER_ITEM_USD below. Must be set to a real value
+      # alongside HIGH_CONFIDENCE_VERIFICATION_ENABLED for a deliberate, budget-monitored run.
+      HIGH_CONFIDENCE_VERIFICATION_COST_CAP_PER_ITEM_USD: ${HIGH_CONFIDENCE_VERIFICATION_COST_CAP_PER_ITEM_USD:-0}
+      # Per-job AI-spend cap, see JobCostBudgetService#costCapPerItemUsd. Leave at the $5/1,000-item
+      # default; only raise for a throwaway diagnostic job made entirely of AI-eligible items (a
+      # real job's items are mostly free static Tier1 matches, so the default holds there).
+      APP_COST_CAP_PER_ITEM_USD: ${APP_COST_CAP_PER_ITEM_USD:-0.005}
+      # Thymeleaf template cache (see application.yml). Enabled by default; set to false in .env
+      # only for a deliberate template-focused debugging session (templates are baked into the
+      # image and never edited live in the running container otherwise).
+      THYMELEAF_CACHE_ENABLED: ${THYMELEAF_CACHE_ENABLED:-true}
+      # Secure attribute on the session cookie (see application.yml). False by default because this
+      # compose setup has no TLS termination — set to true in .env only once this deployment sits
+      # behind TLS (e.g. the EC2/production rollout), otherwise logins will silently stop working.
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./logs/backend:/var/log/app
+    # Gives the researchJobExecutor's setAwaitTerminationSeconds(20) room to actually run before
+    # Docker SIGKILLs the process — default stop_grace_period (10s) is shorter than that window.
+    stop_grace_period: 30s
+
+  llm-service:
+    build:
+      context: ./llm-service
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./logs/llm-service:/var/log/app
+
+volumes:
+  postgres_data:

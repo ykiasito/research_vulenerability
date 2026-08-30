@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>CSV列の割り当て - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>CSV列の割り当て</h1>
+
+<p th:if="${error}" th:text="${error}" style="color: red;"></p>
+
+<p>
+    アップロードされたCSV(<code th:text="${csvFilename}"></code>)の列見出しがテンプレートと一致しませんでした。
+    どの列がどの項目に対応するか選択してください。
+</p>
+
+<form th:action="@{/jobs/confirm-mapping}" method="post" th:object="${mappingForm}">
+    <input type="hidden" th:field="*{token}"/>
+
+    <div>
+        <label for="productNameColumn">製品名(必須)</label>
+        <select id="productNameColumn" th:field="*{productNameColumn}">
+            <option value="">(選択してください)</option>
+            <option th:each="h : ${headers}" th:value="${h}" th:text="${h}"></option>
+        </select>
+    </div>
+    <div>
+        <label for="versionColumn">バージョン(必須)</label>
+        <select id="versionColumn" th:field="*{versionColumn}">
+            <option value="">(選択してください)</option>
+            <option th:each="h : ${headers}" th:value="${h}" th:text="${h}"></option>
+        </select>
+    </div>
+    <div>
+        <label for="vendorColumn">ベンダー(任意)</label>
+        <select id="vendorColumn" th:field="*{vendorColumn}">
+            <option value="">(使用しない)</option>
+            <option th:each="h : ${headers}" th:value="${h}" th:text="${h}"></option>
+        </select>
+    </div>
+    <div>
+        <label for="usageTextColumn">用途(必須)</label>
+        <select id="usageTextColumn" th:field="*{usageTextColumn}">
+            <option value="">(選択してください)</option>
+            <option th:each="h : ${headers}" th:value="${h}" th:text="${h}"></option>
+        </select>
+    </div>
+    <div>
+        <label for="installUrlColumn">インストール元URL(任意)</label>
+        <select id="installUrlColumn" th:field="*{installUrlColumn}">
+            <option value="">(使用しない)</option>
+            <option th:each="h : ${headers}" th:value="${h}" th:text="${h}"></option>
+        </select>
+    </div>
+
+    <button type="submit">この割り当てで調査開始</button>
+</form>
+
+<p><a th:href="@{/jobs/new}">やり直す</a></p>
+</body>
+</html>
