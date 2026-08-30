@@ -763,6 +763,112 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void relaxedContainmentDerivedMultiCandidatesWithNoApiKeyAreDroppedRatherThanTakingTheFirst() {
+        // REVISE item 1 (senior review, PR #51): a backlog item 89 P2 relaxed-containment-derived
+        // candidate pool is exactly as unverified a mechanical guess as a lone name-variant
+        // candidate — with no Claude key configured (today's real operating condition, see the
+        // PR's own root-cause note: the API credit is exhausted so apiKey.isPresent() is false for
+        // every real job), the pre-existing "no AI verdict -> take cpeCandidates.get(0)" fallback
+        // silently trusted whichever candidate happened to sort first among several unrelated
+        // vendors. "Android Studio" against google:android/motorola:android/samsung:android is the
+        // real control-row false positive this fixes: the strict containment pass rejects all
+        // three (their trailing "studio" token isn't vendor-explained by google/motorola/samsung),
+        // so the relaxed second pass is what actually produced this pool.
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(
+                        cpeEntry("cpe:2.3:a:google:android:1.0:*:*:*:*:*:*:*", "android"),
+                        cpeEntry("cpe:2.3:a:motorola:android:1.0:*:*:*:*:*:*:*", "android"),
+                        cpeEntry("cpe:2.3:a:samsung:android:1.0:*:*:*:*:*:*:*", "android")));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Android Studio"), USER_ID);
+
+        assertThat(result).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+    }
+
+    @Test
+    void relaxedContainmentDerivedMultiCandidatesAreAdoptedWhenAiDisambiguates() {
+        // Same relaxed-pass pool as the drop case above, but with a Claude key configured and a
+        // real AI selection — dropping the no-verdict degrade path must not also block a genuine
+        // AI verdict from being used; only the unverified-guess fallback is disabled for a relaxed
+        // -containment-derived pool, not Tier2 disambiguation itself. Reuses this suite's own
+        // observed stable-sort behavior (see ambiguousCpeCandidatesWithNoApiKeyDegradeToFirstCandidate
+        // above: tied candidates keep their input order) to pin selectedIndex=2 to the samsung entry.
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(
+                        cpeEntry("cpe:2.3:a:google:android:1.0:*:*:*:*:*:*:*", "android"),
+                        cpeEntry("cpe:2.3:a:motorola:android:1.0:*:*:*:*:*:*:*", "android"),
+                        cpeEntry("cpe:2.3:a:samsung:android:1.0:*:*:*:*:*:*:*", "android")));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 2, 0.7, "usage text mentions a Samsung device", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Android Studio"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:samsung:android:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
+        assertThat(result.get().getConfidence()).isEqualByComparingTo("0.7");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(3);
+    }
+
+    @Test
+    void strictContainmentDerivedMultiCandidatesStillDegradeToFirstCandidateWithNoApiKey() {
+        // Regression companion to the two relaxed-pass tests above (REVISE item 1, PR #51): a
+        // strict-containment-derived pool (the common case — plausibleContainmentOnly's first pass
+        // already succeeded) must keep the pre-existing "no AI verdict -> take get(0)" behavior
+        // exactly as before. "PDF-XChange" against two same-vendor products is a real strict-pass
+        // multi-candidate case (neither needed the relaxed second pass to be admitted).
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(
+                        cpeEntry("cpe:2.3:a:tracker-software:pdf-xchange_editor:9.0:*:*:*:*:*:*:*", "pdf-xchange_editor"),
+                        cpeEntry("cpe:2.3:a:tracker-software:pdf-xchange_viewer:2.5:*:*:*:*:*:*:*", "pdf-xchange_viewer")));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("PDF-XChange"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:tracker-software:pdf-xchange_editor:1.0.0:*:*:*:*:*:*:*");
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+    }
+
+    @Test
+    void nameVariantDerivedMultiCandidatesStillDegradeToFirstCandidateWithNoApiKey() {
+        // Regression companion to the relaxed-pass tests above (REVISE item 1, PR #51): a
+        // name-variant-derived pool (backlog item 98, evaluated separately) must be left completely
+        // untouched by this fix — relaxedContainmentDerived is false for it, so the pre-existing
+        // "no AI verdict -> take get(0)" behavior applies exactly as before, even with more than one
+        // variant-search candidate.
+        CpeDictionaryEntry vlcMediaPlayer =
+                cpeEntry("cpe:2.3:a:videolan:vlc_media_player:3.0.0:*:*:*:*:*:*:*", "vlc_media_player");
+        // Also satisfies expandLeadingInitialism's own leadingInitialsMatch check ("player" as the
+        // anchor, preceded by tokens whose initials spell "vm") — a second, genuinely-admitted
+        // variant-search candidate, not just a second row in the mocked repository response.
+        CpeDictionaryEntry otherVariantGuess =
+                cpeEntry("cpe:2.3:a:acme:video_manager_player:1.0.0:*:*:*:*:*:*:*", "video_manager_player");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
+                .thenReturn(List.of(vlcMediaPlayer, otherVariantGuess));
+        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:videolan:vlc_media_player:1.0.0:*:*:*:*:*:*:*");
+        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+    }
+
+    @Test
     void confidenceReflectsTheCpeTier2AiCallWhenATrustedRegistryMatchHasAHigherStaticNumber() {
         // Real bug found live 2026-08-23 via DB query: of 138 llm_disambiguate rows, 119 sat at
         // exactly the static registry confidence constant (0.95) rather than the AI's own,

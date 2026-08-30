@@ -446,6 +446,7 @@ public class Stage1IdentificationService {
 
         List<CpeDictionaryEntry> cpeCandidates = cpeCandidateResult.candidates();
         boolean cpeCandidatesAreVariantDerived = cpeCandidateResult.variantDerived();
+        boolean cpeCandidatesAreRelaxedContainmentDerived = cpeCandidateResult.relaxedContainmentDerived();
         Optional<RegistryMatch> registryMatch = registryResolution.match();
         CpeDictionaryEntry chosenCpe = null;
         String method = methodIfNoDisambiguationNeeded;
@@ -472,7 +473,8 @@ public class Stage1IdentificationService {
 
                 if (result.isEmpty()) {
                     // LLM call failed — degrade to the pre-Tier2 best-effort behavior.
-                    chosenCpe = cpeCandidates.get(0);
+                    chosenCpe = degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived(
+                            item, cpeCandidates, cpeCandidatesAreRelaxedContainmentDerived);
                 } else if (!result.get().matched()) {
                     chosenCpe = null;
                     cpeCandidateCount = null;
@@ -486,10 +488,16 @@ public class Stage1IdentificationService {
                     disambiguationConfidence = BigDecimal.valueOf(result.get().confidence());
                 } else {
                     log.warn("LLM disambiguate returned an invalid selection for item {}: {}", item.getId(), result.get());
-                    chosenCpe = cpeCandidates.get(0);
+                    chosenCpe = degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived(
+                            item, cpeCandidates, cpeCandidatesAreRelaxedContainmentDerived);
                 }
             } else {
-                chosenCpe = cpeCandidates.get(0);
+                chosenCpe = degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived(
+                        item, cpeCandidates, cpeCandidatesAreRelaxedContainmentDerived);
+            }
+            if (chosenCpe == null) {
+                cpeCandidateCount = null;
+                cpeCandidateVariantDerived = null;
             }
         } else if (cpeCandidates.size() == 1) {
             Optional<ChosenCpe> chosen = resolveSingleCpeCandidate(item, userId, cpeCandidates.get(0), cpeCandidatesAreVariantDerived);
@@ -849,6 +857,31 @@ public class Stage1IdentificationService {
                 apiKey.get(), item, List.of(candidate), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
     }
 
+    /**
+     * REVISE item 1 (senior review, PR #51): the multi-candidate branch of {@link
+     * #resolveCandidates} has always degraded to {@code cpeCandidates.get(0)} whenever no AI verdict
+     * arbitrated among the pool (no key, exhausted budget, a failed LLM call, or an invalid
+     * selection index) — safe for a literal/strict-containment pool, but a relaxed-containment
+     * -derived pool (see {@link CpeCandidateResult}'s own javadoc) is exactly as unverified a guess
+     * as the single-candidate branch's name-variant case, which {@link #resolveSingleCpeCandidate}
+     * already refuses to auto-accept without an AI verdict. Applies that same "drop rather than trust
+     * an unverified guess" policy here instead of silently picking the first of several relaxed
+     * -pass candidates (the Android Studio {@code google:android}/{@code motorola:android}/{@code
+     * samsung:android} and Directory Opus {@code ca:directory}/{@code broadcom:directory} false
+     * positives this fixes). Deliberately does NOT extend to a name-variant-derived pool — {@code
+     * relaxedContainmentDerived} is {@code false} for that case, so this still returns {@code
+     * cpeCandidates.get(0)} for it unchanged (backlog item 98, evaluated separately).
+     */
+    private CpeDictionaryEntry degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived(
+            ResearchJobItem item, List<CpeDictionaryEntry> cpeCandidates, boolean relaxedContainmentDerived) {
+        if (!relaxedContainmentDerived) {
+            return cpeCandidates.get(0);
+        }
+        log.info("No AI verdict available among {} relaxed-containment-derived CPE candidates for item {} — "
+                + "dropping rather than trusting an unverified guess", cpeCandidates.size(), item.getId());
+        return null;
+    }
+
     /** The (possibly AI-checked) result of {@link #resolveSingleCpeCandidate}: {@code aiConfidence}
      *  is non-null only when an AI call actually determined this candidate was correct, so the
      *  caller can attribute the displayed confidence/method to the real AI verdict rather than a
@@ -969,8 +1002,23 @@ public class Stage1IdentificationService {
      * every surviving candidate came from whichever single fallback (relaxed containment, or later
      * the name-variant search) actually produced this list — so a single flag for the whole list is
      * enough; no per-entry provenance tracking is needed.
+     *
+     * <p>REVISE item 1 (senior review, PR #51): {@code relaxedContainmentDerived} narrows
+     * {@code variantDerived} down to specifically the relaxed-containment provenance, leaving the
+     * name-variant-search provenance out — {@code true} in exactly the same cases {@code
+     * variantDerived} is {@code true} via {@link LocalCpeMatches#usedRelaxedPass()} /
+     * {@link ContainmentResult#usedRelaxedPass()}, but {@code false} (unlike {@code variantDerived})
+     * when the pool came from {@link #findByNameVariants} instead. {@link #resolveCandidates}'s
+     * multi-candidate branch needs this distinction because its pre-existing "no AI verdict, take
+     * {@code get(0)}" degrade behavior must NOT apply to a relaxed-containment-derived pool (the
+     * Android Studio / Directory Opus false positives this fixes), but must be left exactly as-is
+     * for a name-variant-derived pool (backlog item 98, evaluated separately) — {@code
+     * variantDerived} alone can't tell those two apart, and is deliberately left with its existing
+     * meaning/behavior everywhere else (the single-candidate branch, {@link
+     * #resolveSingleCpeCandidate}) rather than repurposed.
      */
-    private record CpeCandidateResult(List<CpeDictionaryEntry> candidates, boolean variantDerived) {
+    private record CpeCandidateResult(
+            List<CpeDictionaryEntry> candidates, boolean variantDerived, boolean relaxedContainmentDerived) {
     }
 
     /**
@@ -1866,14 +1914,14 @@ public class Stage1IdentificationService {
             // (only when the strict pass found nothing at all) entirely relaxed-pass-derived — see
             // LocalCpeMatches's own javadoc — so localMatches's own flag is exactly right here,
             // whether or not the target_sw gate above happened to drop some of those candidates.
-            return new CpeCandidateResult(gatedLocalMatches, localMatches.usedRelaxedPass());
+            return new CpeCandidateResult(gatedLocalMatches, localMatches.usedRelaxedPass(), localMatches.usedRelaxedPass());
         }
 
         String query = cpeQuery(vendor, productName);
         if (registryEcosystem.isPresent()) {
             log.info("Local CPE dictionary had no candidates for '{}' — skipping live NVD CPE lookup "
                     + "since a registry match already covers this item", query);
-            return new CpeCandidateResult(List.of(), false);
+            return new CpeCandidateResult(List.of(), false, false);
         }
 
         Optional<String> nvdApiKey = userApiKeyService.getNvdApiKey(userId);
@@ -1883,7 +1931,9 @@ public class Stage1IdentificationService {
             // with several word-dropped fallback queries) found nothing at all for this product.
             List<CpeDictionaryEntry> variantMatches =
                     rankAndGate(vendor, findByNameVariants(vendor, productName), targetSwContext, itemVersion);
-            return new CpeCandidateResult(variantMatches, !variantMatches.isEmpty());
+            // Name-variant provenance, never relaxed-containment provenance — see
+            // CpeCandidateResult's own javadoc (REVISE item 1) for why this stays false here.
+            return new CpeCandidateResult(variantMatches, !variantMatches.isEmpty(), false);
         }
 
         // Re-query with whichever (possibly word-dropped) variant actually found results, not the
@@ -1895,13 +1945,14 @@ public class Stage1IdentificationService {
         LocalCpeMatches refreshedLocal = localCpeLookup(vendor, productName, itemVersion);
         List<CpeDictionaryEntry> refreshed = rankAndGate(vendor, refreshedLocal.candidates(), targetSwContext, itemVersion);
         if (!refreshed.isEmpty()) {
-            return new CpeCandidateResult(refreshed, refreshedLocal.usedRelaxedPass());
+            return new CpeCandidateResult(refreshed, refreshedLocal.usedRelaxedPass(), refreshedLocal.usedRelaxedPass());
         }
         ContainmentResult liveContainment = plausibleContainmentOnly(vendor, productName,
                 cpeDictionaryRepository.findFuzzyMatches(successfulQuery.get(),
                         CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL));
         return new CpeCandidateResult(
                 rankAndGate(vendor, liveContainment.candidates(), targetSwContext, itemVersion),
+                liveContainment.usedRelaxedPass(),
                 liveContainment.usedRelaxedPass());
     }
 
