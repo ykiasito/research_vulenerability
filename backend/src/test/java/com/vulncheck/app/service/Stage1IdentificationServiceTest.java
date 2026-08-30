@@ -2070,14 +2070,18 @@ class Stage1IdentificationServiceTest {
 
     @Test
     void versionCoverageTieBreakPrefersACandidateWhoseCatalogedVersionsCoverTheItemsVersion() {
-        // Backlog item 15, P2 (senior review 2026-08-30): two same-slug candidates tie on
+        // Backlog item 15, P2 (senior review 2026-08-30); ratio value updated for backlog item 36
+        // (senior review 2026-08-30, ratio-guard rewrite): two same-slug candidates tie on
         // exactProductSlugMatch/targetSwMatchesEcosystem (no registry match, no ecosystem to gate
         // on), and item vendor is blank here so vendorAgrees can't discriminate either — the
         // version-coverage tie-break must be what decides it. Mirrors the real Audacity false
-        // positive this was built for: audacity:audacity is only catalogued up to old 2.x releases,
-        // while audacityteam:audacity is genuinely catalogued at the item's own 3.7.x version.
-        CpeDictionaryEntry oldAudacity = cpeEntry("cpe:2.3:a:audacity:audacity:2.4.2:*:*:*:*:*:*:*", "audacity");
-        oldAudacity.setMaxCatalogedMajor(2);
+        // positive this was built for: audacity:audacity is catalogued in the real dictionary as a
+        // single row at version 1.2.6 (max cataloged major 1), while audacityteam:audacity is
+        // genuinely catalogued at the item's own 3.7.x version. Item major 3 vs. cataloged major 1
+        // is a ratio of 3.0, safely above VERSION_COVERAGE_IMPLAUSIBILITY_RATIO's threshold of 2, so
+        // this candidate is correctly demoted even under the ratio-guard rewrite.
+        CpeDictionaryEntry oldAudacity = cpeEntry("cpe:2.3:a:audacity:audacity:1.2.6:*:*:*:*:*:*:*", "audacity");
+        oldAudacity.setMaxCatalogedMajor(1);
         CpeDictionaryEntry realAudacity = cpeEntry("cpe:2.3:a:audacityteam:audacity:3.7.0:*:*:*:*:*:*:*", "audacity");
         realAudacity.setMaxCatalogedMajor(3);
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
@@ -2091,6 +2095,57 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:audacityteam:audacity:3.7.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void versionCoverageTieBreakDoesNotDemoteACandidateWhoseCatalogTrailsTheItemByOnlyAFewMajors() {
+        // Backlog item 36 (senior review 2026-08-30): the golden-300 regression this ratio guard
+        // fixes — a correct candidate whose NVD catalogue simply stops a few majors behind the
+        // item's real-world version (because NVD only ever catalogues versions a CVE happened to
+        // name) must NOT be demoted, unlike the genuinely-wrong-vendor Audacity case above. Uses the
+        // real golden-300 Citrix Workspace App measurement: item major 2405 vs. the correct
+        // candidate's cataloged major 2006 is a ratio of ~1.20, comfortably under
+        // VERSION_COVERAGE_IMPLAUSIBILITY_RATIO's threshold of 2.
+        CpeDictionaryEntry trailingCatalog =
+                cpeEntry("cpe:2.3:a:citrix:workspace:2006.0:*:*:*:*:*:*:*", "workspace");
+        trailingCatalog.setMaxCatalogedMajor(2006);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(trailingCatalog));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Citrix Workspace App");
+        item.setVersion("2405.0");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        // identify() always rewrites the winning CPE's version segment to the item's own version
+        // (see Stage1IdentificationService#withItemVersion), so the presence/vendor:product of this
+        // result is what actually proves the candidate was not demoted, not its version segment.
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:citrix:workspace:2405.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void versionCoverageTieBreakTreatsAZeroMaxCatalogedMajorAsNoEvidence() {
+        // Backlog item 36 (senior review 2026-08-30): maxCatalogedMajor <= 0 (e.g. a partition whose
+        // only numeric leading run ever parsed to zero) must default to plausible exactly like a
+        // null maxCatalogedMajor does — it is not concrete evidence of anything, so it must never
+        // hard-demote a candidate that has no other tie-break signal to fall back on.
+        CpeDictionaryEntry candidate = cpeEntry("cpe:2.3:a:vendor:widget-tool:1.0.0:*:*:*:*:*:*:*", "widget-tool");
+        candidate.setMaxCatalogedMajor(0);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(candidate));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("widget-tool");
+        item.setVersion("9.0.0");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        // Same version-rewriting caveat as above: only presence/vendor:product proves the
+        // zero-max-cataloged-major candidate was treated as no-evidence rather than demoted.
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:vendor:widget-tool:9.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
