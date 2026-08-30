@@ -38,9 +38,19 @@ keys via csv.DictReader -- but the future bucket-split analysis will need them p
 export to read).
 """
 import csv
+import re
 
 with open("test-data/golden-300.csv", newline="") as f:
-    expected_rows = list(csv.DictReader(f))
+    expected_reader = csv.DictReader(f)
+    # ground_truth_source drives the part=a|o|h check below (task-backlog.md item 40) --
+    # fail loudly on a malformed/renamed CSV instead of expected_cpe_part() silently
+    # returning None for every row and the part check silently no-op'ing.
+    if "ground_truth_source" not in (expected_reader.fieldnames or []):
+        raise ValueError(
+            "test-data/golden-300.csv is missing the 'ground_truth_source' column -- "
+            f"found columns: {expected_reader.fieldnames}"
+        )
+    expected_rows = list(expected_reader)
 
 with open("test-data/job168_results.csv", newline="") as f:
     actual_rows = list(csv.DictReader(f))
@@ -67,6 +77,39 @@ def cpe_vendor_product(cpe_string):
     if len(parts) < 5:
         return None, None
     return parts[3], parts[4]
+
+
+def cpe_part(cpe_string):
+    if not cpe_string:
+        return None
+    parts = cpe_string.split(":")
+    # cpe:2.3:PART:VENDOR:PRODUCT:...
+    if len(parts) < 3:
+        return None
+    return parts[2]
+
+
+# task-backlog.md item 40 (2026-08-30): the vendor/product-only comparison above cannot
+# catch a part (a/o/h) mismatch -- e.g. a CVE-vendor:product-correct match that was actually
+# built or selected with the wrong CPE part (item 39's CpeUtils.buildCpe part=a-fixed bug,
+# item 49's part=a-preference dedup CASE) would still score as "correct" here even though the
+# app queried/returned the wrong real-world CPE. golden-300.csv has no dedicated structured
+# expected-part column (adding verified ground truth for all 268 IDENTIFIED_CPE rows is out of
+# this task's scope), but a handful of rows already carry a manually NVD-verified
+# "(part=a|o|h" annotation in their free-text ground_truth_source column (Cisco IOS XE, PAN-OS,
+# MikroTik RouterOS, Metasploit Framework -- see golden-300.design.md). Where that annotation is
+# present, treat it as authoritative structured ground truth and fail the row if the actual
+# identified CPE's part disagrees, even when vendor:product still match. Where it's absent, skip
+# the part check entirely (no assumption is made, no existing correct row can be newly failed by
+# this change).
+EXPECTED_PART_RE = re.compile(r"\(part=([aoh])\b")
+
+
+def expected_cpe_part(ground_truth_source):
+    if not ground_truth_source:
+        return None
+    m = EXPECTED_PART_RE.search(ground_truth_source)
+    return m.group(1) if m else None
 
 
 # Rows excluded from correctness/high-confidence scoring only (still count toward the
@@ -163,9 +206,12 @@ for e in expected_rows:
                    and package_actual.lower() == e["expected_package_name"].lower())
     elif expected_outcome == "IDENTIFIED_CPE":
         cv, cp = cpe_vendor_product(cpe_actual)
+        exp_part = expected_cpe_part(e.get("ground_truth_source", ""))
+        part_ok = exp_part is None or cpe_part(cpe_actual) == exp_part
         correct = (is_identified
                    and cv == e["expected_cpe_vendor"]
-                   and cp == e["expected_cpe_product"])
+                   and cp == e["expected_cpe_product"]
+                   and part_ok)
     elif expected_outcome == "UNIDENTIFIED":
         correct = (actual_status == "UNIDENTIFIED")
 

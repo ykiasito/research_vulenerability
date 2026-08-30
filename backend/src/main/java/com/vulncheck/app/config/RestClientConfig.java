@@ -1,26 +1,65 @@
 package com.vulncheck.app.config;
 
-import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.time.Duration;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.web.client.ClientHttpRequestFactories;
-import org.springframework.boot.web.client.ClientHttpRequestFactorySettings;
+import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
+import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.client.ClientHttpRequestFactory;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 @Configuration
 public class RestClientConfig {
 
+    /**
+     * Builds a plain {@link SimpleClientHttpRequestFactory} (backed by {@link
+     * HttpURLConnection}) with the given timeouts. Deliberately not the deprecated {@code
+     * ClientHttpRequestFactories.get(...)} helper: as of Spring Boot 3.4 its auto-detection picks
+     * {@code JdkClientHttpRequestFactory} ({@link java.net.http.HttpClient}) whenever it's on the
+     * classpath, which changes read-timeout semantics from "socket idle timeout" to "timeout for
+     * the whole request" — a silent behavior change that a BOM bump alone would otherwise
+     * introduce. Explicitly constructing {@link SimpleClientHttpRequestFactory} keeps the
+     * pre-3.4 transport and timeout semantics regardless of what's on the classpath.
+     *
+     * <p>Package-private (rather than {@code private}) so the unit test can call it directly and
+     * assert on the concrete factory type and its effective timeouts.
+     */
+    static SimpleClientHttpRequestFactory simpleRequestFactory(Duration connectTimeout, Duration readTimeout) {
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout((int) connectTimeout.toMillis());
+        requestFactory.setReadTimeout((int) readTimeout.toMillis());
+        return requestFactory;
+    }
+
+    /**
+     * Same as {@link #simpleRequestFactory}, but with automatic HTTP redirect following disabled —
+     * for clients that must inspect and re-validate each redirect hop against their own host
+     * allowlist rather than following blindly (SSRF hardening; see each caller's javadoc).
+     *
+     * <p>Uses Spring Boot's native {@code ClientHttpRequestFactorySettings.Redirects.DONT_FOLLOW}
+     * (available since Boot 3.4, {@code org.springframework.boot.http.client} package — not the
+     * older {@code org.springframework.boot.web.client.ClientHttpRequestFactorySettings}, which has
+     * no redirects control at all) instead of a hand-written {@link SimpleClientHttpRequestFactory}
+     * subclass. Confirmed by decompiling {@code
+     * SimpleClientHttpRequestFactoryBuilder$SimpleClientHttpsRequestFactory} in spring-boot
+     * 3.5.16.jar: it calls {@link HttpURLConnection#setInstanceFollowRedirects}{@code (false)} when
+     * {@code settings.redirects() == DONT_FOLLOW} — the exact same mechanism a hand-written subclass
+     * would use, so this is not a behavior change.
+     */
+    static SimpleClientHttpRequestFactory noRedirectRequestFactory(Duration connectTimeout, Duration readTimeout) {
+        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.defaults()
+                .withConnectTimeout(connectTimeout)
+                .withReadTimeout(readTimeout)
+                .withRedirects(ClientHttpRequestFactorySettings.Redirects.DONT_FOLLOW);
+        return ClientHttpRequestFactoryBuilder.simple().build(settings);
+    }
+
     @Bean
     public RestClient externalApiRestClient() {
-        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
-                .withConnectTimeout(Duration.ofSeconds(5))
-                .withReadTimeout(Duration.ofSeconds(10));
-        ClientHttpRequestFactory requestFactory = ClientHttpRequestFactories.get(settings);
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(10));
 
         return RestClient.builder()
                 .requestFactory(requestFactory)
@@ -38,10 +77,8 @@ public class RestClientConfig {
      */
     @Bean
     public RestClient nvdSyncRestClient() {
-        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
-                .withConnectTimeout(Duration.ofSeconds(10))
-                .withReadTimeout(Duration.ofMinutes(5));
-        ClientHttpRequestFactory requestFactory = ClientHttpRequestFactories.get(settings);
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(10), Duration.ofMinutes(5));
 
         return RestClient.builder()
                 .requestFactory(requestFactory)
@@ -54,7 +91,7 @@ public class RestClientConfig {
      * equivalent). Deliberately NOT the shared {@link #externalApiRestClient} — the CSAF sync
      * flow follows vendor-supplied URLs (provider-metadata -> ROLIE feed -> per-document links)
      * that are themselves an SSRF-shaped risk (see the plan's §6), so this client disables
-     * automatic HTTP redirect following ({@link NoRedirectClientHttpRequestFactory}) so the sync
+     * automatic HTTP redirect following (see {@link #noRedirectRequestFactory}) so the sync
      * service can inspect and re-validate each hop's host against its own allowlist itself rather
      * than silently trusting wherever {@link HttpURLConnection}'s default redirect handling would
      * otherwise follow. The descriptive User-Agent (with a contact address) follows §5-7's
@@ -64,12 +101,8 @@ public class RestClientConfig {
      */
     @Bean
     public RestClient csafSyncRestClient() {
-        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
-                .withConnectTimeout(Duration.ofSeconds(10))
-                .withReadTimeout(Duration.ofSeconds(30));
-        SimpleClientHttpRequestFactory requestFactory = new NoRedirectClientHttpRequestFactory();
-        requestFactory.setConnectTimeout((int) settings.connectTimeout().toMillis());
-        requestFactory.setReadTimeout((int) settings.readTimeout().toMillis());
+        SimpleClientHttpRequestFactory requestFactory =
+                noRedirectRequestFactory(Duration.ofSeconds(10), Duration.ofSeconds(30));
 
         return RestClient.builder()
                 .requestFactory(requestFactory)
@@ -91,12 +124,8 @@ public class RestClientConfig {
      */
     @Bean
     public RestClient ghsaSyncRestClient() {
-        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
-                .withConnectTimeout(Duration.ofSeconds(10))
-                .withReadTimeout(Duration.ofSeconds(30));
-        SimpleClientHttpRequestFactory requestFactory = new NoRedirectClientHttpRequestFactory();
-        requestFactory.setConnectTimeout((int) settings.connectTimeout().toMillis());
-        requestFactory.setReadTimeout((int) settings.readTimeout().toMillis());
+        SimpleClientHttpRequestFactory requestFactory =
+                noRedirectRequestFactory(Duration.ofSeconds(10), Duration.ofSeconds(30));
 
         return RestClient.builder()
                 .requestFactory(requestFactory)
@@ -116,29 +145,13 @@ public class RestClientConfig {
      */
     @Bean
     public RestClient osvSyncRestClient() {
-        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
-                .withConnectTimeout(Duration.ofSeconds(10))
-                .withReadTimeout(Duration.ofSeconds(30));
-        SimpleClientHttpRequestFactory requestFactory = new NoRedirectClientHttpRequestFactory();
-        requestFactory.setConnectTimeout((int) settings.connectTimeout().toMillis());
-        requestFactory.setReadTimeout((int) settings.readTimeout().toMillis());
+        SimpleClientHttpRequestFactory requestFactory =
+                noRedirectRequestFactory(Duration.ofSeconds(10), Duration.ofSeconds(30));
 
         return RestClient.builder()
                 .requestFactory(requestFactory)
                 .defaultHeader("User-Agent", "vulncheck-server/0.1 (osv sync)")
                 .build();
-    }
-
-    /** See {@link #csafSyncRestClient}'s javadoc — the only change from the plain {@link
-     *  SimpleClientHttpRequestFactory} is disabling {@link HttpURLConnection}'s automatic redirect
-     *  following, so a 3xx response surfaces to the caller as a normal response (readable status +
-     *  {@code Location} header) instead of being silently followed by the JDK. */
-    private static final class NoRedirectClientHttpRequestFactory extends SimpleClientHttpRequestFactory {
-        @Override
-        protected void prepareConnection(HttpURLConnection connection, String httpMethod) throws IOException {
-            super.prepareConnection(connection, httpMethod);
-            connection.setInstanceFollowRedirects(false);
-        }
     }
 
     /**
@@ -147,10 +160,8 @@ public class RestClientConfig {
      */
     @Bean
     public RestClient llmServiceRestClient(@Value("${app.llm-service-url}") String llmServiceUrl) {
-        ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
-                .withConnectTimeout(Duration.ofSeconds(5))
-                .withReadTimeout(Duration.ofSeconds(60));
-        ClientHttpRequestFactory requestFactory = ClientHttpRequestFactories.get(settings);
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(60));
 
         return RestClient.builder()
                 .baseUrl(llmServiceUrl)
