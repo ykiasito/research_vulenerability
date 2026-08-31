@@ -2,13 +2,13 @@
 
 ## About this project
 
-This is a CSV-upload-based vulnerability pre-screening web app, designed with a GUI for non-engineers and **built for internal (in-house) use**. See [README.md](README.md) for details on the project's scope and intended deployment.
+This is a CSV-upload-based vulnerability pre-screening web app, designed with a GUI for non-engineers and **built for personal, individual use**. See [README.md](README.md) for details on the project's scope and intended deployment.
 
 This GitHub repository is currently public, but the application itself is not intended to be exposed to the public internet. If you find a security issue, please report it responsibly using the process below regardless of how you came across it.
 
 ## Supported versions
 
-This is a small internal tool without a formal release/versioning scheme. Only the latest state of the `master` branch is supported. Security fixes are not backported to older commits or branches.
+This is a small personal tool without a formal release/versioning scheme. Only the latest state of the `master` branch is supported. Security fixes are not backported to older commits or branches.
 
 ## Reporting a vulnerability
 
