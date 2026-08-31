@@ -333,6 +333,63 @@ class ResearchJobProcessingServiceTest {
         assertThat(item.isResearchIncomplete()).isTrue();
     }
 
+    // --- Task backlog item 121 (2026-08-31): unlike the two orderly skips above, Stage4 can also be
+    // attempted and then throw (LLM service down, timeout, ...) -------------------------------------
+
+    @Test
+    void itemIsMarkedAiCallFailedWhenStage4ThrowsAnException() {
+        // The gap this asserts against: ResearchJobProcessingService's Stage4 try/catch previously
+        // only logged the exception, leaving researchIncompleteReason at the null Stage2 already set
+        // — indistinguishable from a genuine, fully-verified all-clear. This condition is more likely
+        // in practice than a fully exhausted budget, since it covers every transient LLM microservice
+        // failure, not just a rare cap.
+        ResearchJob job = job(15L, 10L);
+        ResearchJobItem item = item(19L, 15L);
+        IdentifiedProduct product = identifiedProduct(19L);
+
+        when(researchJobRepository.findById(15L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdAndStatusOrderById(15L, ResearchJobItem.STATUS_PENDING))
+                .thenReturn(List.of(item));
+        when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
+        when(stage2VulnerabilityResearchService.research(item, product, 10L))
+                .thenReturn(new Stage2Result(0, true));
+        when(stage4WebSearchResearchService.research(item, "npm", "lodash", 10L))
+                .thenThrow(new RuntimeException("LLM service unavailable"));
+
+        newService().processJobAsync(15L);
+
+        assertThat(item.getResearchIncompleteReason()).isEqualTo(ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
+        assertThat(item.isResearchIncomplete()).isTrue();
+    }
+
+    @Test
+    void itemIsMarkedAiCallFailedWhenStage4ReportsTheClientCallFailed() {
+        // PR #68 item 121 REVISE (senior review 2026-09-01): unlike itemIsMarkedAiCallFailedWhenStage4ThrowsAnException
+        // above (an exception thrown outside Stage4WebSearchResearchService's own try/catch), this
+        // covers the primary failure path -- LlmServiceClient#webSearchResearch itself reporting the
+        // LLM call failed (Optional.empty()) -- which Stage4WebSearchResearchService turns into a
+        // Stage4ResearchResult carrying AI_CALL_FAILED without ever throwing, so this must be routed
+        // through the stage4Result.incompleteReason() branch, not stage4Threw.
+        ResearchJob job = job(16L, 10L);
+        ResearchJobItem item = item(20L, 16L);
+        IdentifiedProduct product = identifiedProduct(20L);
+
+        when(researchJobRepository.findById(16L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdAndStatusOrderById(16L, ResearchJobItem.STATUS_PENDING))
+                .thenReturn(List.of(item));
+        when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
+        when(stage2VulnerabilityResearchService.research(item, product, 10L))
+                .thenReturn(new Stage2Result(0, true));
+        when(stage4WebSearchResearchService.research(item, "npm", "lodash", 10L))
+                .thenReturn(new Stage4WebSearchResearchService.Stage4ResearchResult(
+                        0, ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED));
+
+        newService().processJobAsync(16L);
+
+        assertThat(item.getResearchIncompleteReason()).isEqualTo(ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
+        assertThat(item.isResearchIncomplete()).isTrue();
+    }
+
     @Test
     void bundledComponentResearchDoesNotFireWhenJobHasNotOptedIn() {
         ResearchJob job = job(30L, 10L);

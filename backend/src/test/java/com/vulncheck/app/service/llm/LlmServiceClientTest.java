@@ -130,7 +130,11 @@ class LlmServiceClientTest {
 
         var findings = client.webSearchResearch(API_KEY, item(), "npm", "some-tool", RESERVED_COST_USD);
 
-        assertThat(findings).isEmpty();
+        // PR #68 item 121 REVISE (senior review 2026-09-01): webSearchResearch now distinguishes
+        // "call failed" (Optional.empty()) from "call succeeded, found nothing" (Optional.of(List.of())) —
+        // this response is a successful, empty-findings response, so the Optional itself must be present.
+        assertThat(findings).isPresent();
+        assertThat(findings.get()).isEmpty();
         server.verify();
         verify(jobCostBudgetService).reconcile(
                 eq(1L), eq(9L), eq(JobCostLedgerEntry.CALL_SITE_STAGE4),
