@@ -91,9 +91,9 @@ class Stage4WebSearchResearchServiceTest {
     void bareCveIdIsUsedDirectlyButFreeTextIsScopedToTheProduct() {
         when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
         when(llmServiceClient.webSearchResearch(eq("sk-ant-test"), any(), eq("npm"), eq("some-tool"), any()))
-                .thenReturn(List.of(
+                .thenReturn(Optional.of(List.of(
                         new WebSearchVulnFindingDto("CVE-2024-12345", "HIGH", "desc", "https://example.com/a", null),
-                        new WebSearchVulnFindingDto("Unpatched RCE in admin panel", "MEDIUM", "desc2", "https://example.com/b", null)));
+                        new WebSearchVulnFindingDto("Unpatched RCE in admin panel", "MEDIUM", "desc2", "https://example.com/b", null))));
         when(vulnerabilityRepository.insertIfAbsentAndGetId(anyString(), anyString(), any(), any(), any(), any())).thenReturn(500L);
 
         Stage4WebSearchResearchService.Stage4ResearchResult result = service().research(item(), "npm", "some-tool", USER_ID);
@@ -111,7 +111,7 @@ class Stage4WebSearchResearchServiceTest {
     void blankIdentifiersAreSkipped() {
         when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
         when(llmServiceClient.webSearchResearch(eq("sk-ant-test"), any(), any(), any(), any()))
-                .thenReturn(List.of(new WebSearchVulnFindingDto("  ", null, "desc", "https://example.com", null)));
+                .thenReturn(Optional.of(List.of(new WebSearchVulnFindingDto("  ", null, "desc", "https://example.com", null))));
 
         Stage4WebSearchResearchService.Stage4ResearchResult result = service().research(item(), "npm", "some-tool", USER_ID);
 
@@ -121,11 +121,48 @@ class Stage4WebSearchResearchServiceTest {
         verify(jobItemVulnerabilityRepository, never()).linkIfAbsent(any(), any(), anyString(), any());
     }
 
+    // --- PR #68 item 121 REVISE (senior review 2026-09-01): LlmServiceClient#webSearchResearch's
+    // Optional.empty()/Optional.of(...) contract must be handled correctly, not conflated ------------
+
+    @Test
+    void marksAiCallFailedWhenTheClientReportsTheCallItselfFailed() {
+        // The gap this asserts against: before this fix, LlmServiceClient#webSearchResearch swallowed
+        // RestClientException/RuntimeException internally and returned an empty List either way, so
+        // this service could never distinguish "LLM service call failed" from "call succeeded, found
+        // nothing" -- the exact case ResearchJobProcessingService's stage4Threw flag was meant to
+        // catch, but never fired for.
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.webSearchResearch(eq("sk-ant-test"), any(), eq("npm"), eq("some-tool"), any()))
+                .thenReturn(Optional.empty());
+
+        Stage4WebSearchResearchService.Stage4ResearchResult result = service().research(item(), "npm", "some-tool", USER_ID);
+
+        assertThat(result.persistedCount()).isZero();
+        assertThat(result.incompleteReason()).isEqualTo(ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
+        verifyNoInteractions(vulnerabilityRepository, jobItemVulnerabilityRepository);
+    }
+
+    @Test
+    void aGenuinelyEmptyFindingsListIsNotTreatedAsACallFailure() {
+        // Regression guard for the opposite mistake: a call that completed successfully but found
+        // nothing (Optional.of(List.of())) must still be a real "checked, clean" all-clear, not get
+        // reclassified as AI_CALL_FAILED.
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.webSearchResearch(eq("sk-ant-test"), any(), eq("npm"), eq("some-tool"), any()))
+                .thenReturn(Optional.of(List.of()));
+
+        Stage4WebSearchResearchService.Stage4ResearchResult result = service().research(item(), "npm", "some-tool", USER_ID);
+
+        assertThat(result.persistedCount()).isZero();
+        assertThat(result.incompleteReason()).isNull();
+        verifyNoInteractions(vulnerabilityRepository, jobItemVulnerabilityRepository);
+    }
+
     @Test
     void usesPlatformHintScopeWhenNoEcosystemIsAvailable() {
         when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
         when(llmServiceClient.webSearchResearch(eq("sk-ant-test"), any(), eq("VS Code Marketplace"), eq("ms-python.python"), any()))
-                .thenReturn(List.of(new WebSearchVulnFindingDto("CVE-2024-99999", "HIGH", "desc", "https://example.com", null)));
+                .thenReturn(Optional.of(List.of(new WebSearchVulnFindingDto("CVE-2024-99999", "HIGH", "desc", "https://example.com", null))));
         when(vulnerabilityRepository.insertIfAbsentAndGetId(anyString(), anyString(), any(), any(), any(), any())).thenReturn(501L);
 
         Stage4WebSearchResearchService.Stage4ResearchResult result =

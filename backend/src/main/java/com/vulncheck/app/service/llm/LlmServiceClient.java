@@ -105,7 +105,19 @@ public class LlmServiceClient {
         }
     }
 
-    public List<WebSearchVulnFindingDto> webSearchResearch(
+    /**
+     * REVISE (senior review 2026-09-01, PR #68 item 121): unlike every other method here, this one's
+     * return type is {@code Optional<List<...>>}, not a bare list — {@code Optional.empty()} means
+     * the call itself failed (network/timeout/4xx/5xx/unexpected error) and the caller ({@code
+     * Stage4WebSearchResearchService}) must record {@code
+     * ResearchJobItem#INCOMPLETE_REASON_AI_CALL_FAILED}, while {@code Optional.of(List.of())} means
+     * the call completed and genuinely found nothing. Collapsing both into a bare empty list (as this
+     * method used to) made an LLM service outage indistinguishable from a real "checked, clean"
+     * result, which is exactly the bug PR #68 originally set out to fix but didn't, since this method
+     * never let the failure escape past its own {@code catch} blocks for {@code stage4Threw} (in
+     * {@code ResearchJobProcessingService}) to ever observe it.
+     */
+    public Optional<List<WebSearchVulnFindingDto>> webSearchResearch(
             String apiKey, ResearchJobItem item, String ecosystem, String packageName, BigDecimal reservedCostUsd) {
         WebSearchResearchRequest request = new WebSearchResearchRequest(
                 apiKey,
@@ -121,13 +133,13 @@ public class LlmServiceClient {
                     .retrieve()
                     .body(WebSearchResearchResponse.class);
             usage = response == null ? null : response.usage();
-            return response != null && response.findings() != null ? response.findings() : List.of();
+            return Optional.of(response != null && response.findings() != null ? response.findings() : List.of());
         } catch (RestClientException e) {
             log.warn("LLM web-search research call failed for item {}", item.getId(), e);
-            return List.of();
+            return Optional.empty();
         } catch (RuntimeException e) {
             log.error("LLM web-search research call failed unexpectedly for item {}", item.getId(), e);
-            return List.of();
+            return Optional.empty();
         } finally {
             reconcile(item, JobCostLedgerEntry.CALL_SITE_STAGE4, reservedCostUsd, usage);
         }

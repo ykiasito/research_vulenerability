@@ -107,11 +107,32 @@ public class ResearchJobItem {
      *  budget. */
     public static final String INCOMPLETE_REASON_BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED";
 
+    /** Set when Stage2 genuinely found zero and Stage4's AI web-search fallback was attempted (a key
+     *  is configured and budget was available) but did not run to completion — either {@code
+     *  LlmServiceClient#webSearchResearch} itself reports the call failed (LLM service outage,
+     *  timeout, network error, etc. — see its {@code Optional.empty()} contract, turned into this
+     *  reason by {@code Stage4WebSearchResearchService#research}), or an exception was thrown
+     *  elsewhere around the attempt (API key resolution, budget reservation, finding persistence —
+     *  see {@code ResearchJobProcessingService}'s Stage4 {@code catch (Exception e)} block). This
+     *  reason means "Stage4 was attempted but did not finish", not "spent the job's AI budget without
+     *  result": the reservation made for the attempt is refunded in full either way — {@code
+     *  JobCostBudgetService#reconcile} treats a failed call's actual cost as $0 and refunds the whole
+     *  reservation (see its own javadoc). Distinct from {@link #INCOMPLETE_REASON_AI_NOT_AVAILABLE}
+     *  and {@link #INCOMPLETE_REASON_BUDGET_EXHAUSTED}: those are deliberate, orderly skips before any
+     *  attempt was even made; this is an attempt that started but didn't finish. In practice more
+     *  common than a fully exhausted budget, since it covers every transient failure of the LLM
+     *  microservice itself, not just a rare cap. Without this, such a failure left {@code
+     *  researchIncompleteReason} at the {@code null} Stage2 already set, rendering identically to a
+     *  genuine, fully-verified all-clear — same class of bug as the one {@link
+     *  #INCOMPLETE_REASON_AI_NOT_AVAILABLE}/{@link #INCOMPLETE_REASON_BUDGET_EXHAUSTED} fixed. */
+    public static final String INCOMPLETE_REASON_AI_CALL_FAILED = "AI_CALL_FAILED";
+
     /** Reason this item's vulnerability research isn't fully verified, or {@code null} when it is
      *  (a genuine zero-findings result with no verification gap, or an item that hasn't reached
      *  Stage2 yet). See {@link #INCOMPLETE_REASON_SOURCES_FAILED}, {@link #INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK},
-     *  {@link #INCOMPLETE_REASON_AI_NOT_AVAILABLE} and {@link #INCOMPLETE_REASON_BUDGET_EXHAUSTED} for
-     *  the distinct causes this can hold. Left set once set until this item is reprocessed (there is
+     *  {@link #INCOMPLETE_REASON_AI_NOT_AVAILABLE}, {@link #INCOMPLETE_REASON_BUDGET_EXHAUSTED} and
+     *  {@link #INCOMPLETE_REASON_AI_CALL_FAILED} for the distinct causes this can hold. Left set once set
+     *  until this item is reprocessed (there is
      *  no automatic retry yet — see {@code ResearchJobProcessingService}). Replaces the old {@code
      *  vulnerability_research_incomplete} boolean (V11), which could only represent one such cause and
      *  collapsed the other (deliberately-skipped AI verification on a weak identification) into an
