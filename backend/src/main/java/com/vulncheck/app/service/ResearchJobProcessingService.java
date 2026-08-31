@@ -404,14 +404,25 @@ public class ResearchJobProcessingService {
                 item.setResearchIncompleteReason(ResearchJobItem.INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK);
                 researchJobItemRepository.save(item);
             } else {
+                Stage4WebSearchResearchService.Stage4ResearchResult stage4Result = null;
                 long stage4Start = System.nanoTime();
                 try {
-                    stage4WebSearchResearchService.research(
+                    stage4Result = stage4WebSearchResearchService.research(
                             item, identifiedProduct.get().getEcosystem(), identifiedProduct.get().getPackageName(), userId);
                 } catch (Exception e) {
                     log.error("Stage4 web-search vulnerability research failed for item {}", item.getId(), e);
                 } finally {
                     timings.stage4Nanos.addAndGet(System.nanoTime() - stage4Start);
+                }
+
+                // Stage4 never actually ran (no Claude key / job budget exhausted) — the item's
+                // researchIncompleteReason was set to null above (a genuine Stage2 zero-findings
+                // result), which would otherwise render identically to a fully-verified all-clear.
+                // Record why, same treatment as INCOMPLETE_REASON_SOURCES_FAILED/
+                // INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK above.
+                if (stage4Result != null && stage4Result.incompleteReason() != null) {
+                    item.setResearchIncompleteReason(stage4Result.incompleteReason());
+                    researchJobItemRepository.save(item);
                 }
 
                 // Bundled-package detection: same firing condition as Stage4 above (Stage2 found

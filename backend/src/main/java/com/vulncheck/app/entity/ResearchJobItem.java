@@ -91,15 +91,31 @@ public class ResearchJobItem {
      *  the end user. */
     public static final String INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK = "IDENTIFICATION_TOO_WEAK";
 
+    /** Set when Stage2 genuinely found zero (every source that ran succeeded) but Stage4's AI
+     *  web-search fallback never actually ran because this job's owner has no Claude API key
+     *  registered — see {@code Stage4WebSearchResearchService#research}'s no-key early return.
+     *  Distinct from {@link #INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK}: the identification itself
+     *  may be perfectly solid, there is simply no AI verification pass available to run. Without
+     *  this, an unconfigured API key (the default state for most jobs) made every such item render
+     *  identically to a genuine, fully-verified all-clear. */
+    public static final String INCOMPLETE_REASON_AI_NOT_AVAILABLE = "AI_NOT_AVAILABLE";
+
+    /** Set when Stage2 genuinely found zero but Stage4's AI web-search fallback was skipped because
+     *  the job's AI cost budget was already exhausted — see {@code Stage4WebSearchResearchService
+     *  #research}'s budget-exhausted early return. Distinct from {@link #INCOMPLETE_REASON_AI_NOT_AVAILABLE}:
+     *  a key is configured, spending on this item just wasn't possible within the job's remaining
+     *  budget. */
+    public static final String INCOMPLETE_REASON_BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED";
+
     /** Reason this item's vulnerability research isn't fully verified, or {@code null} when it is
      *  (a genuine zero-findings result with no verification gap, or an item that hasn't reached
-     *  Stage2 yet). See {@link #INCOMPLETE_REASON_SOURCES_FAILED} and
-     *  {@link #INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK} for the distinct causes this can hold.
-     *  Left set once set until this item is reprocessed (there is no automatic retry yet — see
-     *  {@code ResearchJobProcessingService}). Replaces the old {@code vulnerability_research_incomplete}
-     *  boolean (V11), which could only represent one such cause and collapsed the other
-     *  (deliberately-skipped AI verification on a weak identification) into an indistinguishable-
-     *  from-clean result — see V12's migration comment. */
+     *  Stage2 yet). See {@link #INCOMPLETE_REASON_SOURCES_FAILED}, {@link #INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK},
+     *  {@link #INCOMPLETE_REASON_AI_NOT_AVAILABLE} and {@link #INCOMPLETE_REASON_BUDGET_EXHAUSTED} for
+     *  the distinct causes this can hold. Left set once set until this item is reprocessed (there is
+     *  no automatic retry yet — see {@code ResearchJobProcessingService}). Replaces the old {@code
+     *  vulnerability_research_incomplete} boolean (V11), which could only represent one such cause and
+     *  collapsed the other (deliberately-skipped AI verification on a weak identification) into an
+     *  indistinguishable-from-clean result — see V12's migration comment. */
     @Column(name = "research_incomplete_reason")
     private String researchIncompleteReason;
 
