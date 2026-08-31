@@ -426,12 +426,20 @@ public class ResearchJobProcessingService {
                     item.setResearchIncompleteReason(stage4Result.incompleteReason());
                     researchJobItemRepository.save(item);
                 } else if (stage4Threw) {
-                    // Task backlog item 121 (2026-08-31): the call itself blew up (LLM service down,
-                    // timeout, ...) rather than returning an orderly skip. tryReserve above already
-                    // succeeded — so the job's AI budget for this item is spent either way — but
-                    // without this, the exception left researchIncompleteReason at Stage2's null,
-                    // making an AI-verification failure indistinguishable from a genuine all-clear.
-                    // See ResearchJobItem#INCOMPLETE_REASON_AI_CALL_FAILED's javadoc.
+                    // Task backlog item 121 (2026-08-31, REVISE 2026-09-01): LlmServiceClient
+                    // #webSearchResearch now reports an LLM-call failure (LLM service down, timeout,
+                    // network error, ...) via Optional.empty(), which Stage4WebSearchResearchService
+                    // turns into a Stage4ResearchResult carrying INCOMPLETE_REASON_AI_CALL_FAILED —
+                    // handled by the branch above, not this one. The reservation for that attempt is
+                    // fully refunded by JobCostBudgetService#reconcile inside LlmServiceClient's own
+                    // finally block (a failed call's actual cost is treated as $0), not "spent either
+                    // way" as this comment previously (incorrectly) claimed. This else branch only
+                    // remains reachable for exceptions thrown outside that try/catch — API key
+                    // resolution, budget reservation, or finding persistence inside
+                    // Stage4WebSearchResearchService#research itself. Without this, such a failure
+                    // left researchIncompleteReason at Stage2's null, making an AI-verification
+                    // failure indistinguishable from a genuine all-clear. See ResearchJobItem
+                    // #INCOMPLETE_REASON_AI_CALL_FAILED's javadoc.
                     item.setResearchIncompleteReason(ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
                     researchJobItemRepository.save(item);
                 }
