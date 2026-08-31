@@ -52,8 +52,13 @@ public class Stage4WebSearchResearchService {
      *  ResearchJobItem#INCOMPLETE_REASON_AI_NOT_AVAILABLE}/{@code
      *  ResearchJobItem#INCOMPLETE_REASON_BUDGET_EXHAUSTED} when this Stage4 pass never actually ran
      *  (so the caller can record that on the item, distinguishing "not checked" from "checked, clean"
-     *  — see {@code ResearchJobItem#researchIncompleteReason}'s javadoc), or {@code null} when the
-     *  pass ran to completion (regardless of how many findings it persisted). */
+     *  — see {@code ResearchJobItem#researchIncompleteReason}'s javadoc); {@code
+     *  ResearchJobItem#INCOMPLETE_REASON_AI_CALL_FAILED} when the pass was attempted but {@link
+     *  com.vulncheck.app.service.llm.LlmServiceClient#webSearchResearch} itself reports the call
+     *  failed (its {@code Optional.empty()} — network/timeout/4xx/5xx/unexpected error); or {@code
+     *  null} when the pass ran to completion (regardless of how many findings it persisted — a
+     *  genuinely empty findings list is a real "checked, clean" result, not a failure, and must not
+     *  be conflated with the {@code AI_CALL_FAILED} case above). */
     public record Stage4ResearchResult(int persistedCount, String incompleteReason) {
     }
 
@@ -70,8 +75,21 @@ public class Stage4WebSearchResearchService {
 
         log.info("Stage4 firing for item {} (ecosystem={}, package={})", item.getId(), ecosystem, packageName);
 
-        List<WebSearchVulnFindingDto> findings = llmServiceClient.webSearchResearch(
+        Optional<List<WebSearchVulnFindingDto>> findingsResult = llmServiceClient.webSearchResearch(
                 apiKey.get(), item, ecosystem, packageName, JobCostBudgetService.STAGE4_WEB_SEARCH_RESEARCH_COST_USD);
+
+        // PR #68 item 121 REVISE (senior review 2026-09-01): LlmServiceClient#webSearchResearch swallowed
+        // RestClientException/RuntimeException internally and returned an empty List either way, so this
+        // call site could never distinguish "LLM service call failed" from "call succeeded, found
+        // nothing" -- the exact case ResearchJobProcessingService's stage4Threw flag was meant to catch,
+        // but never fired for because no exception ever escaped this far. Optional.empty() now carries
+        // that signal explicitly.
+        if (findingsResult.isEmpty()) {
+            log.error("Stage4 web-search research call failed for item {} (ecosystem={}, package={})",
+                    item.getId(), ecosystem, packageName);
+            return new Stage4ResearchResult(0, ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
+        }
+        List<WebSearchVulnFindingDto> findings = findingsResult.get();
 
         int persisted = 0;
         for (WebSearchVulnFindingDto finding : findings) {
