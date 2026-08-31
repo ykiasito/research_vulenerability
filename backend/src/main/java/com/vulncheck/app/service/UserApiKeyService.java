@@ -21,7 +21,8 @@ public class UserApiKeyService {
 
     public Optional<String> getClaudeApiKey(Long userId) {
         return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_CLAUDE)
-                .map(secret -> secretEncryptionService.decrypt(secret.getEncryptedKey()));
+                .map(secret -> secretEncryptionService.decrypt(
+                        secret.getEncryptedKey(), userId, UserSecret.PROVIDER_CLAUDE));
     }
 
     /** NVD keys are free (no billing) and only unlock a higher client-side rate limit, so unlike
@@ -29,6 +30,7 @@ public class UserApiKeyService {
      *  registered", used by whichever job/admin action happens to be running as them. */
     public Optional<String> getNvdApiKey(Long userId) {
         return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_NVD)
-                .map(secret -> secretEncryptionService.decrypt(secret.getEncryptedKey()));
+                .map(secret -> secretEncryptionService.decrypt(
+                        secret.getEncryptedKey(), userId, UserSecret.PROVIDER_NVD));
     }
 }
