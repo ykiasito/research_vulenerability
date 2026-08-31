@@ -283,6 +283,56 @@ class ResearchJobProcessingServiceTest {
         assertThat(item.getResearchIncompleteReason()).isNull();
     }
 
+    // --- Task backlog item 102 (2026-08-31): Stage4's own "never actually ran" exits (no Claude API
+    // key / job budget exhausted) must not render identically to a genuine all-clear ------------
+
+    @Test
+    void itemIsMarkedAiNotAvailableWhenStage4HasNoApiKeyConfigured() {
+        // The gap this asserts against: an unconfigured Claude API key is this app's default state,
+        // so without this, every Stage2-zero-findings item silently rendered as a fully-verified
+        // all-clear even though the AI verification pass never ran at all.
+        ResearchJob job = job(9L, 10L);
+        ResearchJobItem item = item(13L, 9L);
+        IdentifiedProduct product = identifiedProduct(13L);
+
+        when(researchJobRepository.findById(9L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdAndStatusOrderById(9L, ResearchJobItem.STATUS_PENDING))
+                .thenReturn(List.of(item));
+        when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
+        when(stage2VulnerabilityResearchService.research(item, product, 10L))
+                .thenReturn(new Stage2Result(0, true));
+        when(stage4WebSearchResearchService.research(item, "npm", "lodash", 10L))
+                .thenReturn(new Stage4WebSearchResearchService.Stage4ResearchResult(
+                        0, ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE));
+
+        newService().processJobAsync(9L);
+
+        assertThat(item.getResearchIncompleteReason()).isEqualTo(ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE);
+        assertThat(item.isResearchIncomplete()).isTrue();
+    }
+
+    @Test
+    void itemIsMarkedBudgetExhaustedWhenStage4SkipsForBudget() {
+        ResearchJob job = job(14L, 10L);
+        ResearchJobItem item = item(18L, 14L);
+        IdentifiedProduct product = identifiedProduct(18L);
+
+        when(researchJobRepository.findById(14L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdAndStatusOrderById(14L, ResearchJobItem.STATUS_PENDING))
+                .thenReturn(List.of(item));
+        when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
+        when(stage2VulnerabilityResearchService.research(item, product, 10L))
+                .thenReturn(new Stage2Result(0, true));
+        when(stage4WebSearchResearchService.research(item, "npm", "lodash", 10L))
+                .thenReturn(new Stage4WebSearchResearchService.Stage4ResearchResult(
+                        0, ResearchJobItem.INCOMPLETE_REASON_BUDGET_EXHAUSTED));
+
+        newService().processJobAsync(14L);
+
+        assertThat(item.getResearchIncompleteReason()).isEqualTo(ResearchJobItem.INCOMPLETE_REASON_BUDGET_EXHAUSTED);
+        assertThat(item.isResearchIncomplete()).isTrue();
+    }
+
     @Test
     void bundledComponentResearchDoesNotFireWhenJobHasNotOptedIn() {
         ResearchJob job = job(30L, 10L);
