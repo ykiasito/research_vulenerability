@@ -347,6 +347,36 @@ class JobControllerTest {
         assertThat(row.get("csaf_vendor_status")).isEqualTo("CVE-2024-1111: known_affected (SSA-1)");
     }
 
+    // --- Task backlog item 103 (2026-08-31): the job detail view's "checked, clean" vs. "not
+    // actually checked" distinction must survive into the CSV export -----------------------------
+
+    @Test
+    void exportCsvIncludesResearchIncompleteReasonColumnWhenSet() throws IOException {
+        User owner = user(1L, "owner@example.com");
+        ResearchJob job = job(10L, 1L);
+        ResearchJobItem itemWithReason =
+                item(100L, 10L, "lodash", "4.17.21", null, ResearchJobItem.STATUS_IDENTIFIED);
+        itemWithReason.setResearchIncompleteReason(ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE);
+        ResearchJobItem itemWithoutReason =
+                item(101L, 10L, "express", "4.18.0", null, ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdOrderById(10L))
+                .thenReturn(List.of(itemWithReason, itemWithoutReason));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(100L, 101L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findViewsByJobItemIdIn(List.of(100L, 101L))).thenReturn(List.of());
+
+        ResponseEntity<byte[]> response = newController().exportCsv(userDetails("owner@example.com"), 10L);
+
+        List<CSVRecord> rows = parseCsv(response.getBody());
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).get("research_incomplete_reason"))
+                .isEqualTo(ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE);
+        // Unset (fully verified/genuine clean result) must export as an empty cell, not "null".
+        assertThat(rows.get(1).get("research_incomplete_reason")).isEmpty();
+    }
+
     private List<CSVRecord> parseCsv(byte[] body) throws IOException {
         // The export is BOM-prefixed for Excel compatibility (see JobController#BOM); strip it the
         // same way CsvParsingService does before handing the stream to CSVParser.

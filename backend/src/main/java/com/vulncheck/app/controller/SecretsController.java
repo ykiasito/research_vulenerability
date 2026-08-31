@@ -74,7 +74,7 @@ public class SecretsController {
         }
 
         User user = currentUser(userDetails);
-        String encrypted = secretEncryptionService.encrypt(form.getApiKey().strip());
+        String encrypted = secretEncryptionService.encrypt(form.getApiKey().strip(), user.getId(), form.getProvider());
         userSecretRepository.upsert(user.getId(), form.getProvider(), encrypted);
 
         return "redirect:/settings/secrets?saved";
@@ -91,7 +91,7 @@ public class SecretsController {
         if (secret == null) {
             return null;
         }
-        String plaintext = secretEncryptionService.decrypt(secret.getEncryptedKey());
+        String plaintext = secretEncryptionService.decrypt(secret.getEncryptedKey(), secret.getUserId(), secret.getProvider());
         int visibleTail = Math.min(4, plaintext.length());
         return "•".repeat(Math.max(0, plaintext.length() - visibleTail)) + plaintext.substring(plaintext.length() - visibleTail);
     }

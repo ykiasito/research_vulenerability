@@ -35,7 +35,7 @@ import org.junit.jupiter.api.Test;
  */
 class SecretKeyRotationJobCreator {
 
-    private record Row(long id, String encryptedKey) {}
+    private record Row(long id, long userId, String provider, String encryptedKey) {}
 
     @Test
     void reencryptAllUserSecretsFromOldKeyToNewKey() throws Exception {
@@ -52,11 +52,15 @@ class SecretKeyRotationJobCreator {
             conn.setAutoCommit(false);
 
             List<Row> rows = new ArrayList<>();
-            try (PreparedStatement select =
-                            conn.prepareStatement("SELECT id, encrypted_key FROM user_secrets ORDER BY id");
+            try (PreparedStatement select = conn.prepareStatement(
+                            "SELECT id, user_id, provider, encrypted_key FROM user_secrets ORDER BY id");
                     ResultSet rs = select.executeQuery()) {
                 while (rs.next()) {
-                    rows.add(new Row(rs.getLong("id"), rs.getString("encrypted_key")));
+                    rows.add(new Row(
+                            rs.getLong("id"),
+                            rs.getLong("user_id"),
+                            rs.getString("provider"),
+                            rs.getString("encrypted_key")));
                 }
             }
 
@@ -64,15 +68,15 @@ class SecretKeyRotationJobCreator {
             try (PreparedStatement update =
                     conn.prepareStatement("UPDATE user_secrets SET encrypted_key = ? WHERE id = ?")) {
                 for (Row row : rows) {
-                    String plaintextBefore = oldKeyService.decrypt(row.encryptedKey());
-                    String reencrypted = newKeyService.encrypt(plaintextBefore);
+                    String plaintextBefore = oldKeyService.decrypt(row.encryptedKey(), row.userId(), row.provider());
+                    String reencrypted = newKeyService.encrypt(plaintextBefore, row.userId(), row.provider());
 
                     update.setString(1, reencrypted);
                     update.setLong(2, row.id());
                     update.executeUpdate();
 
                     // Self-verify the round trip without ever printing either value.
-                    String plaintextAfter = newKeyService.decrypt(reencrypted);
+                    String plaintextAfter = newKeyService.decrypt(reencrypted, row.userId(), row.provider());
                     assertEquals(
                             plaintextBefore, plaintextAfter, "Round-trip mismatch for user_secrets.id=" + row.id());
                     migrated++;
@@ -106,11 +110,15 @@ class SecretKeyRotationJobCreator {
 
         List<Row> rows = new ArrayList<>();
         try (Connection conn = DriverManager.getConnection(jdbcUrl, dbUser, dbPassword);
-                PreparedStatement select =
-                        conn.prepareStatement("SELECT id, encrypted_key FROM user_secrets ORDER BY id");
+                PreparedStatement select = conn.prepareStatement(
+                        "SELECT id, user_id, provider, encrypted_key FROM user_secrets ORDER BY id");
                 ResultSet rs = select.executeQuery()) {
             while (rs.next()) {
-                rows.add(new Row(rs.getLong("id"), rs.getString("encrypted_key")));
+                rows.add(new Row(
+                        rs.getLong("id"),
+                        rs.getLong("user_id"),
+                        rs.getString("provider"),
+                        rs.getString("encrypted_key")));
             }
         }
 
@@ -119,11 +127,11 @@ class SecretKeyRotationJobCreator {
             // — this is what proves the row was actually re-encrypted, not left untouched.
             assertThrows(
                     IllegalStateException.class,
-                    () -> oldKeyService.decrypt(row.encryptedKey()),
+                    () -> oldKeyService.decrypt(row.encryptedKey(), row.userId(), row.provider()),
                     "Old key should no longer decrypt user_secrets.id=" + row.id() + " after rotation");
 
             // The new key must decrypt it without throwing.
-            newKeyService.decrypt(row.encryptedKey());
+            newKeyService.decrypt(row.encryptedKey(), row.userId(), row.provider());
         }
 
         System.out.println("\n=== SECRET KEY ROTATION VERIFY: checked " + rows.size()

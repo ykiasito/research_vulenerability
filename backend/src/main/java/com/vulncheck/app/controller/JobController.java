@@ -294,7 +294,7 @@ public class JobController {
     private static final CSVFormat EXPORT_CSV_FORMAT = CSVFormat.DEFAULT.builder()
             .setHeader("product_name", "version", "vendor", "status", "ecosystem", "package_or_cpe",
                     "confidence", "vulnerability_count", "vulnerabilities", "bundled_component_findings",
-                    "csaf_vendor_status")
+                    "csaf_vendor_status", "research_incomplete_reason")
             .build();
 
     /**
@@ -322,6 +322,11 @@ public class JobController {
      * declared {@code known_not_affected} exported identically to one declared {@code known_affected},
      * which could drive unnecessary remediation work for the CSV's reader. Does not change {@code
      * vulnerability_count}/{@code vulnerabilities} semantics.
+     *
+     * <p>Task backlog item 103 (2026-08-31): also exports a {@code research_incomplete_reason} column
+     * (empty when unset), mirroring {@link ResearchJobItem#getResearchIncompleteReason()} — the job
+     * detail view already distinguishes "checked, clean" from "not actually checked" (see item 102),
+     * and without this column that distinction was lost the moment the results left the app as a CSV.
      */
     @GetMapping("/jobs/{id}/export.csv")
     public ResponseEntity<byte[]> exportCsv(@AuthenticationPrincipal UserDetails userDetails, @PathVariable Long id) {
@@ -371,7 +376,8 @@ public class JobController {
                                 .collect(Collectors.joining("; ")),
                         csafAnnotatedVulns.stream()
                                 .map(v -> v.cveOrGhsaId() + ": " + v.csafStatus() + " (" + v.csafAdvisoryId() + ")")
-                                .collect(Collectors.joining("; ")));
+                                .collect(Collectors.joining("; ")),
+                        item.getResearchIncompleteReason() != null ? item.getResearchIncompleteReason() : "");
             }
             printer.flush();
             csvBody = writer.toString();
