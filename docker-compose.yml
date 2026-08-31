@@ -36,6 +36,9 @@ services:
       # One-shot: mirrors the full NVD CPE Dictionary on boot (hours). Leave false; flip to true
       # once per environment, then set it back. See CpeDictionaryBootstrapSync.
       CPE_FULL_SYNC_ON_STARTUP: ${CPE_FULL_SYNC_ON_STARTUP:-false}
+      # Weekly automatic full re-sync of the same mirror (Sunday 01:00 UTC, ~103 min). Off by
+      # default; enabling it is an operational decision (see docs/spec/cpe-dictionary-mirror-plan.md).
+      CPE_SCHEDULED_RESYNC_ENABLED: ${CPE_SCHEDULED_RESYNC_ENABLED:-false}
       # Off by default (see HighConfidenceVerificationService) — only flip to true for a deliberate,
       # budget-monitored diagnostic run, then set back to false. Runs synchronously on the
       # item-processing thread like every other AI tier, so enabling it can plausibly add on the
