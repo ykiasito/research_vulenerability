@@ -342,13 +342,31 @@ public class ResearchJobProcessingService {
 
         if (identifiedProduct.isEmpty()) {
             if (item.getHintIdentifier() != null) {
+                Stage4WebSearchResearchService.Stage4ResearchResult stage4Result = null;
+                boolean stage4Threw = false;
                 long stage4Start = System.nanoTime();
                 try {
-                    stage4WebSearchResearchService.research(item, item.getHintPlatform(), item.getHintIdentifier(), userId);
+                    stage4Result = stage4WebSearchResearchService.research(
+                            item, item.getHintPlatform(), item.getHintIdentifier(), userId);
                 } catch (Exception e) {
                     log.error("Stage4 hint-based vulnerability research failed for item {}", item.getId(), e);
+                    stage4Threw = true;
                 } finally {
                     timings.stage4Nanos.addAndGet(System.nanoTime() - stage4Start);
+                }
+
+                // Task backlog item 128 (2026-09-01, senior review on PR#68/item121): this hint-based
+                // call site (UNIDENTIFIED item, Tier3-recognized platform hint) used to discard
+                // Stage4ResearchResult entirely, so a skipped/failed Stage4 pass here left
+                // researchIncompleteReason at whatever it already was (item never reaches Stage2, so
+                // effectively null), rendering identically to a genuine, fully-verified all-clear —
+                // the same class of bug item 121 fixed for the IDENTIFIED call site below.
+                if (stage4Result != null && stage4Result.incompleteReason() != null) {
+                    item.setResearchIncompleteReason(stage4Result.incompleteReason());
+                    researchJobItemRepository.save(item);
+                } else if (stage4Threw) {
+                    item.setResearchIncompleteReason(ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
+                    researchJobItemRepository.save(item);
                 }
             }
             return;
