@@ -405,12 +405,14 @@ public class ResearchJobProcessingService {
                 researchJobItemRepository.save(item);
             } else {
                 Stage4WebSearchResearchService.Stage4ResearchResult stage4Result = null;
+                boolean stage4Threw = false;
                 long stage4Start = System.nanoTime();
                 try {
                     stage4Result = stage4WebSearchResearchService.research(
                             item, identifiedProduct.get().getEcosystem(), identifiedProduct.get().getPackageName(), userId);
                 } catch (Exception e) {
                     log.error("Stage4 web-search vulnerability research failed for item {}", item.getId(), e);
+                    stage4Threw = true;
                 } finally {
                     timings.stage4Nanos.addAndGet(System.nanoTime() - stage4Start);
                 }
@@ -422,6 +424,15 @@ public class ResearchJobProcessingService {
                 // INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK above.
                 if (stage4Result != null && stage4Result.incompleteReason() != null) {
                     item.setResearchIncompleteReason(stage4Result.incompleteReason());
+                    researchJobItemRepository.save(item);
+                } else if (stage4Threw) {
+                    // Task backlog item 121 (2026-08-31): the call itself blew up (LLM service down,
+                    // timeout, ...) rather than returning an orderly skip. tryReserve above already
+                    // succeeded — so the job's AI budget for this item is spent either way — but
+                    // without this, the exception left researchIncompleteReason at Stage2's null,
+                    // making an AI-verification failure indistinguishable from a genuine all-clear.
+                    // See ResearchJobItem#INCOMPLETE_REASON_AI_CALL_FAILED's javadoc.
+                    item.setResearchIncompleteReason(ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
                     researchJobItemRepository.save(item);
                 }
 
