@@ -1,10 +1,10 @@
 # Vulnerability Pre-Screening Web App
 
-A CSV-upload-based vulnerability pre-screening web app. Upload a CSV list of software you plan to deploy (product name, version, purpose, etc.), and it looks up known vulnerabilities (CVEs, etc.) for each product and returns the results. It's designed with a GUI for non-engineers, and **assumes internal (in-house) use**.
+A CSV-upload-based vulnerability pre-screening web app. Upload a CSV list of software you plan to deploy (product name, version, purpose, etc.), and it looks up known vulnerabilities (CVEs, etc.) for each product and returns the results. It's designed with a GUI for non-engineers, and **assumes personal, individual use**.
 
 Tech stack: Spring Boot (Java 21, Thymeleaf) + Python/FastAPI (Claude LLM microservice) + PostgreSQL 16, all orchestrated with Docker Compose.
 
-Detailed design and specification documents for this project are for internal use only and are not included in this repository.
+Detailed design and specification documents for this project are for personal use and are not included in this repository.
 
 ## Setup
 
@@ -27,7 +27,7 @@ Once started, the app is available at `http://localhost:8080`.
 
 ## Important Notes
 
-**This app assumes in-house use on a private, non-public network. Do not deploy it as-is to an environment exposed to the internet.**
+**This app assumes personal use on a private, non-public network. Do not deploy it as-is to an environment exposed to the internet.**
 
 Specifically, the current docker-compose configuration has the following constraints:
 
