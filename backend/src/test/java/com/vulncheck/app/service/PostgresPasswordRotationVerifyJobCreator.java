@@ -34,7 +34,7 @@ import org.junit.jupiter.api.Test;
  */
 class PostgresPasswordRotationVerifyJobCreator {
 
-    private record Row(long id, String provider, String encryptedKey) {}
+    private record Row(long id, long userId, String provider, String encryptedKey) {}
 
     @Test
     void newDbPasswordConnectsAndExistingSecretsStillDecrypt() throws Exception {
@@ -48,10 +48,15 @@ class PostgresPasswordRotationVerifyJobCreator {
         List<Row> rows = new ArrayList<>();
         try (Connection conn = DriverManager.getConnection(jdbcUrl, dbUser, dbPassword);
                 PreparedStatement select =
-                        conn.prepareStatement("SELECT id, provider, encrypted_key FROM user_secrets ORDER BY id");
+                        conn.prepareStatement(
+                        "SELECT id, user_id, provider, encrypted_key FROM user_secrets ORDER BY id");
                 ResultSet rs = select.executeQuery()) {
             while (rs.next()) {
-                rows.add(new Row(rs.getLong("id"), rs.getString("provider"), rs.getString("encrypted_key")));
+                rows.add(new Row(
+                        rs.getLong("id"),
+                        rs.getLong("user_id"),
+                        rs.getString("provider"),
+                        rs.getString("encrypted_key")));
             }
         }
 
@@ -59,7 +64,7 @@ class PostgresPasswordRotationVerifyJobCreator {
 
         for (Row row : rows) {
             // Throws IllegalStateException on failure; a clean return proves the row is intact.
-            encryptionService.decrypt(row.encryptedKey());
+            encryptionService.decrypt(row.encryptedKey(), row.userId(), row.provider());
         }
 
         System.out.println("\n=== POSTGRES PASSWORD ROTATION VERIFY: connected with new password over TCP, "
