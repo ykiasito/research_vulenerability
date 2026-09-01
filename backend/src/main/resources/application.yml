@@ -9,6 +9,14 @@ spring:
     # encryption key default below. MUST be set via SPRING_DATASOURCE_PASSWORD in every environment.
     password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # Previously unset (Spring Boot/HikariCP's own default, 10) — pinned explicitly and
+      # externalized (item 167, 2026-09-01, docs/spec/closed-mode-plan.md §3-3 A4/§7 P2) so a
+      # closed-mode deployment can raise it once DB connection contention (rather than external
+      # network waits) becomes the item-processing bottleneck. Default value unchanged for now;
+      # keep this comfortably ahead of app.item-processing-pool-size plus any concurrently-running
+      # sync workers and the web layer's own connection needs.
+      maximum-pool-size: ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:10}
 
   jpa:
     hibernate:
@@ -89,6 +97,12 @@ app:
   # Per-job AI-spend cap per item (see JobCostBudgetService#costCapPerItemUsd) — $5/1,000 items by
   # default. Only override for a throwaway diagnostic job deliberately made of AI-eligible items.
   cost-cap-per-item-usd: ${APP_COST_CAP_PER_ITEM_USD:0.005}
+  # Size of AsyncConfig#itemProcessingExecutor (per-item parallelism within a single job). 8 by
+  # default, unchanged from the previous hardcoded value — externalized (item 167, 2026-09-01) so a
+  # closed-mode deployment can raise it later once the registry-fan-out oversubscription rationale
+  # for "8" no longer applies (see that bean's javadoc and docs/spec/closed-mode-plan.md §7 P4).
+  # Keep spring.datasource.hikari.maximum-pool-size below comfortably ahead of this value.
+  item-processing-pool-size: ${ITEM_PROCESSING_POOL_SIZE:8}
 
 server:
   port: 8080
