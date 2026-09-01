@@ -13,9 +13,14 @@ import org.springframework.stereotype.Service;
 
 /**
  * Resolves a user's own decrypted provider API key, on demand, for exactly the request that
- * needs it — never cached or held longer than one call. Backs Stage1 Tier2/Tier3 and Stage4,
- * which must use each job's owner's own Claude key (per the plan's per-user-keys design), not a
- * shared server-wide key.
+ * needs it — never cached or held longer than one call.
+ *
+ * <p>Closed-mode B2 (docs/spec/closed-mode-plan.md §9-2): {@code getClaudeApiKey} — the Stage1
+ * Tier2/Tier3 and Stage4 per-user Claude key lookup — is removed. Nothing in this deployment ever
+ * calls out to Claude anymore, so there is no longer a caller for it. {@link UserSecret
+ * #PROVIDER_CLAUDE} and the {@code claude} provider row itself are left alone here (see this
+ * class's own PR discussion) — {@link SecretEncryptionService} and {@code UserSecretRepository}
+ * are shared, provider-agnostic components also used for the NVD key below.
  */
 @Service
 @RequiredArgsConstructor
@@ -30,12 +35,6 @@ public class UserApiKeyService {
      *  see application.yml. Unset/blank means "no admin", not an error. */
     @Value("${app.admin-email:}")
     private String adminEmail;
-
-    public Optional<String> getClaudeApiKey(Long userId) {
-        return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_CLAUDE)
-                .map(secret -> secretEncryptionService.decrypt(
-                        secret.getEncryptedKey(), userId, UserSecret.PROVIDER_CLAUDE));
-    }
 
     /** NVD keys are free (no billing) and only unlock a higher client-side rate limit, so unlike
      *  the Claude key there's no cost reason to gate this — it's simply "does this user have one

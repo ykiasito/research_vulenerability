@@ -12,10 +12,7 @@ import com.vulncheck.app.entity.CpeDictionaryEntry;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
-import com.vulncheck.app.repository.EcosystemRegistryRepository;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
-import com.vulncheck.app.repository.ResearchJobItemRepository;
-import com.vulncheck.app.service.llm.LlmServiceClient;
 import com.vulncheck.app.service.nvd.CpeNameVariantCache;
 import com.vulncheck.app.service.nvd.CpeUtils;
 import com.vulncheck.app.service.registry.PackageRegistryLookup;
@@ -84,31 +81,17 @@ class Stage1GoldenBenchmarkTest {
     private UserApiKeyService userApiKeyService;
 
     @Mock
-    private LlmServiceClient llmServiceClient;
-
-    @Mock
     private NvdCpeSyncService nvdCpeSyncService;
-
-    @Mock
-    private EcosystemRegistryRepository ecosystemRegistryRepository;
-
-    @Mock
-    private ResearchJobItemRepository researchJobItemRepository;
-
-    @Mock
-    private JobCostBudgetService jobCostBudgetService;
 
     @Mock
     private RegistryRoutingPolicy registryRoutingPolicy;
 
     @BeforeEach
     void commonStubs() {
-        // This benchmark deliberately validates the static-only (no-AI) pipeline — the user has
-        // confirmed (2026-08-26) that's the quality bar to keep validating against, matching every
-        // real run in this environment (no Claude API key configured). A golden case that needs an
-        // AI disambiguation call to resolve correctly does not belong in this benchmark.
-        lenient().when(userApiKeyService.getClaudeApiKey(any())).thenReturn(Optional.empty());
-        lenient().when(jobCostBudgetService.tryReserve(any(), any())).thenReturn(true);
+        // This benchmark deliberately validates the static-only pipeline — closed-mode B2
+        // (docs/spec/closed-mode-plan.md §9-2) made that the *only* pipeline: every AI call site
+        // this benchmark used to have to deliberately avoid is gone outright, always taking the
+        // exact fallback this benchmark already validated against.
         lenient().when(registryRoutingPolicy.route(any(), any())).thenAnswer(invocation -> invocation.getArgument(1));
         lenient().when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
         lenient().when(identifiedProductRepository.save(any(IdentifiedProduct.class)))
@@ -132,20 +115,12 @@ class Stage1GoldenBenchmarkTest {
         List<PackageRegistryLookup> lookups =
                 goldenCase.registryEcosystem() == null ? List.of() : List.of(fixedRegistryLookup(goldenCase));
 
-        // enabled defaults to false (never Spring-injected via a plain `new` here) — this benchmark
-        // deliberately never exercises an AI call (see the class javadoc), and the verification
-        // backstop is no exception, so this is always a no-op for every case in this file.
-        HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService(
-                userApiKeyService, llmServiceClient, jobCostBudgetService, identifiedProductRepository);
-        // Closed-mode backlog item 166: see Stage1IdentificationServiceTest's own service() helper
-        // for why this benchmark now composes the two extracted registry/AI collaborator classes
-        // from the same mocks, rather than passing them straight into a single constructor.
+        // Closed-mode B2 (docs/spec/closed-mode-plan.md §9-2): both collaborators below are now
+        // gutted to an unconditional AI-unavailable fallback — see their own javadoc.
+        HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService();
         Stage1RegistryIdentification registryIdentification = new Stage1RegistryIdentification(
-                lookups, registryRoutingPolicy, new RegistryLookupCache(), userApiKeyService, llmServiceClient,
-                jobCostBudgetService, Runnable::run);
-        Stage1AiArbitration aiArbitration = new Stage1AiArbitration(
-                userApiKeyService, jobCostBudgetService, llmServiceClient, ecosystemRegistryRepository,
-                researchJobItemRepository, registryIdentification);
+                lookups, registryRoutingPolicy, new RegistryLookupCache(), Runnable::run);
+        Stage1AiArbitration aiArbitration = new Stage1AiArbitration();
         Stage1IdentificationService service = new Stage1IdentificationService(
                 cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService,
                 nvdCpeSyncService, highConfidenceVerificationService, registryIdentification, aiArbitration, Runnable::run);

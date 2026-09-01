@@ -41,7 +41,6 @@ app:
   # public, so this literal is public knowledge by definition — never reuse it (or generate a fresh
   # one and reuse that) outside of tests, and never point this key at any real/production database.
   secret-encryption-key: 6tdyAv3iE6mznN5rAvyzoSPSfZ2No6Y1Tq4hlubAB0s=
-  llm-service-url: http://llm-service:8000
   admin-email: ""
   job-retention-days: 30
   cpe-full-sync-on-startup: false

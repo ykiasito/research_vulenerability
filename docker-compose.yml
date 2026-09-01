@@ -44,19 +44,6 @@ services:
       # a time strictly after the instance's own start time, or the trigger silently never fires
       # (see CpeDictionaryScheduledResync#resyncWeekly's javadoc).
       CPE_SCHEDULED_RESYNC_CRON: ${CPE_SCHEDULED_RESYNC_CRON:-0 30 1 * * SUN}
-      # Off by default (see HighConfidenceVerificationService) — only flip to true for a deliberate,
-      # budget-monitored diagnostic run, then set back to false. Runs synchronously on the
-      # item-processing thread like every other AI tier, so enabling it can plausibly add on the
-      # order of 7-8 minutes of wall-clock throughput to a 1,000-item job (REVISE item 7, senior
-      # review 2026-08-29, PR #1).
-      HIGH_CONFIDENCE_VERIFICATION_ENABLED: ${HIGH_CONFIDENCE_VERIFICATION_ENABLED:-false}
-      HIGH_CONFIDENCE_VERIFICATION_THRESHOLD: ${HIGH_CONFIDENCE_VERIFICATION_THRESHOLD:-0.95}
-      HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR: ${HIGH_CONFIDENCE_VERIFICATION_DOWNGRADE_FACTOR:-0.5}
-      # This feature's OWN per-item cost cap (separate ledger, see
-      # JobCostBudgetService#verificationCostCapPerItemUsd) — defaults to 0 so enabling the feature
-      # above never silently exhausts APP_COST_CAP_PER_ITEM_USD below. Must be set to a real value
-      # alongside HIGH_CONFIDENCE_VERIFICATION_ENABLED for a deliberate, budget-monitored run.
-      HIGH_CONFIDENCE_VERIFICATION_COST_CAP_PER_ITEM_USD: ${HIGH_CONFIDENCE_VERIFICATION_COST_CAP_PER_ITEM_USD:-0}
       # Per-job AI-spend cap, see JobCostBudgetService#costCapPerItemUsd. Leave at the $5/1,000-item
       # default; only raise for a throwaway diagnostic job made entirely of AI-eligible items (a
       # real job's items are mostly free static Tier1 matches, so the default holds there).

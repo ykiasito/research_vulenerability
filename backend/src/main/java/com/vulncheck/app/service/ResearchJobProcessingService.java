@@ -156,13 +156,6 @@ public class ResearchJobProcessingService {
         if (job.isBundledComponentCheckEnabled()) {
             jobCostBudgetService.startBundledComponentBudget(jobId, items.size());
         }
-        // High-confidence verification (REVISE item 1, senior review 2026-08-29, round 1) is a single
-        // app-wide toggle (app.high-confidence-verification.enabled), not a per-job opt-in field
-        // like bundled-component detection above — started unconditionally for every job, same as
-        // the always-on MAIN budget. Its cost-cap-per-item-usd defaults to 0 (see
-        // JobCostBudgetService#verificationCostCapPerItemUsd), so this is a harmless no-op budget
-        // for every job unless an operator has explicitly configured a real cap.
-        jobCostBudgetService.startVerificationBudget(jobId, items.size());
 
         long jobStartNanos = System.nanoTime();
         JobTimings timings = new JobTimings();
@@ -207,7 +200,6 @@ public class ResearchJobProcessingService {
             if (job.isBundledComponentCheckEnabled()) {
                 jobCostBudgetService.endBundledComponentBudget(jobId);
             }
-            jobCostBudgetService.endVerificationBudget(jobId);
         }
 
         logJobTimings(jobId, items.size(), jobStartNanos, timings, nvdWaitBaselineMs, ghsaWaitBaselineMs,
