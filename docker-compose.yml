@@ -83,13 +83,5 @@ services:
     # Docker SIGKILLs the process — default stop_grace_period (10s) is shorter than that window.
     stop_grace_period: 30s
 
-  llm-service:
-    build:
-      context: ./llm-service
-    ports:
-      - "127.0.0.1:8000:8000"
-    volumes:
-      - ./logs/llm-service:/var/log/app
-
 volumes:
   postgres_data:
