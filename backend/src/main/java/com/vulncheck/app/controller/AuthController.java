@@ -49,10 +49,10 @@ public class AuthController {
         }
 
         // Normalize to lowercase before any lookup/save so that a case-variant of an existing
-        // email (most importantly ADMIN_EMAIL, see AppUserDetailsService's case-insensitive
-        // comparison) can never sneak past the duplicate check and be granted ROLE_ADMIN
-        // (task-backlog item 148). Locale.ROOT avoids locale-dependent casing surprises (e.g.
-        // Turkish "I").
+        // email (most importantly ADMIN_EMAIL, see AppUserDetailsService's exact-match comparison
+        // against a Locale.ROOT-lowercased email) can never sneak past the duplicate check and be
+        // granted ROLE_ADMIN (task-backlog item 148). Locale.ROOT avoids locale-dependent casing
+        // surprises (e.g. Turkish "I").
         String normalizedEmail = form.getEmail().toLowerCase(Locale.ROOT);
 
         if (userRepository.existsByEmailIgnoreCase(normalizedEmail)) {
