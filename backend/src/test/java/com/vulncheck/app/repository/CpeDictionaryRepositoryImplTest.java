@@ -352,26 +352,30 @@ class CpeDictionaryRepositoryImplTest {
     }
 
     /**
-     * Plain {@code jdbcTemplate.queryForObject(sql, OffsetDateTime.class, ...)} lets Spring's
-     * {@code SingleColumnRowMapper} hand back whatever type the pgjdbc driver's default {@code
-     * ResultSet.getObject(int)} produces for a {@code timestamptz} column ({@code
-     * java.sql.Timestamp}), which is not assignable to {@code OffsetDateTime} -- a {@code
-     * ClassCastException} at runtime, not a compile-time type mismatch. {@link
-     * CpeDictionaryRepositoryImpl#collect}'s own row mapper avoids this the same way: calling the
-     * type-aware {@code ResultSet.getObject(String, Class)} overload explicitly.
+     * Regression test for PR #75 REVISE (round 2) item 1: {@code @DataJpaTest} wraps each test
+     * method in a single transaction, and Postgres's {@code now()} (= {@code
+     * transaction_timestamp()}) is fixed for the whole transaction -- so {@code last_synced_at}
+     * cannot distinguish "row rewritten" from "row left alone" here regardless of whether the
+     * {@code ON CONFLICT DO UPDATE ... WHERE ... IS DISTINCT FROM ...} predicate is present or not
+     * (verified by senior-reviewer: removing the predicate entirely still left {@code
+     * last_synced_at} unchanged, while {@code ctid} still moved). {@code ctid} (the row's physical
+     * heap location) is not subject to that transaction-timestamp trap: Postgres always writes a
+     * new heap tuple version -- and therefore a new {@code ctid} -- for any {@code UPDATE} whose
+     * {@code WHERE} clause matched, even a HOT update that touches no indexed column, so it
+     * reliably distinguishes "a new tuple version was written" from "the row was left untouched".
      */
-    private OffsetDateTime lastSyncedAt(String cpeString) {
+    private String rowVersion(String cpeString) {
         return jdbcTemplate.queryForObject(
-                "SELECT last_synced_at FROM cpe_dictionary WHERE cpe_string = ?",
-                (rs, rowNum) -> rs.getObject("last_synced_at", OffsetDateTime.class),
-                cpeString);
+                "SELECT ctid::text FROM cpe_dictionary WHERE cpe_string = ?", String.class, cpeString);
     }
 
     /**
      * Regression test for PR #75 REVISE item 1: the {@code ON CONFLICT DO UPDATE} in {@code
      * upsertBatch} must still write when content actually changed. Inserts a row, then upserts the
-     * same {@code cpe_string} again with a different title and asserts the title (and {@code
-     * last_synced_at}) actually changed.
+     * same {@code cpe_string} again with a different title and asserts the title changed and a new
+     * heap tuple version was written (see {@link #rowVersion} for why {@code ctid}, not {@code
+     * last_synced_at}, is the reliable signal for that inside a single {@code @DataJpaTest}
+     * transaction).
      */
     @Test
     void upsertBatchUpdatesRowWhenTitleChanges() {
@@ -379,40 +383,41 @@ class CpeDictionaryRepositoryImplTest {
         cpeDictionaryRepository.upsertBatch(List.of(
                 entry(cpeString, "Original Title", "zzzrevise135upsertvendor", "zzzrevise135upsertproduct")));
 
-        OffsetDateTime firstSyncedAt = lastSyncedAt(cpeString);
+        String firstRowVersion = rowVersion(cpeString);
 
         cpeDictionaryRepository.upsertBatch(List.of(
                 entry(cpeString, "Changed Title", "zzzrevise135upsertvendor", "zzzrevise135upsertproduct")));
 
         String title = jdbcTemplate.queryForObject(
                 "SELECT title FROM cpe_dictionary WHERE cpe_string = ?", String.class, cpeString);
-        OffsetDateTime secondSyncedAt = lastSyncedAt(cpeString);
+        String secondRowVersion = rowVersion(cpeString);
 
         assertThat(title).isEqualTo("Changed Title");
-        assertThat(secondSyncedAt).isAfterOrEqualTo(firstSyncedAt);
+        assertThat(secondRowVersion).isNotEqualTo(firstRowVersion);
     }
 
     /**
      * Regression test for PR #75 REVISE item 1: when title/vendor/product are all unchanged, the
      * {@code WHERE ... IS DISTINCT FROM ...} predicate added to {@code ON CONFLICT DO UPDATE} must
-     * make the conflicting row's {@code UPDATE} branch a no-op, so {@code last_synced_at} does not
-     * advance -- verifying the row was genuinely skipped (not rewritten with an identical value) is
-     * the whole point of the fix, since a rewrite with identical values would still cost the same
-     * heap version + GIN index churn this fix exists to avoid.
+     * make the conflicting row's {@code UPDATE} branch a genuine no-op -- no new heap tuple version
+     * written at all -- not merely a rewrite with an identical value, since that rewrite would still
+     * cost the same heap version + GIN index churn this fix exists to avoid. {@code ctid} (see
+     * {@link #rowVersion}) is what actually distinguishes those two outcomes; {@code last_synced_at}
+     * cannot, because Postgres's {@code now()} is fixed for this test method's whole transaction.
      */
     @Test
-    void upsertBatchDoesNotUpdateLastSyncedAtWhenContentIsUnchanged() {
+    void upsertBatchDoesNotRewriteRowWhenContentIsUnchanged() {
         String cpeString = "cpe:2.3:a:zzzrevise135noopvendor:zzzrevise135noopproduct:1.0:*:*:*:*:*:*:*";
         cpeDictionaryRepository.upsertBatch(List.of(
                 entry(cpeString, "Stable Title", "zzzrevise135noopvendor", "zzzrevise135noopproduct")));
 
-        OffsetDateTime firstSyncedAt = lastSyncedAt(cpeString);
+        String firstRowVersion = rowVersion(cpeString);
 
         cpeDictionaryRepository.upsertBatch(List.of(
                 entry(cpeString, "Stable Title", "zzzrevise135noopvendor", "zzzrevise135noopproduct")));
 
-        OffsetDateTime secondSyncedAt = lastSyncedAt(cpeString);
+        String secondRowVersion = rowVersion(cpeString);
 
-        assertThat(secondSyncedAt).isEqualTo(firstSyncedAt);
+        assertThat(secondRowVersion).isEqualTo(firstRowVersion);
     }
 }
