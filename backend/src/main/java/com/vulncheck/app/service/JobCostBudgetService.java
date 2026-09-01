@@ -181,37 +181,6 @@ public class JobCostBudgetService {
     public static final BigDecimal STAGE4_WEB_SEARCH_RESEARCH_COST_USD = new BigDecimal("0.035");
 
     /**
-     * High-confidence AI verification backstop ({@code HighConfidenceVerificationService}, 2026-08-29
-     * — the fix for the "a registry match's confidence is lent to an independently-derived CPE"
-     * known-limitations gap). No real usage data exists yet for this brand-new endpoint, so this is
-     * not re-derived from {@code job_cost_ledger} the way the two constants above were — instead it's
-     * set conservatively at Stage4's own retuned estimate ($0.035), on the basis that the two calls
-     * are the same shape (single Haiku call, {@code web_search_20250305} with {@code max_uses=1},
-     * structured JSON output, similarly short prompt) and Stage4's own measured mean/p95
-     * ($0.0233/$0.035, see that constant's comment) is therefore the best available reference point.
-     * Re-derive this from real {@code job_cost_ledger} data (filter {@code call_site = 'VERIFICATION'})
-     * once enough rows accumulate, per this class's standing re-derivation guidance above.
-     */
-    public static final BigDecimal HIGH_CONFIDENCE_VERIFICATION_COST_USD = new BigDecimal("0.035");
-
-    /**
-     * Per-item cap for the high-confidence verification ledger below ({@link
-     * #verificationCapByJobId} et al.) — REVISE item 1 (senior review 2026-08-29, round 1): job 191 real data
-     * found 108/300 items (36%) eligible for verification, whose demand ($3.78 at {@link
-     * #HIGH_CONFIDENCE_VERIFICATION_COST_USD} x 108) was 2.5x a 300-item job's own always-on {@link
-     * #costCapPerItemUsd} budget ($1.50) — sharing that budget meant enabling this feature could burn
-     * through the whole job's AI allowance from the first CSV rows alone, silently starving every
-     * later item's Tier2/Tier3 calls. Defaults to {@code 0} (verification effectively never affordable
-     * until an operator explicitly sets this alongside {@code
-     * app.high-confidence-verification.enabled=true}) rather than mirroring {@link #costCapPerItemUsd}'s
-     * $0.005 default, since this is a brand-new, still-being-measured feature — see this class's
-     * standing re-derivation guidance above once real {@code call_site = 'VERIFICATION'} rows
-     * accumulate.
-     */
-    @Value("${app.high-confidence-verification.cost-cap-per-item-usd:0}")
-    private BigDecimal verificationCostCapPerItemUsd;
-
-    /**
      * Per-item Tier2-only budget floor (docs/spec/task-backlog.md item 90, senior review 2026-08-30,
      * the P0 fix for item 89's finding that {@link #tryReserve(Long, BigDecimal)}'s pure
      * first-come-first-served admission policy can starve CSV rows near the end of a job of even a
@@ -281,14 +250,6 @@ public class JobCostBudgetService {
     private final Map<Long, BigDecimal> bundledCapByJobId = new ConcurrentHashMap<>();
     private final Map<Long, BigDecimal> bundledSpentByJobId = new ConcurrentHashMap<>();
     private final Set<Long> bundledEndedJobIds = ConcurrentHashMap.newKeySet();
-
-    // Third, independent ledger for the high-confidence verification backstop's own budget (see
-    // #verificationCostCapPerItemUsd's javadoc above) — same reasoning as the bundled-component
-    // ledger's own comment: a separate set of maps so this feature's spend can never be commingled
-    // with, or silently borrow from, the always-on per-item budget every job already relies on.
-    private final Map<Long, BigDecimal> verificationCapByJobId = new ConcurrentHashMap<>();
-    private final Map<Long, BigDecimal> verificationSpentByJobId = new ConcurrentHashMap<>();
-    private final Set<Long> verificationEndedJobIds = ConcurrentHashMap.newKeySet();
 
     public void startJobBudget(Long jobId, int itemCount) {
         // A job id can legitimately be started again after having previously ended (e.g.
@@ -680,84 +641,4 @@ public class JobCostBudgetService {
                 webSearchRequests);
     }
 
-    // --- High-confidence verification's own budget ledger (REVISE item 1, senior review 2026-08-29,
-    // round 1, see #verificationCostCapPerItemUsd's javadoc above) -----------------------------------------
-
-    /** Mirrors {@link #startBundledComponentBudget}, against the separate {@link
-     *  #verificationCapByJobId} ledger. Unlike the bundled-component budget (opt-in per job via
-     *  {@code ResearchJob#bundledComponentCheckEnabled}), the verification feature is a single
-     *  app-wide toggle ({@code app.high-confidence-verification.enabled}), not a per-job field —
-     *  callers therefore start this budget unconditionally for every job, same as {@link
-     *  #startJobBudget}; the {@code cost-cap-per-item-usd} default of {@code 0} (see {@link
-     *  #verificationCostCapPerItemUsd}) is what actually keeps this a no-op for every job when the
-     *  operator hasn't explicitly configured a real cap. */
-    public void startVerificationBudget(Long jobId, int itemCount) {
-        verificationEndedJobIds.remove(jobId);
-        verificationCapByJobId.put(jobId, verificationCostCapPerItemUsd.multiply(BigDecimal.valueOf(itemCount)));
-        verificationSpentByJobId.put(jobId, BigDecimal.ZERO);
-    }
-
-    /** Mirrors {@link #endBundledComponentBudget}, against the separate verification ledger. */
-    public void endVerificationBudget(Long jobId) {
-        verificationCapByJobId.remove(jobId);
-        verificationSpentByJobId.remove(jobId);
-        verificationEndedJobIds.add(jobId);
-    }
-
-    /** Same admission-check shape as {@link #tryReserveBundledComponent} — fails <b>closed</b> for a
-     *  job id with no cap entry at all, same reasoning as that method (this ledger's budget must
-     *  never be silently unlimited just because a caller forgot to start it). */
-    public synchronized boolean tryReserveVerification(Long jobId, BigDecimal estimatedCostUsd) {
-        if (verificationEndedJobIds.contains(jobId)) {
-            return false;
-        }
-        BigDecimal cap = verificationCapByJobId.get(jobId);
-        if (cap == null) {
-            return false;
-        }
-        BigDecimal spent = verificationSpentByJobId.getOrDefault(jobId, BigDecimal.ZERO);
-        if (spent.add(estimatedCostUsd).compareTo(cap) > 0) {
-            return false;
-        }
-        verificationSpentByJobId.put(jobId, spent.add(estimatedCostUsd));
-        return true;
-    }
-
-    /** Mirrors {@link #reconcileBundledComponent}, against the separate verification ledger —
-     *  including persisting its {@link JobCostLedgerEntry} row unconditionally, tagged {@link
-     *  JobCostLedgerEntry#LEDGER_VERIFICATION} so it stays distinguishable from the always-on and
-     *  bundled-component ledgers' rows. */
-    public synchronized void reconcileVerification(
-            Long jobId, Long jobItemId, BigDecimal reservedEstimateUsd, BigDecimal actualCostUsd) {
-        reconcileVerification(jobId, jobItemId, null, reservedEstimateUsd, actualCostUsd, null, null, null);
-    }
-
-    /** Same as {@link #reconcileVerification(Long, Long, BigDecimal, BigDecimal)}, additionally
-     *  recording the raw usage breakdown (V27) — see {@link #reconcile(Long, Long, String,
-     *  BigDecimal, BigDecimal, Integer, Integer, Integer)}'s javadoc for why. */
-    public synchronized void reconcileVerification(
-            Long jobId,
-            Long jobItemId,
-            String callSite,
-            BigDecimal reservedEstimateUsd,
-            BigDecimal actualCostUsd,
-            Integer inputTokens,
-            Integer outputTokens,
-            Integer webSearchRequests) {
-        if (verificationCapByJobId.containsKey(jobId)) {
-            BigDecimal spent = verificationSpentByJobId.getOrDefault(jobId, BigDecimal.ZERO);
-            BigDecimal adjusted = spent.subtract(reservedEstimateUsd).add(actualCostUsd);
-            verificationSpentByJobId.put(jobId, adjusted.max(BigDecimal.ZERO));
-        }
-        persistLedgerEntry(
-                jobId,
-                jobItemId,
-                JobCostLedgerEntry.LEDGER_VERIFICATION,
-                callSite,
-                reservedEstimateUsd,
-                actualCostUsd,
-                inputTokens,
-                outputTokens,
-                webSearchRequests);
-    }
 }
