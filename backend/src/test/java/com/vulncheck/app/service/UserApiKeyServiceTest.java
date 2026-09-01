@@ -127,12 +127,17 @@ class UserApiKeyServiceTest {
     }
 
     @Test
-    void getAdminNvdApiKeyReturnsEmptyWhenOnlyAUnicodeCaseFoldVariantRowExists() {
-        // Regression test for task-backlog item 148 REVISE R3, senior-reviewer item 6(a): Postgres
-        // upper() folds long s U+017F "ſ" to "S", so the old findByEmailIgnoreCase-based lookup
-        // would have resolved this row as the admin. With the fix, since the stored row is not the
-        // Locale.ROOT-lowercased ADMIN_EMAIL exactly, no user is found — matching
-        // AppUserDetailsService's Unicode-safe ROLE_ADMIN rejection of the same row.
+    void getAdminNvdApiKeyReturnsEmptyWhenNoRowExistsForTheNormalizedAdminEmail() {
+        // Regression test for task-backlog item 148 REVISE R3, senior-reviewer item 6(a): the fix
+        // replaced the Postgres upper()-based findByEmailIgnoreCase lookup (which folds Unicode
+        // case variants such as long s U+017F "ſ" -> "S", so it would have wrongly resolved a
+        // ſ-containing stored row as the admin) with an exact findByEmail(adminEmail.toLowerCase(
+        // Locale.ROOT)) match. This test only exercises the exact-match query at the unit level —
+        // Mockito can't reproduce Postgres's own upper() folding since the repository is mocked
+        // here, so it can't show the vulnerable behavior directly. That folding behavior itself was
+        // confirmed against a live Postgres instance separately (senior-reviewer, item 6(a)). What
+        // this test does confirm: when no row exists for the exact normalized admin email, the
+        // lookup returns empty rather than falling back to any case-insensitive match.
         ReflectionTestUtils.setField(service, "adminEmail", "admin@syscorp.com");
         when(userRepository.findByEmail("admin@syscorp.com")).thenReturn(Optional.empty());
 
