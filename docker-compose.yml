@@ -61,6 +61,12 @@ services:
       # default; only raise for a throwaway diagnostic job made entirely of AI-eligible items (a
       # real job's items are mostly free static Tier1 matches, so the default holds there).
       APP_COST_CAP_PER_ITEM_USD: ${APP_COST_CAP_PER_ITEM_USD:-0.005}
+      # These two move together (item 167, 2026-09-01, docs/spec/closed-mode-plan.md §7 P4).
+      # Per-item parallelism within a single job — see AsyncConfig#itemProcessingExecutor's javadoc
+      # for why 8 was chosen; only raise it after measuring HikariCP connection-acquire p95 under
+      # load, and keep SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE comfortably above it.
+      ITEM_PROCESSING_POOL_SIZE: ${ITEM_PROCESSING_POOL_SIZE:-8}
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:-10}
       # Thymeleaf template cache (see application.yml). Enabled by default; set to false in .env
       # only for a deliberate template-focused debugging session (templates are baked into the
       # image and never edited live in the running container otherwise).
