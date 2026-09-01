@@ -36,7 +36,7 @@ class UserApiKeyServiceTest {
         ReflectionTestUtils.setField(service, "adminEmail", "");
 
         assertThat(service.getAdminNvdApiKey()).isEmpty();
-        verify(userRepository, never()).findByEmailIgnoreCase(org.mockito.ArgumentMatchers.anyString());
+        verify(userRepository, never()).findByEmail(org.mockito.ArgumentMatchers.anyString());
     }
 
     @Test
@@ -44,13 +44,13 @@ class UserApiKeyServiceTest {
         ReflectionTestUtils.setField(service, "adminEmail", "   ");
 
         assertThat(service.getAdminNvdApiKey()).isEmpty();
-        verify(userRepository, never()).findByEmailIgnoreCase(org.mockito.ArgumentMatchers.anyString());
+        verify(userRepository, never()).findByEmail(org.mockito.ArgumentMatchers.anyString());
     }
 
     @Test
     void getAdminNvdApiKeyReturnsEmptyWhenNoUserIsRegisteredForTheAdminEmail() {
         ReflectionTestUtils.setField(service, "adminEmail", "admin@example.com");
-        when(userRepository.findByEmailIgnoreCase("admin@example.com")).thenReturn(Optional.empty());
+        when(userRepository.findByEmail("admin@example.com")).thenReturn(Optional.empty());
 
         assertThat(service.getAdminNvdApiKey()).isEmpty();
     }
@@ -59,7 +59,7 @@ class UserApiKeyServiceTest {
     void getAdminNvdApiKeyReturnsEmptyWhenTheAdminUserHasNoNvdKeyRegistered() {
         ReflectionTestUtils.setField(service, "adminEmail", "admin@example.com");
         User admin = new User(42L, "admin@example.com", "hash", null);
-        when(userRepository.findByEmailIgnoreCase("admin@example.com")).thenReturn(Optional.of(admin));
+        when(userRepository.findByEmail("admin@example.com")).thenReturn(Optional.of(admin));
         when(userSecretRepository.findByUserIdAndProvider(42L, UserSecret.PROVIDER_NVD)).thenReturn(Optional.empty());
 
         assertThat(service.getAdminNvdApiKey()).isEmpty();
@@ -74,7 +74,7 @@ class UserApiKeyServiceTest {
         ReflectionTestUtils.setField(service, "adminEmail", "admin@example.com");
         User admin = new User(42L, "admin@example.com", "hash", null);
         UserSecret secret = new UserSecret(1L, 42L, UserSecret.PROVIDER_NVD, "encrypted-blob", null);
-        when(userRepository.findByEmailIgnoreCase("admin@example.com")).thenReturn(Optional.of(admin));
+        when(userRepository.findByEmail("admin@example.com")).thenReturn(Optional.of(admin));
         when(userSecretRepository.findByUserIdAndProvider(42L, UserSecret.PROVIDER_NVD))
                 .thenReturn(Optional.of(secret));
         when(secretEncryptionService.decrypt("encrypted-blob", 42L, UserSecret.PROVIDER_NVD))
@@ -88,7 +88,7 @@ class UserApiKeyServiceTest {
         // Regression test for task-backlog item 143: a transient DB failure while resolving the
         // admin user must degrade to Optional.empty() the same way, not propagate.
         ReflectionTestUtils.setField(service, "adminEmail", "admin@example.com");
-        when(userRepository.findByEmailIgnoreCase("admin@example.com"))
+        when(userRepository.findByEmail("admin@example.com"))
                 .thenThrow(new DataAccessResourceFailureException("DB unavailable"));
 
         assertThat(service.getAdminNvdApiKey()).isEmpty();
@@ -99,7 +99,7 @@ class UserApiKeyServiceTest {
         ReflectionTestUtils.setField(service, "adminEmail", "admin@example.com");
         User admin = new User(42L, "admin@example.com", "hash", null);
         UserSecret secret = new UserSecret(1L, 42L, UserSecret.PROVIDER_NVD, "encrypted-blob", null);
-        when(userRepository.findByEmailIgnoreCase("admin@example.com")).thenReturn(Optional.of(admin));
+        when(userRepository.findByEmail("admin@example.com")).thenReturn(Optional.of(admin));
         when(userSecretRepository.findByUserIdAndProvider(42L, UserSecret.PROVIDER_NVD))
                 .thenReturn(Optional.of(secret));
         when(secretEncryptionService.decrypt("encrypted-blob", 42L, UserSecret.PROVIDER_NVD))
@@ -109,15 +109,44 @@ class UserApiKeyServiceTest {
     }
 
     @Test
-    void getAdminNvdApiKeyResolvesTheAdminUserWhenStoredEmailDiffersOnlyInCase() {
-        // Regression test for task-backlog item 142 REVISE R1: AppUserDetailsService grants
-        // ROLE_ADMIN via adminEmail.equalsIgnoreCase(user.getEmail()), so this method must resolve
-        // the same user even when ADMIN_EMAIL's case doesn't exactly match the stored row (e.g.
-        // AuthController#register stored it as typed, not lowercased).
+    void getAdminNvdApiKeyResolvesTheAdminUserWhenAdminEmailDiffersOnlyInAsciiCaseFromStoredEmail() {
+        // Regression test for task-backlog item 148 REVISE R3: this method now looks the admin
+        // user up via findByEmail(adminEmail.toLowerCase(Locale.ROOT)) instead of the Postgres
+        // upper()-based findByEmailIgnoreCase, so ADMIN_EMAIL config values that differ from the
+        // (already-lowercased) stored row only in ASCII case must still resolve.
         ReflectionTestUtils.setField(service, "adminEmail", "Admin@Example.com");
         User admin = new User(42L, "admin@example.com", "hash", null);
         UserSecret secret = new UserSecret(1L, 42L, UserSecret.PROVIDER_NVD, "encrypted-blob", null);
-        when(userRepository.findByEmailIgnoreCase("Admin@Example.com")).thenReturn(Optional.of(admin));
+        when(userRepository.findByEmail("admin@example.com")).thenReturn(Optional.of(admin));
+        when(userSecretRepository.findByUserIdAndProvider(42L, UserSecret.PROVIDER_NVD))
+                .thenReturn(Optional.of(secret));
+        when(secretEncryptionService.decrypt("encrypted-blob", 42L, UserSecret.PROVIDER_NVD))
+                .thenReturn("decrypted-nvd-key");
+
+        assertThat(service.getAdminNvdApiKey()).contains("decrypted-nvd-key");
+    }
+
+    @Test
+    void getAdminNvdApiKeyReturnsEmptyWhenOnlyAUnicodeCaseFoldVariantRowExists() {
+        // Regression test for task-backlog item 148 REVISE R3, senior-reviewer item 6(a): Postgres
+        // upper() folds long s U+017F "ſ" to "S", so the old findByEmailIgnoreCase-based lookup
+        // would have resolved this row as the admin. With the fix, since the stored row is not the
+        // Locale.ROOT-lowercased ADMIN_EMAIL exactly, no user is found — matching
+        // AppUserDetailsService's Unicode-safe ROLE_ADMIN rejection of the same row.
+        ReflectionTestUtils.setField(service, "adminEmail", "admin@syscorp.com");
+        when(userRepository.findByEmail("admin@syscorp.com")).thenReturn(Optional.empty());
+
+        assertThat(service.getAdminNvdApiKey()).isEmpty();
+    }
+
+    @Test
+    void getAdminNvdApiKeyResolvesTheAdminUserWhenAdminEmailDiffersOnlyInCaseSyscorpDomain() {
+        // Senior-reviewer item 6(b): companion to the two tests above, confirming the ASCII-case
+        // fold still resolves correctly on the same domain used in the Unicode-rejection test.
+        ReflectionTestUtils.setField(service, "adminEmail", "Admin@Syscorp.com");
+        User admin = new User(42L, "admin@syscorp.com", "hash", null);
+        UserSecret secret = new UserSecret(1L, 42L, UserSecret.PROVIDER_NVD, "encrypted-blob", null);
+        when(userRepository.findByEmail("admin@syscorp.com")).thenReturn(Optional.of(admin));
         when(userSecretRepository.findByUserIdAndProvider(42L, UserSecret.PROVIDER_NVD))
                 .thenReturn(Optional.of(secret));
         when(secretEncryptionService.decrypt("encrypted-blob", 42L, UserSecret.PROVIDER_NVD))
