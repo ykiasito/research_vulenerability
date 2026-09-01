@@ -78,16 +78,6 @@ class RestClientConfigTest {
                 .isEqualTo((int) Duration.ofMinutes(5).toMillis());
     }
 
-    @Test
-    void llmServiceRestClientUsesSimpleClientHttpRequestFactoryWithFiveSecondConnectAndSixtySecondRead() {
-        RestClient restClient = new RestClientConfig().llmServiceRestClient("http://llm-service:8000");
-
-        ClientHttpRequestFactory requestFactory = requestFactoryOf(restClient);
-        assertThat(requestFactory).isExactlyInstanceOf(SimpleClientHttpRequestFactory.class);
-        assertThat((int) ReflectionTestUtils.getField(requestFactory, "connectTimeout")).isEqualTo(5_000);
-        assertThat((int) ReflectionTestUtils.getField(requestFactory, "readTimeout")).isEqualTo(60_000);
-    }
-
     /**
      * {@link RestClientConfig#noRedirectRequestFactory} backs {@code csafSyncRestClient} /
      * {@code ghsaSyncRestClient} / {@code osvSyncRestClient} — all three follow vendor-supplied

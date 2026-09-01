@@ -2,7 +2,6 @@ package com.vulncheck.app.config;
 
 import java.net.HttpURLConnection;
 import java.time.Duration;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
@@ -176,21 +175,6 @@ public class RestClientConfig {
         return RestClient.builder()
                 .requestFactory(requestFactory)
                 .defaultHeader("User-Agent", "vulncheck-server/0.1 (cve.org sync)")
-                .build();
-    }
-
-    /**
-     * Points at the Python LLM microservice (Stage1 Tier2/Tier3, Stage4). Longer read timeout
-     * than the external-API client — a web_search-enabled Claude call can take well over 10s.
-     */
-    @Bean
-    public RestClient llmServiceRestClient(@Value("${app.llm-service-url}") String llmServiceUrl) {
-        SimpleClientHttpRequestFactory requestFactory =
-                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(60));
-
-        return RestClient.builder()
-                .baseUrl(llmServiceUrl)
-                .requestFactory(requestFactory)
                 .build();
     }
 }
