@@ -27,7 +27,9 @@ import org.springframework.test.util.ReflectionTestUtils;
 class CpeDictionaryScheduledResyncTest {
 
     private final NvdCpeSyncService nvdCpeSyncService = mock(NvdCpeSyncService.class);
-    private final CpeDictionaryScheduledResync resync = new CpeDictionaryScheduledResync(nvdCpeSyncService);
+    private final UserApiKeyService userApiKeyService = mock(UserApiKeyService.class);
+    private final CpeDictionaryScheduledResync resync =
+            new CpeDictionaryScheduledResync(nvdCpeSyncService, userApiKeyService);
 
     @Test
     void disabledByDefaultSkipsEntirelyWithoutTouchingTheGuard() {
@@ -53,6 +55,7 @@ class CpeDictionaryScheduledResyncTest {
     void enabledAndGuardWonRunsTheSyncOnAWorkerThread() throws InterruptedException {
         ReflectionTestUtils.setField(resync, "enabled", true);
         when(nvdCpeSyncService.tryBeginFullSync()).thenReturn(true);
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
         CountDownLatch syncInvoked = new CountDownLatch(1);
         when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenAnswer(invocation -> {
             syncInvoked.countDown();
@@ -86,6 +89,7 @@ class CpeDictionaryScheduledResyncTest {
 
     @Test
     void runFullSyncLogsCompletedOutcomeWithoutThrowing() {
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
         when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenReturn(new SyncOutcome(1815263, true));
 
         resync.runFullSync();
@@ -95,6 +99,7 @@ class CpeDictionaryScheduledResyncTest {
 
     @Test
     void runFullSyncLogsAbortedEarlyOutcomeWithoutThrowing() {
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
         when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenReturn(new SyncOutcome(500000, false));
 
         resync.runFullSync();
@@ -104,10 +109,25 @@ class CpeDictionaryScheduledResyncTest {
 
     @Test
     void runFullSyncSwallowsAnExceptionFromSyncAllAndReleaseRatherThanPropagatingIt() {
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
         when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenThrow(new RuntimeException("NVD unreachable"));
 
         resync.runFullSync();
 
         verify(nvdCpeSyncService, times(1)).syncAllAndRelease(Optional.empty());
+    }
+
+    @Test
+    void runFullSyncPassesTheAdminNvdKeyThroughWhenOneIsConfigured() {
+        // Regression test for task-backlog item 142: the scheduled resync must use whatever
+        // UserApiKeyService#getAdminNvdApiKey() resolves — an unkeyed weekly run is ~10x slower
+        // due to NVD's unkeyed 5 req/30s rate limit.
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.of("admin-nvd-key"));
+        when(nvdCpeSyncService.syncAllAndRelease(Optional.of("admin-nvd-key")))
+                .thenReturn(new SyncOutcome(1815263, true));
+
+        resync.runFullSync();
+
+        verify(nvdCpeSyncService, times(1)).syncAllAndRelease(Optional.of("admin-nvd-key"));
     }
 }
