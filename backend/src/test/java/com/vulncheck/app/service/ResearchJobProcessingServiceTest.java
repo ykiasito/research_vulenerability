@@ -390,6 +390,74 @@ class ResearchJobProcessingServiceTest {
         assertThat(item.isResearchIncomplete()).isTrue();
     }
 
+    // --- Task backlog item 128 (2026-09-01): the hint-based Stage4 call site (UNIDENTIFIED item,
+    // Tier3-recognized platform hint) discarded Stage4ResearchResult entirely, the same class of bug
+    // item 121 fixed for the IDENTIFIED call site above ------------------------------------------
+
+    @Test
+    void hintBasedItemIsMarkedAiCallFailedWhenStage4ReportsTheClientCallFailed() {
+        ResearchJob job = job(17L, 10L);
+        ResearchJobItem item = item(21L, 17L);
+        item.setHintPlatform("vscode-marketplace");
+        item.setHintIdentifier("some.extension-id");
+
+        when(researchJobRepository.findById(17L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdAndStatusOrderById(17L, ResearchJobItem.STATUS_PENDING))
+                .thenReturn(List.of(item));
+        when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.empty());
+        when(stage4WebSearchResearchService.research(item, "vscode-marketplace", "some.extension-id", 10L))
+                .thenReturn(new Stage4WebSearchResearchService.Stage4ResearchResult(
+                        0, ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED));
+
+        newService().processJobAsync(17L);
+
+        assertThat(item.getStatus()).isEqualTo(ResearchJobItem.STATUS_UNIDENTIFIED);
+        assertThat(item.getResearchIncompleteReason()).isEqualTo(ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
+        assertThat(item.isResearchIncomplete()).isTrue();
+    }
+
+    @Test
+    void hintBasedItemIsMarkedAiCallFailedWhenStage4ThrowsAnException() {
+        ResearchJob job = job(18L, 10L);
+        ResearchJobItem item = item(22L, 18L);
+        item.setHintPlatform("vscode-marketplace");
+        item.setHintIdentifier("some.extension-id");
+
+        when(researchJobRepository.findById(18L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdAndStatusOrderById(18L, ResearchJobItem.STATUS_PENDING))
+                .thenReturn(List.of(item));
+        when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.empty());
+        when(stage4WebSearchResearchService.research(item, "vscode-marketplace", "some.extension-id", 10L))
+                .thenThrow(new RuntimeException("LLM service unavailable"));
+
+        newService().processJobAsync(18L);
+
+        assertThat(item.getResearchIncompleteReason()).isEqualTo(ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
+        assertThat(item.isResearchIncomplete()).isTrue();
+    }
+
+    @Test
+    void hintBasedItemHasNoIncompleteReasonWhenStage4RunsToCompletion() {
+        // Regression guard: a hint-based Stage4 pass that actually completes (whether or not it
+        // found anything) must not be flagged incomplete — only a skipped/failed pass should be.
+        ResearchJob job = job(19L, 10L);
+        ResearchJobItem item = item(23L, 19L);
+        item.setHintPlatform("vscode-marketplace");
+        item.setHintIdentifier("some.extension-id");
+
+        when(researchJobRepository.findById(19L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdAndStatusOrderById(19L, ResearchJobItem.STATUS_PENDING))
+                .thenReturn(List.of(item));
+        when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.empty());
+        when(stage4WebSearchResearchService.research(item, "vscode-marketplace", "some.extension-id", 10L))
+                .thenReturn(new Stage4WebSearchResearchService.Stage4ResearchResult(0, null));
+
+        newService().processJobAsync(19L);
+
+        assertThat(item.getResearchIncompleteReason()).isNull();
+        assertThat(item.isResearchIncomplete()).isFalse();
+    }
+
     @Test
     void bundledComponentResearchDoesNotFireWhenJobHasNotOptedIn() {
         ResearchJob job = job(30L, 10L);
