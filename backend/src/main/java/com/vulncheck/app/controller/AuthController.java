@@ -6,6 +6,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+import java.util.Locale;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -47,13 +48,20 @@ public class AuthController {
             return "register";
         }
 
-        if (userRepository.existsByEmail(form.getEmail())) {
+        // Normalize to lowercase before any lookup/save so that a case-variant of an existing
+        // email (most importantly ADMIN_EMAIL, see AppUserDetailsService's exact-match comparison
+        // against a Locale.ROOT-lowercased email) can never sneak past the duplicate check and be
+        // granted ROLE_ADMIN (task-backlog item 148). Locale.ROOT avoids locale-dependent casing
+        // surprises (e.g. Turkish "I").
+        String normalizedEmail = form.getEmail().toLowerCase(Locale.ROOT);
+
+        if (userRepository.existsByEmailIgnoreCase(normalizedEmail)) {
             model.addAttribute("error", "このメールアドレスは既に登録されています。");
             return "register";
         }
 
         User user = new User();
-        user.setEmail(form.getEmail());
+        user.setEmail(normalizedEmail);
         user.setPasswordHash(passwordEncoder.encode(form.getPassword()));
         userRepository.save(user);
 

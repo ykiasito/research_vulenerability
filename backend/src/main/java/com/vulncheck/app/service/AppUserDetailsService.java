@@ -9,6 +9,8 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
 
+import java.util.Locale;
+
 @Service
 @RequiredArgsConstructor
 public class AppUserDetailsService implements UserDetailsService {
@@ -23,14 +25,16 @@ public class AppUserDetailsService implements UserDetailsService {
 
     @Override
     public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
-        User user = userRepository.findByEmail(email)
+        String normalizedEmail = email.toLowerCase(Locale.ROOT);
+        User user = userRepository.findByEmail(normalizedEmail)
                 .orElseThrow(() -> new UsernameNotFoundException("No user found for email: " + email));
 
         var builder = org.springframework.security.core.userdetails.User
                 .withUsername(user.getEmail())
                 .password(user.getPasswordHash());
 
-        boolean isAdmin = !adminEmail.isBlank() && adminEmail.equalsIgnoreCase(user.getEmail());
+        boolean isAdmin = !adminEmail.isBlank()
+                && adminEmail.toLowerCase(Locale.ROOT).equals(user.getEmail().toLowerCase(Locale.ROOT));
         builder.authorities(isAdmin ? new String[] {"ROLE_USER", "ROLE_ADMIN"} : new String[] {"ROLE_USER"});
 
         return builder.build();
