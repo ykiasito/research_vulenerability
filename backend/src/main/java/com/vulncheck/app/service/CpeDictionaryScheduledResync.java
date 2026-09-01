@@ -1,7 +1,6 @@
 package com.vulncheck.app.service;
 
 import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
-import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -43,6 +42,7 @@ import org.springframework.stereotype.Component;
 public class CpeDictionaryScheduledResync {
 
     private final NvdCpeSyncService nvdCpeSyncService;
+    private final UserApiKeyService userApiKeyService;
 
     @Value("${app.cpe-scheduled-resync-enabled:false}")
     private boolean enabled;
@@ -114,7 +114,10 @@ public class CpeDictionaryScheduledResync {
         log.warn("Scheduled weekly NVD CPE dictionary resync starting — this takes hours");
         long startedAt = System.currentTimeMillis();
         try {
-            SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
+            // Item 142: use the admin's own registered NVD key (if any) so the weekly resync
+            // isn't stuck at the unkeyed 5 req/30s rate limit (~10x slower). Falls back to
+            // Optional.empty() — same unkeyed behavior as before — if no admin key is configured.
+            SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(userApiKeyService.getAdminNvdApiKey());
             long minutes = (System.currentTimeMillis() - startedAt) / 60000;
             if (outcome.completed()) {
                 log.warn("Scheduled weekly NVD CPE dictionary resync finished: {} entries upserted in {} minutes",
