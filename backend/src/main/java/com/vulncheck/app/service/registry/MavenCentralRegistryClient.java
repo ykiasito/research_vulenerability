@@ -1,6 +1,7 @@
 package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;

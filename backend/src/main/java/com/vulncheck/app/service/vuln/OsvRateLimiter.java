@@ -8,7 +8,7 @@ import org.springframework.stereotype.Component;
  * Paces every call {@link OsvLiveQueryClient} makes to {@code api.osv.dev}'s single-query endpoint,
  * process-wide. Same fixed-gap, no-burst approach as {@code
  * com.vulncheck.app.service.nvd.NvdRateLimiter}/{@link GhsaRateLimiter}, not {@code
- * com.vulncheck.app.service.registry.ExternalRegistryRateLimiter}'s per-key map, since there's only
+ * com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter}'s per-key map, since there's only
  * ever one caller/endpoint here.
  *
  * <p><b>Confirmed switched for the OSV mirror rollout ({@code docs/spec/osv-mirror-plan.md} §7-2,
