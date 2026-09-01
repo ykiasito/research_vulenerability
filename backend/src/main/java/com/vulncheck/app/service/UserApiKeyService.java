@@ -1,9 +1,11 @@
 package com.vulncheck.app.service;
 
 import com.vulncheck.app.entity.UserSecret;
+import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.repository.UserSecretRepository;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 /**
@@ -18,6 +20,12 @@ public class UserApiKeyService {
 
     private final UserSecretRepository userSecretRepository;
     private final SecretEncryptionService secretEncryptionService;
+    private final UserRepository userRepository;
+
+    /** Same {@code ADMIN_EMAIL} env var {@link AppUserDetailsService} uses to grant ROLE_ADMIN —
+     *  see application.yml. Unset/blank means "no admin", not an error. */
+    @Value("${app.admin-email:}")
+    private String adminEmail;
 
     public Optional<String> getClaudeApiKey(Long userId) {
         return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_CLAUDE)
@@ -32,5 +40,25 @@ public class UserApiKeyService {
         return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_NVD)
                 .map(secret -> secretEncryptionService.decrypt(
                         secret.getEncryptedKey(), userId, UserSecret.PROVIDER_NVD));
+    }
+
+    /**
+     * Resolves the admin user's own registered NVD key for non-interactive callers that have no
+     * logged-in user context of their own (task-backlog item 142) — currently only {@link
+     * CpeDictionaryScheduledResync}, which otherwise runs the weekly full CPE resync unkeyed and
+     * so rate-limited to 5 req/30s (~10x slower than a keyed run).
+     *
+     * <p>Falls back to {@link Optional#empty()}, matching the existing "works fine without a key,
+     * just slower" design, for every way this can be unconfigured: {@code ADMIN_EMAIL} unset or
+     * blank, no user registered under that email, or that user simply hasn't registered an NVD
+     * key. None of these are errors — an operator who hasn't set both up yet just gets the
+     * unkeyed (slower) behavior that already existed before this method.
+     */
+    public Optional<String> getAdminNvdApiKey() {
+        if (adminEmail == null || adminEmail.isBlank()) {
+            return Optional.empty();
+        }
+        return userRepository.findByEmail(adminEmail)
+                .flatMap(user -> getNvdApiKey(user.getId()));
     }
 }
