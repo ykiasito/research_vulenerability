@@ -1,6 +1,7 @@
 package com.vulncheck.app.service;
 
 import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
+import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -113,11 +114,25 @@ public class CpeDictionaryScheduledResync {
     void runFullSync() {
         log.warn("Scheduled weekly NVD CPE dictionary resync starting — this takes hours");
         long startedAt = System.currentTimeMillis();
+        // Item 142/143: resolve the admin key *before* the tryBeginFullSync-guarded try block,
+        // in its own try/catch. getAdminNvdApiKey() is documented to fall back to
+        // Optional.empty() on every "not configured" case, but a DB hiccup
+        // (userRepository.findByEmail) or a decrypt failure (SecretEncryptionService, e.g. a
+        // key-rotation/AAD mismatch) can still throw. If that throw happened while evaluating
+        // syncAllAndRelease(...)'s argument, syncAllAndRelease() itself would never be entered —
+        // and its finally-block guard release is the *only* release path here, so the
+        // fullSyncRunning guard would leak until process restart (reintroducing task-backlog
+        // items 136/141). Resolving the key here, ahead of time, guarantees syncAllAndRelease()
+        // is always reached.
+        Optional<String> adminKey;
         try {
-            // Item 142: use the admin's own registered NVD key (if any) so the weekly resync
-            // isn't stuck at the unkeyed 5 req/30s rate limit (~10x slower). Falls back to
-            // Optional.empty() — same unkeyed behavior as before — if no admin key is configured.
-            SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(userApiKeyService.getAdminNvdApiKey());
+            adminKey = userApiKeyService.getAdminNvdApiKey();
+        } catch (Throwable t) {
+            log.warn("Could not resolve the admin's NVD key — running this resync unkeyed (slower)", t);
+            adminKey = Optional.empty();
+        }
+        try {
+            SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(adminKey);
             long minutes = (System.currentTimeMillis() - startedAt) / 60000;
             if (outcome.completed()) {
                 log.warn("Scheduled weekly NVD CPE dictionary resync finished: {} entries upserted in {} minutes",
