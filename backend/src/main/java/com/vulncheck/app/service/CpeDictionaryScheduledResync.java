@@ -48,14 +48,25 @@ public class CpeDictionaryScheduledResync {
     private boolean enabled;
 
     /**
-     * Sunday 01:00 UTC — ahead of every existing daily delta sync's window (CVE.org 03:30, Siemens
-     * CSAF 03:45, GHSA 04:00, Red&nbsp;Hat CSAF 04:15, job retention cleanup 04:00, OSV 05:30; see
-     * each {@code *ScheduledSync}/{@code JobRetentionScheduledCleanup}), leaving roughly 2.5 hours
-     * of buffer ahead of the 103-minute measured baseline duration before those jobs would
-     * otherwise start. Weekly, not daily, because a full sync is a multi-hour, ~692MB operation —
-     * see the mirror plan doc for why weekly was chosen over daily/monthly.
+     * Sunday 01:30 UTC by default (overridable via {@code CPE_SCHEDULED_RESYNC_CRON}) — ahead of
+     * every existing daily delta sync's window (CVE.org 03:30, Siemens CSAF 03:45, GHSA 04:00,
+     * Red&nbsp;Hat CSAF 04:15, job retention cleanup 04:00, OSV 05:30; see each {@code
+     * *ScheduledSync}/{@code JobRetentionScheduledCleanup}), leaving roughly 2 hours of buffer
+     * ahead of the 103-minute measured baseline duration before those jobs would otherwise start.
+     * Weekly, not daily, because a full sync is a multi-hour, ~692MB operation — see the mirror
+     * plan doc for why weekly was chosen over daily/monthly.
+     *
+     * <p>senior-reviewer REVISE (PR #75): shifted from 01:00 to 01:30 UTC (=10:30 JST) and made
+     * configurable. {@code docs/spec/ec2-deployment-guide.md} has not yet decided between
+     * always-on and scheduled (e.g. 10:00-15:00 JST) instance uptime; the old 01:00 UTC (=10:00
+     * JST) fixed cron coincided exactly with a 10:00 JST instance start under that second option,
+     * and Spring's cron scheduler never fires a trigger that already elapsed before the process
+     * was up to register it — so this job could have silently never run, every week, under that
+     * deployment shape. If a scheduled-uptime deployment is adopted, whoever configures the
+     * instance's start time must set {@code CPE_SCHEDULED_RESYNC_CRON} to a time strictly after
+     * that start time (not just close to it), or this failure mode recurs.
      */
-    @Scheduled(cron = "0 0 1 * * SUN", zone = "UTC")
+    @Scheduled(cron = "${app.cpe-scheduled-resync-cron:0 30 1 * * SUN}", zone = "UTC")
     public void resyncWeekly() {
         if (!enabled) {
             return;

@@ -36,9 +36,14 @@ services:
       # One-shot: mirrors the full NVD CPE Dictionary on boot (hours). Leave false; flip to true
       # once per environment, then set it back. See CpeDictionaryBootstrapSync.
       CPE_FULL_SYNC_ON_STARTUP: ${CPE_FULL_SYNC_ON_STARTUP:-false}
-      # Weekly automatic full re-sync of the same mirror (Sunday 01:00 UTC, ~103 min). Off by
-      # default; enabling it is an operational decision (see docs/spec/cpe-dictionary-mirror-plan.md).
+      # Weekly automatic full re-sync of the same mirror (Sunday 01:30 UTC by default, ~103 min).
+      # Off by default; enabling it is an operational decision (see
+      # docs/spec/cpe-dictionary-mirror-plan.md).
       CPE_SCHEDULED_RESYNC_ENABLED: ${CPE_SCHEDULED_RESYNC_ENABLED:-false}
+      # Overrides the cron above's default schedule. A scheduled-uptime deployment must set this to
+      # a time strictly after the instance's own start time, or the trigger silently never fires
+      # (see CpeDictionaryScheduledResync#resyncWeekly's javadoc).
+      CPE_SCHEDULED_RESYNC_CRON: ${CPE_SCHEDULED_RESYNC_CRON:-0 30 1 * * SUN}
       # Off by default (see HighConfidenceVerificationService) — only flip to true for a deliberate,
       # budget-monitored diagnostic run, then set back to false. Runs synchronously on the
       # item-processing thread like every other AI tier, so enabling it can plausibly add on the
