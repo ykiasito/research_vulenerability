@@ -10,13 +10,13 @@ import org.springframework.test.context.TestPropertySource;
 
 /**
  * Creates the first AI-included run of the golden-300 accuracy benchmark (approved 2026-08-29
- * against a $1.29 real Claude balance). golden-300.csv has only ever been run static-only before
- * (job 168, no Claude key configured) — this is the first measurement of AI-included accuracy on
- * this dataset. Full 300 items would risk exceeding the $1.29 balance at the $0.005/item cost cap
- * ($1.50), so this runs a stratified ~250-item subsample instead ({@code
+ * against the then-available Claude balance). golden-300.csv has only ever been run static-only
+ * before (job 168, no Claude key configured) — this is the first measurement of AI-included
+ * accuracy on this dataset. Full 300 items would have risked exceeding the available balance at
+ * the $0.005/item cost cap, so this runs a stratified ~250-item subsample instead ({@code
  * test-data/sample_golden_250.py}, seed 20260829, preserves the IDENTIFIED_REGISTRY /
- * IDENTIFIED_CPE / UNIDENTIFIED ratio from golden-300.csv): {@code golden-250-ai-test.csv}, budget
- * cap $1.25.
+ * IDENTIFIED_CPE / UNIDENTIFIED ratio from golden-300.csv): {@code golden-250-ai-test.csv}, run
+ * with a total budget cap set below the available balance.
  *
  * <p>Owned by user_id=5, which has both an {@code nvd} and a {@code claude} key configured in
  * {@code user_secrets} as of 2026-08-29 (see {@link RealAiValidationJobCreator} and {@link
