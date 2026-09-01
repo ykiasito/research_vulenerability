@@ -436,9 +436,27 @@ public class Stage1IdentificationService {
                 log.info("Dropping CPE {} for item {} — it only passed the target_sw gate via the "
                         + "now-distrusted registry match's ecosystem context, so it cannot stand on its own",
                         chosenCpe.getCpeString(), item.getId());
+                CpeDictionaryEntry discardedCpe = chosenCpe;
                 chosenCpe = null;
                 cpeCandidateCount = null;
                 cpeCandidateVariantDerived = null;
+                // Backlog item 176 (job 203 root-cause): discardedCpe only ever won the earlier
+                // ranking because of the now-distrusted registry match's own ecosystem context — but
+                // the OTHER candidates in the same cpeCandidates pool never depended on that context to
+                // get into the pool in the first place (they're already-ranked, containment-passing
+                // hits). Re-checking them against the same bare gate and taking the best surviving one
+                // (list order = the existing rank, same "first in list" selection {@link
+                // #degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived} already uses elsewhere)
+                // catches the case where a genuinely correct candidate (e.g. openssl:openssl) was
+                // sitting right there the whole time, instead of silently going UNIDENTIFIED.
+                chosenCpe = selectFallbackCpeCandidateAfterRegistryDistrust(discardedCpe, cpeCandidates);
+                if (chosenCpe != null) {
+                    log.info("Falling back to remaining CPE candidate {} for item {} after discarding {} — "
+                            + "it independently passes the bare target_sw gate",
+                            chosenCpe.getCpeString(), item.getId(), discardedCpe.getCpeString());
+                    cpeCandidateCount = cpeCandidates.size();
+                    cpeCandidateVariantDerived = cpeCandidatesAreVariantDerived;
+                }
             }
         }
 
@@ -615,6 +633,38 @@ public class Stage1IdentificationService {
         }
         log.info("No AI verdict available among {} relaxed-containment-derived CPE candidates for item {} — "
                 + "dropping rather than trusting an unverified guess", cpeCandidates.size(), item.getId());
+        return null;
+    }
+
+    /**
+     * Backlog item 176 (job 203 root-cause): after a registry-distrust event discards {@code
+     * discardedCpe} (the previously-chosen CPE, which only passed the target_sw gate via the
+     * now-distrusted registry match's own ecosystem context — see the {@code trustRegistryMatch}
+     * block in {@link #resolveCandidates}), re-checks the rest of the same {@code cpeCandidates}
+     * pool against the bare (no-ecosystem-context) gate and returns the best surviving one.
+     *
+     * <p>{@code cpeCandidates} is already in ranked order (see {@link #rankAndGate}), so — same
+     * "first candidate wins" selection {@link #degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived}
+     * already uses for its own best-effort degrade — this simply walks the list in order and takes
+     * the first (i.e. best-ranked) one that isn't {@code discardedCpe} and independently passes the
+     * bare gate. Deliberately does not touch the ranking itself (a real but separate, riskier
+     * concern — see backlog item 176's own scope note): the premature-context ranking that let
+     * {@code discardedCpe} outrank a correct candidate in the first place is left alone here.
+     *
+     * @return the best surviving candidate, or {@code null} if none of the others pass the bare gate
+     *      either — the caller then correctly falls through to the existing UNIDENTIFIED outcome.
+     */
+    private CpeDictionaryEntry selectFallbackCpeCandidateAfterRegistryDistrust(
+            CpeDictionaryEntry discardedCpe, List<CpeDictionaryEntry> cpeCandidates) {
+        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "");
+        for (CpeDictionaryEntry candidate : cpeCandidates) {
+            if (candidate == discardedCpe) {
+                continue;
+            }
+            if (passesTargetSwGate(candidate, bareContext)) {
+                return candidate;
+            }
+        }
         return null;
     }
 
