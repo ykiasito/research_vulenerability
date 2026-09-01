@@ -1,8 +1,10 @@
 package com.vulncheck.app.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -63,6 +65,23 @@ class CpeDictionaryScheduledResyncTest {
                 .as("syncAllAndRelease should be invoked on the spawned worker thread")
                 .isTrue();
         verify(nvdCpeSyncService, times(1)).tryBeginFullSync();
+    }
+
+    @Test
+    void resyncWeeklyReleasesTheGuardWhenTheWorkerThreadFailsToStart() {
+        // Regression test for task-backlog item 141: if starting the worker thread itself throws
+        // (e.g. native-thread exhaustion) after tryBeginFullSync() already won the slot,
+        // syncAllAndRelease()'s own finally-release never runs — resyncWeekly() must release the
+        // guard itself instead of leaving fullSyncRunning stuck true until a restart.
+        CpeDictionaryScheduledResync spyResync = spy(resync);
+        ReflectionTestUtils.setField(spyResync, "enabled", true);
+        when(nvdCpeSyncService.tryBeginFullSync()).thenReturn(true);
+        doThrow(new RuntimeException("unable to create native thread")).when(spyResync).startWorker();
+
+        spyResync.resyncWeekly();
+
+        verify(nvdCpeSyncService, times(1)).releaseFullSyncGuard();
+        verify(nvdCpeSyncService, never()).syncAllAndRelease(Optional.empty());
     }
 
     @Test

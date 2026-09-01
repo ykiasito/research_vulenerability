@@ -75,6 +75,25 @@ public class CpeDictionaryScheduledResync {
             log.warn("Scheduled weekly NVD CPE dictionary resync skipped: another full sync is already running");
             return;
         }
+        try {
+            startWorker();
+        } catch (Throwable t) {
+            // tryBeginFullSync() above already won the slot, but the worker thread itself never
+            // got to run, so syncAllAndRelease()'s own finally-release never fires either —
+            // without this, the slot would stay held until the process restarts (task-backlog
+            // items 81/136/141).
+            nvdCpeSyncService.releaseFullSyncGuard();
+            log.error("Scheduled weekly NVD CPE dictionary resync failed to start — sync slot released", t);
+        }
+    }
+
+    /**
+     * Spawns and starts the worker thread that runs {@link #runFullSync}. Package-private (rather
+     * than inlined in {@link #resyncWeekly}) so a unit test can force this step to fail (e.g. via
+     * a Mockito spy) without needing a real thread-creation failure (native-thread exhaustion, a
+     * SecurityManager denial) to exercise {@link #resyncWeekly}'s guard-release catch block.
+     */
+    void startWorker() {
         Thread worker = new Thread(this::runFullSync, "cpe-scheduled-resync");
         worker.setDaemon(true);
         worker.start();
