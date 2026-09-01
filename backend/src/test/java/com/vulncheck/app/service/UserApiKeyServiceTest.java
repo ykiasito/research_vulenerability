@@ -19,9 +19,8 @@ import org.springframework.test.util.ReflectionTestUtils;
  * Unit coverage for {@link UserApiKeyService#getAdminNvdApiKey()} (task-backlog item 142) — the
  * three ways it must fall back to {@link Optional#empty()} without throwing (matching the
  * existing "works fine unkeyed, just slower" design), plus the happy path where an admin NVD key
- * is actually resolved. {@link #getClaudeApiKey(Long)}/{@link #getNvdApiKey(Long)} themselves are
- * exercised indirectly through {@code getAdminNvdApiKey()}; they have no other test coverage to
- * duplicate here.
+ * is actually resolved. {@link #getNvdApiKey(Long)} itself is exercised indirectly through {@code
+ * getAdminNvdApiKey()}; it has no other test coverage to duplicate here.
  */
 class UserApiKeyServiceTest {
 
