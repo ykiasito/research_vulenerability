@@ -45,6 +45,8 @@ app:
   admin-email: ""
   job-retention-days: 30
   cpe-full-sync-on-startup: false
+  cpe-scheduled-resync-enabled: false
+  cpe-scheduled-resync-cron: "0 30 1 * * SUN"
 
 server:
   port: 8080
