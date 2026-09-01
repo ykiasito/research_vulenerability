@@ -5,8 +5,8 @@ import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
-import com.vulncheck.app.service.llm.LlmServiceModels.CandidateDto;
-import com.vulncheck.app.service.llm.LlmServiceModels.DisambiguateResponse;
+import com.vulncheck.app.service.Stage1AiArbitration.CandidateDto;
+import com.vulncheck.app.service.Stage1AiArbitration.DisambiguateResponse;
 import com.vulncheck.app.service.nvd.CpeNameVariantCache;
 import com.vulncheck.app.service.nvd.CpeUtils;
 import com.vulncheck.app.service.nvd.NameVariantGenerator;
@@ -174,14 +174,19 @@ public class Stage1IdentificationService {
     private final CpeNameVariantCache cpeNameVariantCache;
     private final IdentifiedProductRepository identifiedProductRepository;
     // Only ever consulted here for getNvdApiKey (the live NVD CPE keyword-search fallback in
-    // liveNvdCpeLookupWithFallback) — getClaudeApiKey is entirely Stage1RegistryIdentification/
-    // Stage1AiArbitration's concern now, never called from this class.
+    // liveNvdCpeLookupWithFallback) — closed-mode B2 removed the Claude key lookup entirely (see
+    // UserApiKeyService's own javadoc), so this field is now NVD-only.
     private final UserApiKeyService userApiKeyService;
     private final NvdCpeSyncService nvdCpeSyncService;
+    // Closed-mode B2 (docs/spec/closed-mode-plan.md §9-2): no longer does anything but hand the
+    // match back unchanged — see its own javadoc. Left wired in rather than removed outright, since
+    // closed-mode backlog item 166 already flagged this class's own registry/AI seams for full
+    // deletion in a later phase.
     private final HighConfidenceVerificationService highConfidenceVerificationService;
-    // The two seams closed-mode backlog item 166 extracted — see this class's own javadoc. Both
-    // are the entire "future closed-mode diff" for this file: deleting these two fields plus the
-    // handful of call sites below is the whole cost of dropping the registry/AI paths.
+    // The two seams closed-mode backlog item 166 extracted — see this class's own javadoc. Closed-mode
+    // B2 (docs/spec/closed-mode-plan.md §9-2) already gutted both of their AI call sites down to a
+    // fixed fallback; deleting these two fields plus the handful of call sites below is left for the
+    // later phase that removes this class's registry/AI paths outright.
     private final Stage1RegistryIdentification registryIdentification;
     private final Stage1AiArbitration aiArbitration;
     @Qualifier("registryLookupExecutor")
