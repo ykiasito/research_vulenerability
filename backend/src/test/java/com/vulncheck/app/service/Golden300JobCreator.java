@@ -43,8 +43,13 @@ import org.springframework.test.context.TestPropertySource;
 @Disabled("Run once (2026-08-29, job 191) to create the golden-300 no-cost re-measurement job "
         + "against the real dev DB, verifying the Chocolatey/usage_text-tie-break/part=o accuracy "
         + "fixes. Re-run once more (2026-08-30, job 193) for the backlog item 15 P1/P2 chocolatey "
-        + "target_sw gate / version-coverage tie-break re-measurement. Left disabled so it can "
-        + "never re-fire (and re-persist) on a routine mvn test run -- see class javadoc.")
+        + "target_sw gate / version-coverage tie-break re-measurement. Re-run once more "
+        + "(2026-09-01, job 203) for closed-mode-backlog.md item 172, a static-only no-cost "
+        + "regression check of PR#91/item166 (Stage1RegistryIdentification/Stage1AiArbitration "
+        + "extracted out of Stage1IdentificationService, claimed zero behavior change) against "
+        + "job191's baseline -- user_id=5 has only the nvd secret at the time of this run (no "
+        + "claude secret), so this stays Tier1-only. Left disabled so it can never re-fire (and "
+        + "re-persist) on a routine mvn test run -- see class javadoc.")
 class Golden300JobCreator {
 
     private static final Long REAL_USER_ID = 5L;
