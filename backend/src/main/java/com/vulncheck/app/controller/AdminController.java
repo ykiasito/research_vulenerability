@@ -87,6 +87,31 @@ public class AdminController {
             return "admin/cpe-dictionary";
         }
 
+        try {
+            startFullSyncWorker();
+        } catch (Throwable t) {
+            // tryBeginFullSync() above already won the slot, but the worker thread itself never
+            // got to run, so syncAllAndRelease()'s own finally-release never fires either —
+            // without this, the slot would stay held until the process restarts (task-backlog
+            // items 81/136/141).
+            nvdCpeSyncService.releaseFullSyncGuard();
+            log.error("Full NVD CPE dictionary sync (admin-triggered) failed to start — sync slot released", t);
+            model.addAttribute("result", "フル同期の開始に失敗しました。バックエンドのログを確認してください。");
+            return "admin/cpe-dictionary";
+        }
+
+        model.addAttribute("result",
+                "フル同期を開始しました。完了まで数時間かかります。バックエンドのログで進捗を確認してください。");
+        return "admin/cpe-dictionary";
+    }
+
+    /**
+     * Spawns and starts the worker thread that runs the actual sync. Package-private (rather than
+     * inlined in {@link #cpeFullSync}) so a unit test can force this step to fail (e.g. via a
+     * Mockito spy) without needing a real thread-creation failure (native-thread exhaustion, a
+     * SecurityManager denial) to exercise {@link #cpeFullSync}'s guard-release catch block.
+     */
+    void startFullSyncWorker() {
         Thread worker = new Thread(() -> {
             log.warn("Full NVD CPE dictionary sync starting (admin-triggered) — this takes hours");
             long startedAt = System.currentTimeMillis();
@@ -106,10 +131,6 @@ public class AdminController {
         }, "cpe-full-sync-admin");
         worker.setDaemon(true);
         worker.start();
-
-        model.addAttribute("result",
-                "フル同期を開始しました。完了まで数時間かかります。バックエンドのログで進捗を確認してください。");
-        return "admin/cpe-dictionary";
     }
 
     @GetMapping("/admin/cve-org")

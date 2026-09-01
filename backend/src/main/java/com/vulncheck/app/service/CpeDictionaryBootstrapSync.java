@@ -50,6 +50,25 @@ public class CpeDictionaryBootstrapSync implements ApplicationRunner {
             log.warn("Full NVD CPE dictionary sync (startup-triggered) skipped: another full sync is already running");
             return;
         }
+        try {
+            startWorker();
+        } catch (Throwable t) {
+            // tryBeginFullSync() above already won the slot, but the worker thread itself never
+            // got to run, so syncAllAndRelease()'s own finally-release never fires either —
+            // without this, the slot would stay held until the process restarts (task-backlog
+            // items 81/136/141).
+            nvdCpeSyncService.releaseFullSyncGuard();
+            log.error("Full NVD CPE dictionary sync (startup-triggered) failed to start — sync slot released", t);
+        }
+    }
+
+    /**
+     * Spawns and starts the worker thread that runs the actual sync. Package-private (rather than
+     * inlined in {@link #run}) so a unit test can force this step to fail (e.g. via a Mockito spy)
+     * without needing a real thread-creation failure (native-thread exhaustion, a SecurityManager
+     * denial) to exercise {@link #run}'s guard-release catch block.
+     */
+    void startWorker() {
         Thread worker = new Thread(() -> {
             log.warn("Full NVD CPE dictionary sync starting — this takes hours; set "
                     + "CPE_FULL_SYNC_ON_STARTUP=false once it has completed so it doesn't re-run on every boot");
