@@ -9,6 +9,7 @@ import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,9 +32,13 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
     @Transactional(readOnly = true)
     public List<String> findVersions(String ecosystem, String normalizedPackageName) {
         List<String> result = new ArrayList<>();
+        // Explicit (RowCallbackHandler) cast: without it, javac reports this call as ambiguous
+        // between JdbcTemplate's RowCallbackHandler and ResultSetExtractor<T> overloads -- this
+        // lambda's shape (a single expression whose value happens to be discarded) is applicable to
+        // both.
         jdbcTemplate.query(
                 "SELECT versions FROM registry_package_mirror WHERE ecosystem = ? AND package_name = ?",
-                rs -> result.addAll(toStringList(rs.getArray("versions"))),
+                (RowCallbackHandler) rs -> result.addAll(toStringList(rs.getArray("versions"))),
                 ecosystem, normalizedPackageName);
         return result;
     }
