@@ -4,9 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -17,15 +16,7 @@ import com.vulncheck.app.entity.CpeDictionaryEntry;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
-import com.vulncheck.app.repository.EcosystemRegistryRepository;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
-import com.vulncheck.app.repository.ResearchJobItemRepository;
-import com.vulncheck.app.service.llm.LlmServiceClient;
-import com.vulncheck.app.service.llm.LlmServiceModels.DisambiguateResponse;
-import com.vulncheck.app.service.llm.LlmServiceModels.EcosystemCandidateDto;
-import com.vulncheck.app.service.llm.LlmServiceModels.PlatformHintDto;
-import com.vulncheck.app.service.llm.LlmServiceModels.UsageDto;
-import com.vulncheck.app.service.llm.LlmServiceModels.WebSearchIdentifyResponse;
 import com.vulncheck.app.service.nvd.CpeNameVariantCache;
 import com.vulncheck.app.service.registry.PackageRegistryLookup;
 import com.vulncheck.app.service.registry.RegistryLookupCache;
@@ -41,12 +32,20 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+/**
+ * Closed-mode B2 (docs/spec/closed-mode-plan.md §9-2): every AI-tier scenario this suite used to
+ * cover (Tier2 CPE/registry disambiguation, Tier3 web-search identification) was deleted along with
+ * {@code LlmServiceClient}/{@code LlmServiceModels} and the AI call sites in {@link
+ * Stage1AiArbitration}/{@link Stage1RegistryIdentification} themselves — those now always take the
+ * exact fallback this suite already exercised for "no Claude key configured", which is the only
+ * condition every real closed-mode job runs under now. Every remaining test here already asserted
+ * that fallback outcome, so removing the (now nonexistent) API-key/LLM-response stubs is the only
+ * change most of them needed.
+ */
 @ExtendWith(MockitoExtension.class)
 class Stage1IdentificationServiceTest {
 
     private static final Long USER_ID = 42L;
-
-    private static final UsageDto TEST_USAGE = new UsageDto(100, 50, 0);
 
     @Mock
     private CpeDictionaryRepository cpeDictionaryRepository;
@@ -58,30 +57,10 @@ class Stage1IdentificationServiceTest {
     private UserApiKeyService userApiKeyService;
 
     @Mock
-    private LlmServiceClient llmServiceClient;
-
-    @Mock
     private NvdCpeSyncService nvdCpeSyncService;
 
     @Mock
-    private EcosystemRegistryRepository ecosystemRegistryRepository;
-
-    @Mock
-    private ResearchJobItemRepository researchJobItemRepository;
-
-    @Mock
-    private JobCostBudgetService jobCostBudgetService;
-
-    @Mock
     private RegistryRoutingPolicy registryRoutingPolicy;
-
-    @BeforeEach
-    void allowAiSpendByDefault() {
-        // Individual tests exercise budget-exhaustion via explicit stubs where relevant; by
-        // default the budget is treated as unlimited so existing AI-path tests don't need to know
-        // about it. lenient() since many tests never reach an AI call site at all (no key stubbed).
-        lenient().when(jobCostBudgetService.tryReserve(any(), any())).thenReturn(true);
-    }
 
     @BeforeEach
     void routingPolicyIsAPassThroughByDefault() {
@@ -107,21 +86,12 @@ class Stage1IdentificationServiceTest {
         // A fresh cache per test/service instance — no cross-test pollution, and every test here
         // only exercises one identify() call per item anyway, so the cache is never the thing
         // under test in this file (see RegistryLookupCacheTest / CpeNameVariantCacheTest for that).
-        // enabled defaults to false (HighConfidenceVerificationService's @Value field is never
-        // injected by Spring in a plain `new` here), so this is a no-op for every test in this
-        // file unless a test explicitly flips it on — see HighConfidenceVerificationServiceTest for
-        // that service's own dedicated coverage.
-        HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService(
-                userApiKeyService, llmServiceClient, jobCostBudgetService, identifiedProductRepository);
-        // Closed-mode backlog item 166: Stage1IdentificationService's registry/AI seams are now the
-        // two collaborator classes below, composed here from exactly the same mocks the old
-        // single-constructor call used — see those two classes' own javadoc for why they exist.
+        // Closed-mode B2 (docs/spec/closed-mode-plan.md §9-2): both collaborators below are now
+        // gutted to an unconditional AI-unavailable fallback — see their own javadoc.
+        HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService();
         Stage1RegistryIdentification registryIdentification = new Stage1RegistryIdentification(
-                lookups, registryRoutingPolicy, new RegistryLookupCache(), userApiKeyService, llmServiceClient,
-                jobCostBudgetService, Runnable::run);
-        Stage1AiArbitration aiArbitration = new Stage1AiArbitration(
-                userApiKeyService, jobCostBudgetService, llmServiceClient, ecosystemRegistryRepository,
-                researchJobItemRepository, registryIdentification);
+                lookups, registryRoutingPolicy, new RegistryLookupCache(), Runnable::run);
+        Stage1AiArbitration aiArbitration = new Stage1AiArbitration();
         return new Stage1IdentificationService(
                 cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService,
                 nvdCpeSyncService, highConfidenceVerificationService, registryIdentification, aiArbitration, Runnable::run);
@@ -143,12 +113,10 @@ class Stage1IdentificationServiceTest {
     @Test
     void tier3IsSkippedWithNoCandidatesAndNoApiKey() {
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("totally-unknown-thing"), USER_ID);
 
         assertThat(result).isEmpty();
-        verify(llmServiceClient, never()).webSearchIdentify(anyString(), any(), any(), any());
     }
 
     @Test
@@ -171,7 +139,6 @@ class Stage1IdentificationServiceTest {
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of());
         when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         service(List.of(npmLookup)).identify(item("lodash"), USER_ID);
 
@@ -225,8 +192,6 @@ class Stage1IdentificationServiceTest {
         assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_STATIC);
         assertThat(result.get().getEcosystem()).isEqualTo("npm");
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:lodash:lodash:1.0.0:*:*:*:*:*:*:*");
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
-        verify(userApiKeyService, never()).getClaudeApiKey(any());
         // Measurement-only provenance (docs/spec/task-backlog.md item 16): a lone, literal dictionary
         // match — exactly the "single candidate" path resolveCandidates records.
         assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
@@ -295,7 +260,6 @@ class Stage1IdentificationServiceTest {
         unrelatedRustBinding.setTargetSwValues(java.util.Set.of("rust"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(unrelatedRustBinding, correctOpenssl));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("OpenSSL");
@@ -363,135 +327,6 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
-    void aiRejectsAWeakRegistryMatchWithNoCpeCorroborationLeavingItemUnidentified() {
-        // Same shape as the "PuTTY" case observed live: a real, unrelated PyPI package literally
-        // named "Putty" exists, but its version doesn't match and there's no CPE to cross-check
-        // against — with a Claude key configured, the LLM gets a chance to reject it as
-        // implausible given the usage text, rather than accepting it as a best-effort fallback.
-        PackageRegistryLookup pypiLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("pypi", "Putty", "pkg:pypi/Putty@0.79", new BigDecimal("0.5"), false));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "pypi";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(false, null, 0.0, "usage text describes a terminal client, not this package", TEST_USAGE)));
-
-        Optional<IdentifiedProduct> result = service(List.of(pypiLookup)).identify(item("PuTTY"), USER_ID);
-
-        assertThat(result).isEmpty();
-        verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void rescuesWithALiveCpeLookupWhenAiRejectsTheOnlyRegistrySignal() {
-        // Real gap observed live: "Redis" (the database server) collided with PyPI's unrelated
-        // "redis" client library, which the AI correctly rejects — but the registry match being
-        // present is exactly what made the earlier local-only CPE lookup skip its live NVD round
-        // trip (see fuzzyMatchCpe's haveOtherSignal), so a well-known real product ended up
-        // UNIDENTIFIED even though a live CPE lookup would have found it. Once the registry match
-        // is rejected, a live lookup must be retried rather than leaving the item stranded.
-        PackageRegistryLookup pypiLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("pypi", "redis", "pkg:pypi/redis@7.2.1", new BigDecimal("0.95"), true));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "pypi";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(), List.of(),
-                        List.of(cpeEntry("cpe:2.3:a:redislabs:redis:7.2.1:*:*:*:*:*:*:*", "redis")));
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(1);
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(false, null, 0.0,
-                        "usage text describes a database server, not a Python client library", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of(pypiLookup)).identify(item("Redis"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:redislabs:redis:1.0.0:*:*:*:*:*:*:*");
-        assertThat(result.get().getEcosystem()).isNull();
-        assertThat(result.get().getPackageName()).isNull();
-        // Measurement-only provenance (docs/spec/task-backlog.md item 16): the rescue path's own
-        // candidate pool (a fresh live lookup after the registry match was AI-rejected), not the
-        // original (empty) cpeCandidates from before the rescue.
-        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
-        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
-    }
-
-    @Test
-    void aiConfirmsAWeakRegistryMatchWithNoCpeCorroboration() {
-        PackageRegistryLookup pypiLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("pypi", "some-tool", "pkg:pypi/some-tool@1.0.0", new BigDecimal("0.5"), false));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "pypi";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches this package", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of(pypiLookup)).identify(item("some-tool"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getEcosystem()).isEqualTo("pypi");
-        assertThat(result.get().getPackageName()).isEqualTo("some-tool");
-        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
-        assertThat(result.get().getConfidence()).isEqualByComparingTo("0.8");
-    }
-
-    @Test
-    void aiRejectsAConfirmedRegistryMatchWithNoCpeCorroboration() {
-        // Real case observed live: PyPI's "redis" (a Python client library) coincidentally
-        // published a release numbered the same as the Redis *server* version in the CSV row
-        // ("7.2.1"), so the registry client reports exactVersionConfirmed=true — normally treated
-        // as strong, AI-free evidence. But an exact version match is not proof of product identity
-        // for a common name with no CPE to cross-check against either, so this must still get an
-        // AI plausibility check when a Claude key is configured, exactly like an unconfirmed match.
-        PackageRegistryLookup pypiLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("pypi", "redis", "pkg:pypi/redis@7.2.1", new BigDecimal("0.95"), true));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "pypi";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(false, null, 0.0,
-                        "usage text describes a database server, not a Python client library", TEST_USAGE)));
-
-        Optional<IdentifiedProduct> result = service(List.of(pypiLookup)).identify(item("Redis"), USER_ID);
-
-        assertThat(result).isEmpty();
-        verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
     void implausibleCpeMatchIsRejectedDespitePassingTheSimilarityThreshold() {
         // Real case observed live: querying "Python Extension Pack for Visual Studio Code" scored
         // 0.59 product-similarity (past the 0.3 pg_trgm threshold) against the unrelated CPE for
@@ -506,7 +341,6 @@ class Stage1IdentificationServiceTest {
         unrelatedEslintExtension.setTitle("Microsoft ESLint 1.7.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(unrelatedEslintExtension));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result =
                 service(List.of()).identify(item("Python Extension Pack for Visual Studio Code"), USER_ID);
@@ -529,7 +363,6 @@ class Stage1IdentificationServiceTest {
         genericMozillaEntry.setTitle("Mozilla Mozilla");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(genericMozillaEntry));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem zoomItem = item("Zoom");
         zoomItem.setVendor("Mozilla");
@@ -551,7 +384,6 @@ class Stage1IdentificationServiceTest {
         dockerDesktop.setTitle("Docker Desktop 4.0.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(dockerDesktop));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("GitHub Desktop"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -582,7 +414,6 @@ class Stage1IdentificationServiceTest {
         microsoftAccess.setTitle("Microsoft Access 2016");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(microsoftAccess));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("failureaccess"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -621,7 +452,6 @@ class Stage1IdentificationServiceTest {
         // The vendor must never enter the query text; it is only a re-ranking signal.
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
 
         ResearchJobItem item = item("TeamViewer");
@@ -652,8 +482,6 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:teamviewer:teamviewer:1.0.0:*:*:*:*:*:*:*");
         // Collapsed to a single candidate, so this is the unambiguous path — no AI spend at all.
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
-        verify(userApiKeyService, never()).getClaudeApiKey(any());
     }
 
     @Test
@@ -666,7 +494,6 @@ class Stage1IdentificationServiceTest {
                 .thenReturn(List.of(
                         cpeEntry("cpe:2.3:a:someoneelse:widget:1.0:*:*:*:*:*:*:*", "widget"),
                         cpeEntry("cpe:2.3:a:acme:widget:2.0:*:*:*:*:*:*:*", "widget")));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("widget");
@@ -683,63 +510,14 @@ class Stage1IdentificationServiceTest {
                 .thenReturn(List.of(
                         cpeEntry("cpe:2.3:a:apache:apache_http_server:2.4:*:*:*:*:*:*:*", "apache_http_server"),
                         cpeEntry("cpe:2.3:a:apache:apache_tomcat:9.0:*:*:*:*:*:*:*", "apache_tomcat")));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("apache"), USER_ID);
 
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:apache_http_server:1.0.0:*:*:*:*:*:*:*");
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
         // Measurement-only provenance (docs/spec/task-backlog.md item 16): no-arbitration path —
         // multiple candidates, but no AI call at all, so the first is picked without judging between them.
-        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
-        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
-    }
-
-    @Test
-    void ambiguousCpeCandidatesDegradeToFirstCandidateWhenJobBudgetIsExhausted() {
-        // A key is configured, but the job's cost budget (see JobCostBudgetService, target $20 /
-        // 1,000 items) has already been spent by earlier items in the same job — every further AI
-        // call site must degrade exactly like "no key configured", not error or block the item.
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(
-                        cpeEntry("cpe:2.3:a:apache:apache_http_server:2.4:*:*:*:*:*:*:*", "apache_http_server"),
-                        cpeEntry("cpe:2.3:a:apache:apache_tomcat:9.0:*:*:*:*:*:*:*", "apache_tomcat")));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(jobCostBudgetService.tryReserve(any(), any())).thenReturn(false);
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("apache"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:apache_http_server:1.0.0:*:*:*:*:*:*:*");
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
-        // Measurement-only provenance (docs/spec/task-backlog.md item 16): same no-arbitration
-        // fallback as the no-API-key case above, just reached via an exhausted job budget instead.
-        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
-        assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
-    }
-
-    @Test
-    void ambiguousCpeCandidatesAreDisambiguatedByLlm() {
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(
-                        cpeEntry("cpe:2.3:a:apache:apache_http_server:2.4:*:*:*:*:*:*:*", "apache_http_server"),
-                        cpeEntry("cpe:2.3:a:apache:apache_tomcat:9.0:*:*:*:*:*:*:*", "apache_tomcat")));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 1, 0.9, "matches tomcat usage text", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("apache"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:apache_tomcat:1.0.0:*:*:*:*:*:*:*");
-        assertThat(result.get().getConfidence()).isEqualByComparingTo("0.9");
-        // Measurement-only provenance (docs/spec/task-backlog.md item 16): the arbitrated path —
-        // an LLM call actually chose among the candidates, but the pool size is still 2.
         assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
         assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
     }
@@ -761,40 +539,11 @@ class Stage1IdentificationServiceTest {
                         cpeEntry("cpe:2.3:a:google:android:1.0:*:*:*:*:*:*:*", "android"),
                         cpeEntry("cpe:2.3:a:motorola:android:1.0:*:*:*:*:*:*:*", "android"),
                         cpeEntry("cpe:2.3:a:samsung:android:1.0:*:*:*:*:*:*:*", "android")));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("Android Studio"), USER_ID);
 
         assertThat(result).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
-    }
-
-    @Test
-    void relaxedContainmentDerivedMultiCandidatesAreAdoptedWhenAiDisambiguates() {
-        // Same relaxed-pass pool as the drop case above, but with a Claude key configured and a
-        // real AI selection — dropping the no-verdict degrade path must not also block a genuine
-        // AI verdict from being used; only the unverified-guess fallback is disabled for a relaxed
-        // -containment-derived pool, not Tier2 disambiguation itself. Reuses this suite's own
-        // observed stable-sort behavior (see ambiguousCpeCandidatesWithNoApiKeyDegradeToFirstCandidate
-        // above: tied candidates keep their input order) to pin selectedIndex=2 to the samsung entry.
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(
-                        cpeEntry("cpe:2.3:a:google:android:1.0:*:*:*:*:*:*:*", "android"),
-                        cpeEntry("cpe:2.3:a:motorola:android:1.0:*:*:*:*:*:*:*", "android"),
-                        cpeEntry("cpe:2.3:a:samsung:android:1.0:*:*:*:*:*:*:*", "android")));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 2, 0.7, "usage text mentions a Samsung device", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Android Studio"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:samsung:android:1.0.0:*:*:*:*:*:*:*");
-        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
-        assertThat(result.get().getConfidence()).isEqualByComparingTo("0.7");
-        assertThat(result.get().getCpeCandidateCount()).isEqualTo(3);
     }
 
     @Test
@@ -808,14 +557,12 @@ class Stage1IdentificationServiceTest {
                 .thenReturn(List.of(
                         cpeEntry("cpe:2.3:a:tracker-software:pdf-xchange_editor:9.0:*:*:*:*:*:*:*", "pdf-xchange_editor"),
                         cpeEntry("cpe:2.3:a:tracker-software:pdf-xchange_viewer:2.5:*:*:*:*:*:*:*", "pdf-xchange_viewer")));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("PDF-XChange"), USER_ID);
 
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:tracker-software:pdf-xchange_editor:1.0.0:*:*:*:*:*:*:*");
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
         assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
     }
 
@@ -838,209 +585,14 @@ class Stage1IdentificationServiceTest {
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
                 .thenReturn(List.of(vlcMediaPlayer, otherVariantGuess));
         when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
 
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:videolan:vlc_media_player:1.0.0:*:*:*:*:*:*:*");
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
         assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
         assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
-    }
-
-    @Test
-    void confidenceReflectsTheCpeTier2AiCallWhenATrustedRegistryMatchHasAHigherStaticNumber() {
-        // Real bug found live 2026-08-23 via DB query: of 138 llm_disambiguate rows, 119 sat at
-        // exactly the static registry confidence constant (0.95) rather than the AI's own,
-        // honestly lower, disambiguation confidence — because a version-confirmed registry match
-        // (static 0.95) plus an ambiguous CPE Tier2 selection (AI says e.g. 0.85) used to be
-        // merged with a blind confidence.max(cpeConfidence), letting the untouched static number
-        // win while method still claimed llm_disambiguate. The displayed confidence must be the
-        // real AI value whenever an AI call actually determined the CPE selection.
-        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("npm", "widget", "pkg:npm/widget@1.0.0", new BigDecimal("0.95"), true));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "npm";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(
-                        cpeEntry("cpe:2.3:a:vendor1:widget:1.0:*:*:*:*:*:*:*", "widget"),
-                        cpeEntry("cpe:2.3:a:vendor2:widget:2.0:*:*:*:*:*:*:*", "widget")));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 1, 0.85, "matches vendor2's widget per usage text", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item("widget"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
-        assertThat(result.get().getConfidence()).isEqualByComparingTo("0.85");
-        assertThat(result.get().getEcosystem()).isEqualTo("npm");
-    }
-
-    @Test
-    void llmRejectingAllCpeCandidatesWithNoRegistryMatchLeavesItemUnidentified() {
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(
-                        cpeEntry("cpe:2.3:a:vendor1:thing:1.0:*:*:*:*:*:*:*", "thing"),
-                        cpeEntry("cpe:2.3:a:vendor2:thing:2.0:*:*:*:*:*:*:*", "thing")));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(false, null, 0.0, "neither matches the usage text", TEST_USAGE)));
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("thing"), USER_ID);
-
-        assertThat(result).isEmpty();
-        verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void tier3ResolvesNameAndReQueriesTier1() {
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.webSearchIdentify(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new WebSearchIdentifyResponse(
-                        true, "OpenAI", "openai-python", "resolved via marketplace listing", List.of("https://example.com"), List.of(), null,
-                        TEST_USAGE)));
-
-        PackageRegistryLookup pypiLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return "openai-python".equals(name)
-                        ? Optional.of(new RegistryMatch("pypi", "openai", "pkg:pypi/openai@1.0.0", new BigDecimal("0.9"), true))
-                        : Optional.empty();
-            }
-
-            @Override
-            public String ecosystem() {
-                return "pypi";
-            }
-        };
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of(pypiLookup)).identify(item("OpenAI Store Listing"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_WEB_SEARCH);
-        assertThat(result.get().getPackageName()).isEqualTo("openai");
-    }
-
-    @Test
-    void tier3FoundButReQueryStillEmptyLeavesItemUnidentified() {
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.webSearchIdentify(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new WebSearchIdentifyResponse(
-                        true, "SomeVendor", "Some Obscure Tool", "resolved but not in any registry", List.of(), List.of(), null,
-                        TEST_USAGE)));
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Weird Marketplace Name"), USER_ID);
-
-        assertThat(result).isEmpty();
-        verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void tier3NotFoundSurfacesTheAiReasonAsAHintInsteadOfDiscardingIt() {
-        // Real gap observed live: e.g. a firmware product or a commercial/proprietary tool with no
-        // public registry — the AI already explains why nothing was found, but that reasoning was
-        // being silently discarded, leaving a bare UNIDENTIFIED with no explanation for the user.
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.webSearchIdentify(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new WebSearchIdentifyResponse(
-                        false, null, null,
-                        "ルーター等のファームウェアと見られ、公開レジストリには存在しません",
-                        List.of(), List.of(), null, TEST_USAGE)));
-
-        ResearchJobItem item = item("AcmeRouter Firmware");
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
-
-        assertThat(result).isEmpty();
-        assertThat(item.getIdentificationHint()).contains("ファームウェア");
-        assertThat(item.getHintIdentifier()).isNull();
-        assertThat(item.getHintPlatform()).isNull();
-        verify(researchJobItemRepository).save(item);
-    }
-
-    @Test
-    void tier3FoundButUnqueryablePlatformHintIsPersistedAsAManualHint() {
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.webSearchIdentify(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new WebSearchIdentifyResponse(
-                        true, "Microsoft", "Python", "resolved via marketplace listing", List.of(), List.of(),
-                        new PlatformHintDto(
-                                "VS Code Marketplace", "ms-python.python",
-                                "Check the VS Code Marketplace listing for this extension id"),
-                        TEST_USAGE)));
-
-        ResearchJobItem item = item("Python Extension Pack for Visual Studio Code");
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
-
-        assertThat(result).isEmpty();
-        assertThat(item.getIdentificationHint()).contains("ms-python.python");
-        assertThat(item.getHintPlatform()).isEqualTo("VS Code Marketplace");
-        assertThat(item.getHintIdentifier()).isEqualTo("ms-python.python");
-        verify(researchJobItemRepository).save(item);
-    }
-
-    @Test
-    void tier3EcosystemCandidateIsVerifiedAgainstRealRegistryBeforeBeingTrusted() {
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.webSearchIdentify(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new WebSearchIdentifyResponse(
-                        true, "Amazon Web Services", "AWS Command Line Interface", "resolved via web search",
-                        List.of(), List.of(new EcosystemCandidateDto("pypi", "awscli")), null, TEST_USAGE)));
-        PackageRegistryLookup pypiLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return "awscli".equals(name)
-                        ? Optional.of(new RegistryMatch("pypi", "awscli", "pkg:pypi/awscli@2.15.0", new BigDecimal("0.95"), true))
-                        : Optional.empty();
-            }
-
-            @Override
-            public String ecosystem() {
-                return "pypi";
-            }
-        };
-        stubSaveReturnsArgument();
-
-        ResearchJobItem item = item("AWS CLI");
-        item.setVersion("2.15.0");
-
-        Optional<IdentifiedProduct> result = service(List.of(pypiLookup)).identify(item, USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getEcosystem()).isEqualTo("pypi");
-        assertThat(result.get().getPackageName()).isEqualTo("awscli");
-    }
-
-    @Test
-    void tier3EcosystemCandidateForDisabledEcosystemIsIgnored() {
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.webSearchIdentify(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new WebSearchIdentifyResponse(
-                        true, "Vendor", "Some Tool", "resolved via web search",
-                        List.of(), List.of(new EcosystemCandidateDto("vscode-marketplace", "vendor.some-tool")), null, TEST_USAGE)));
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Some Marketplace Tool"), USER_ID);
-
-        assertThat(result).isEmpty();
     }
 
     @Test
@@ -1121,14 +673,12 @@ class Stage1IdentificationServiceTest {
             }
         };
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         Optional<IdentifiedProduct> result = service(List.of(npmLookup, mavenLookup)).identify(item("commons-io"), USER_ID);
 
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("maven");
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
     }
 
     @Test
@@ -1167,7 +717,6 @@ class Stage1IdentificationServiceTest {
             }
         };
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("widget");
@@ -1177,123 +726,6 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("npm");
-    }
-
-    @Test
-    void ambiguousRegistryCandidatesAreArbitratedByLlm() {
-        // The real fix: with a Claude key configured, multiple same-named registry hits go through
-        // the same disambiguate endpoint CPE Tier2 already used, instead of a blind max-confidence
-        // pick — the AI can correctly favor the lower-confidence-but-actually-right candidate.
-        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("npm", "commons-io", "pkg:npm/commons-io@1.0.0", new BigDecimal("0.5"), false));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "npm";
-            }
-        };
-        PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("maven", "commons-io:commons-io", "pkg:maven/commons-io/commons-io@1.0.0",
-                        new BigDecimal("0.95"), true));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "maven";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.85, "usage text matches the npm utility, not the Java library", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of(npmLookup, mavenLookup)).identify(item("commons-io"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getEcosystem()).isEqualTo("npm");
-        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
-        assertThat(result.get().getConfidence()).isEqualByComparingTo("0.85");
-        // Arbitration already ran the AI plausibility check across both candidates — the
-        // single-candidate weak-match check must not fire a second, redundant LLM call.
-        verify(llmServiceClient, org.mockito.Mockito.times(1)).disambiguate(anyString(), any(), any(), any());
-    }
-
-    @Test
-    void aiRejectsAllAmbiguousRegistryCandidatesLeavingItemUnidentified() {
-        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("npm", "phoenix", "pkg:npm/phoenix@1.0.0", new BigDecimal("0.5"), false));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "npm";
-            }
-        };
-        PackageRegistryLookup hexLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("hex", "phoenix", "pkg:hex/phoenix@1.0.0", new BigDecimal("0.5"), false));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "hex";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(false, null, 0.0, "neither matches the usage text", TEST_USAGE)));
-
-        Optional<IdentifiedProduct> result = service(List.of(npmLookup, hexLookup)).identify(item("phoenix"), USER_ID);
-
-        assertThat(result).isEmpty();
-        verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void ambiguousRegistryCandidatesDegradeToMaxConfidenceWhenJobBudgetIsExhausted() {
-        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("npm", "commons-io", "pkg:npm/commons-io@1.0.0", new BigDecimal("0.5"), false));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "npm";
-            }
-        };
-        PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
-            @Override
-            public Optional<RegistryMatch> lookup(String name, String version) {
-                return Optional.of(new RegistryMatch("maven", "commons-io:commons-io", "pkg:maven/commons-io/commons-io@1.0.0",
-                        new BigDecimal("0.95"), true));
-            }
-
-            @Override
-            public String ecosystem() {
-                return "maven";
-            }
-        };
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(jobCostBudgetService.tryReserve(any(), any())).thenReturn(false);
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of(npmLookup, mavenLookup)).identify(item("commons-io"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getEcosystem()).isEqualTo("maven");
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
     }
 
     @Test
@@ -1327,7 +759,6 @@ class Stage1IdentificationServiceTest {
             }
         };
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("widget");
@@ -1337,7 +768,6 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("pypi");
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
     }
 
     @Test
@@ -1369,7 +799,6 @@ class Stage1IdentificationServiceTest {
             }
         };
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         ResearchJobItem item = item("widget");
@@ -1379,7 +808,6 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("pypi");
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
     }
 
     @Test
@@ -1391,37 +819,6 @@ class Stage1IdentificationServiceTest {
         service(List.of()).identify(item("lodash"), USER_ID);
 
         verifyNoInteractions(nvdCpeSyncService);
-    }
-
-    @Test
-    void expandsALeadingAbbreviationAgainstTheDictionarysOwnProductSlug() {
-        // Real bug found live in job 34 (2026-08-25): "VS Code" fails to identify even though the
-        // local dictionary already has 863 entries under cpe:2.3:a:microsoft:visual_studio_code:*
-        // — "Visual Studio Code" (the full form) resolves fine in the same job. Plain pg_trgm
-        // similarity is too low in both directions to find this (measured live:
-        // similarity('visual_studio_code','vs code')=0.29, similarity(...,'code')=0.26, both under
-        // the 0.3 threshold), so this exercises the initialism-expansion candidate-generation path
-        // (Stage1IdentificationService#expandLeadingInitialism) instead of the literal search. This
-        // is now a genuine last resort tried only after the live NVD fallback has already failed
-        // (see variantSearchDoesNotSuppressLiveNvdFallbackForAKnownRealName below), and a lone
-        // variant-derived candidate must pass an AI plausibility check before being trusted (see
-        // resolveSingleCpeCandidate) — both exercised here via the explicit stubs below.
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of());
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        CpeDictionaryEntry visualStudioCode =
-                cpeEntry("cpe:2.3:a:microsoft:visual_studio_code:1.85.0:*:*:*:*:*:*:*", "visual_studio_code");
-        when(cpeDictionaryRepository.findByLeadingInitialismMatch(eq("vs"), eq("code"), anyInt()))
-                .thenReturn(List.of(visualStudioCode));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.75, "usage text matches VS Code", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("VS Code"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:microsoft:visual_studio_code:1.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
@@ -1442,39 +839,11 @@ class Stage1IdentificationServiceTest {
         CpeDictionaryEntry dockerDesktop = cpeEntry("cpe:2.3:a:docker:desktop:4.0.0:*:*:*:*:*:*:*", "desktop");
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(eq("vs"), eq("desktop"), anyInt()))
                 .thenReturn(List.of(dockerDesktop));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("VS Desktop"), USER_ID);
 
         assertThat(result).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void contractsALongFormNameToAnAcronymForCandidateGeneration() {
-        // Real bug found live in job 34 (2026-08-25): "GNU Image Manipulation Program" (GIMP's own
-        // full expansion) fails to identify even though "GIMP" alone resolves fine and CPE
-        // candidates exist under cpe:2.3:a:gimp:gimp:* in the local dictionary. Trigram similarity
-        // between the long form and the "gimp" product slug is essentially zero (measured live:
-        // 0.03), so this exercises the acronym-contraction direction instead — 4 meaningful words
-        // (gnu, image, manipulation, program) clears the raised MIN_MEANINGFUL_TOKENS_FOR_CONTRACTION
-        // floor, and the candidate's product slug equals the acronym exactly.
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of());
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        CpeDictionaryEntry gimp = cpeEntry("cpe:2.3:a:gimp:gimp:2.10.34:*:*:*:*:*:*:*", "gimp");
-        when(cpeDictionaryRepository.findFuzzyMatches(eq("gimp"), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(gimp));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches GIMP", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result =
-                service(List.of()).identify(item("GNU Image Manipulation Program"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:gimp:gimp:1.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
@@ -1490,38 +859,12 @@ class Stage1IdentificationServiceTest {
         when(cpeDictionaryRepository.findFuzzyMatches(eq("gimp"), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(gimpExtension));
         when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result =
                 service(List.of()).identify(item("GNU Image Manipulation Program"), USER_ID);
 
         assertThat(result).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void stripsALeadingVendorPrefixBakedIntoTheProductNameAndRetries() {
-        // Generalization of the same "vendor is diluting the query" problem the dictionary search
-        // already solved for the vendor *field* (see searchesTheCpeDictionaryByProductNameAloneNeverVendorPrefixed),
-        // for when the vendor text is instead baked directly into the product name string itself
-        // (e.g. a CSV whose product column already reads "Broadcom Norton 360").
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of());
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        CpeDictionaryEntry norton360 = cpeEntry("cpe:2.3:a:broadcom:norton_360:5.0:*:*:*:*:*:*:*", "norton_360");
-        when(cpeDictionaryRepository.findFuzzyMatches(eq("Norton 360"), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(norton360));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches Norton 360", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        ResearchJobItem item = item("Broadcom Norton 360");
-        item.setVendor("Broadcom");
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:broadcom:norton_360:1.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
@@ -1534,7 +877,6 @@ class Stage1IdentificationServiceTest {
         // actually gets tried, not that the item resolves.
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
         when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("GitLens - Git supercharged"), USER_ID);
 
@@ -1557,38 +899,11 @@ class Stage1IdentificationServiceTest {
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
                 .thenReturn(List.of(vlcMediaPlayer));
         when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
 
         assertThat(result).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void aLoneNameVariantDerivedCpeCandidateIsAcceptedWithProvenanceWhenAiConfirmsIt() {
-        // Same setup as aLoneNameVariantDerivedCpeCandidateIsDroppedRatherThanAutoAcceptedWithNoApiKey
-        // above, but with a Claude key configured and the AI confirming the match — the other side of
-        // resolveSingleCpeCandidate's fork (senior review, 2026-08-25) that the existing provenance
-        // tests never exercise: cpeCandidateVariantDerived=true wired through to the saved
-        // IdentifiedProduct, not just the isFalse() literal-match cases.
-        CpeDictionaryEntry vlcMediaPlayer =
-                cpeEntry("cpe:2.3:a:videolan:vlc_media_player:3.0.0:*:*:*:*:*:*:*", "vlc_media_player");
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of());
-        when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
-                .thenReturn(List.of(vlcMediaPlayer));
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches VLC Media Player", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
-        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
     }
 
     @Test
@@ -1605,7 +920,6 @@ class Stage1IdentificationServiceTest {
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
                 .thenReturn(List.of(wrongMatch));
         when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("animal-sniffer-annotations"), USER_ID);
 
@@ -1627,7 +941,6 @@ class Stage1IdentificationServiceTest {
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
                 .thenReturn(List.of(oplynx));
         when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("org.projectlombok:lombok"), USER_ID);
 
@@ -1648,7 +961,6 @@ class Stage1IdentificationServiceTest {
         wpSlackSync.setTitle("Slack WP SlackSync for WordPress 1.0.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(wpSlackSync));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("slack"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -1664,7 +976,6 @@ class Stage1IdentificationServiceTest {
         crayon.setTitle("Crayon Project Crayon 2.0.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(crayon));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("rayon"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -1680,7 +991,6 @@ class Stage1IdentificationServiceTest {
         intelPuma.setTitle("Intel Puma 6 Chipset Drivers 1.0.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(intelPuma));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("puma"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -1695,7 +1005,6 @@ class Stage1IdentificationServiceTest {
         siemensLogo.setTitle("Siemens LOGO! Logic Module 8.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(siemensLogo));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("log"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -1710,7 +1019,6 @@ class Stage1IdentificationServiceTest {
         setOrGet.setTitle("Acme Set-Or-Get Utility 2.0.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(setOrGet));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("get"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -1725,7 +1033,6 @@ class Stage1IdentificationServiceTest {
         smartHub.setTitle("Acme Smart Hub 1.0.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(smartHub));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("art"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -1802,7 +1109,6 @@ class Stage1IdentificationServiceTest {
         genericGithub.setTitle("GitHub GitHub 1.0.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(genericGithub));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         List<String> goModulePaths = List.of(
                 "github.com/gin-gonic/gin",
@@ -1918,7 +1224,6 @@ class Stage1IdentificationServiceTest {
         jenkinsSlack.setTargetSwValues(java.util.Set.of("jenkins"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(jenkinsSlack));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("Slack"), USER_ID);
 
@@ -1952,7 +1257,6 @@ class Stage1IdentificationServiceTest {
         unrelatedPuma.setTargetSwValues(java.util.Set.of("*"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(unrelatedPuma, rubyPuma));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         Optional<IdentifiedProduct> result = service(List.of(rubyGemsLookup)).identify(item("puma"), USER_ID);
@@ -1985,7 +1289,6 @@ class Stage1IdentificationServiceTest {
         pillowHeif.setTargetSwValues(java.util.Set.of("python"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(pillowHeif, exactPillow));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         Optional<IdentifiedProduct> result = service(List.of(pypiLookup)).identify(item("Pillow"), USER_ID);
@@ -2213,7 +1516,6 @@ class Stage1IdentificationServiceTest {
         commanderPro.setTitle("Corsair Commander Pro");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(commanderPro));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("commander"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -2280,7 +1582,6 @@ class Stage1IdentificationServiceTest {
         commanderPro.setTitle("Corsair Commander Pro");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(commanderPro));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("commander"), USER_ID);
 
@@ -2301,7 +1602,6 @@ class Stage1IdentificationServiceTest {
         anotherRedisDesktopManager.setTitle("goanother Another Redis Desktop Manager 1.6.6");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(anotherRedisDesktopManager));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem rdmItem = item("Redis Desktop Manager");
         rdmItem.setVendor("RDM Dev Team");
@@ -2319,7 +1619,6 @@ class Stage1IdentificationServiceTest {
         threeSixtyChrome.setTitle("360 Chrome 13.0.2170.0");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(threeSixtyChrome));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         assertThat(service(List.of()).identify(item("Chrome Remote Desktop"), USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
@@ -2450,38 +1749,6 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
-    void relaxedContainmentPass2RecoversASingleTokenCandidateOnlyWhenTheStrictPassFoundNothingAtAll() {
-        // Backlog item 89 P2 (senior review 2026-08-30): "Metasploit Framework" against
-        // rapid7:metasploit — the strict pass rejects it (Direction 2's single-token-candidate rule
-        // requires the trailing "Framework" to be vendor-explained by "rapid7", which it isn't), and
-        // with no other candidate in the pool, the strict pass comes back completely empty. Only then
-        // does the relaxed second pass (same in-memory pool, no DB re-query) admit it. A relaxed-pass
-        // candidate must still go through the same forced-AI-verification-or-drop treatment a
-        // name-variant-derived candidate already gets — proven here by configuring an AI verdict and
-        // asserting the result actually went through METHOD_LLM_DISAMBIGUATE with the
-        // cpeCandidateVariantDerived measurement flag set, not a silent direct trust.
-        CpeDictionaryEntry rapid7Metasploit = cpeEntry("cpe:2.3:a:rapid7:metasploit:6.3.55:*:*:*:*:*:*:*", "metasploit");
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(rapid7Metasploit));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
-        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
-                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.85,
-                        "usage text confirms this is the penetration testing framework", TEST_USAGE)));
-        stubSaveReturnsArgument();
-
-        ResearchJobItem item = item("Metasploit Framework");
-        item.setVendor("Rapid7");
-        item.setVersion("6.3.55");
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:rapid7:metasploit:6.3.55:*:*:*:*:*:*:*");
-        assertThat(result.get().getMethod()).isEqualTo(IdentifiedProduct.METHOD_LLM_DISAMBIGUATE);
-        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
-    }
-
-    @Test
     void relaxedContainmentPass2NeverFiresWhenTheStrictPassAlreadyFoundACandidate() {
         // Control for the test above: when the strict pass already admits at least one candidate,
         // the relaxed second pass must never run at all — proven by the ordinary no-Claude-key
@@ -2496,7 +1763,6 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
-        verify(llmServiceClient, never()).disambiguate(anyString(), any(), any(), any());
     }
 
     @Test
@@ -2511,7 +1777,6 @@ class Stage1IdentificationServiceTest {
                 cpeEntry("cpe:2.3:a:slack_archivebot_project:slack_archivebot:1.0:*:*:*:*:*:*:*", "slack_archivebot");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(slackArchivebot));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem item = item("Slack");
         item.setVendor("Slack Technologies");
