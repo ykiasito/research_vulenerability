@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -15,6 +16,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.util.UriComponentsBuilder;
 
 /**
  * Populates/refreshes the {@code registry_package_mirror} table for {@code ecosystem = 'crates.io'}
@@ -104,8 +106,18 @@ public class CratesIoMirrorSyncService {
      *  "transient failure, retry later" (a manual re-run of {@link #syncPackages} covers both). */
     private Optional<List<String>> fetchVersions(String packageName) {
         try {
+            // Not .uri("https://index.crates.io/{path}", sparseIndexPath(...)): RestClient treats a
+            // single {placeholder} substitution as one opaque path *segment* and percent-encodes any
+            // "/" inside the substituted value (confirmed: produced .../se%2Frd%2Fserde instead of
+            // .../se/rd/serde against a MockRestServiceServer expectation) -- sparseIndexPath's own
+            // "/" separators must stay literal, so the path is built via UriComponentsBuilder.path
+            // instead, which does not re-encode a literal path string passed to it.
+            URI uri = UriComponentsBuilder.fromUriString("https://index.crates.io/")
+                    .path(sparseIndexPath(packageName))
+                    .build()
+                    .toUri();
             String body = cratesIoSyncRestClient.get()
-                    .uri("https://index.crates.io/{path}", sparseIndexPath(packageName))
+                    .uri(uri)
                     .retrieve()
                     .body(String.class);
             if (body == null || body.isBlank()) {

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.context.annotation.Import;
 
 /**
  * Exercises {@link RegistryPackageMirrorRepositoryImpl} against a real Postgres instance — the
@@ -16,9 +17,17 @@ import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
  * {@code @AutoConfigureTestDatabase(Replace.NONE)} shape as {@code CpeDictionaryRepositoryImplTest} —
  * each test runs in a transaction rolled back afterward, so nothing written here is persisted past
  * the test run.
+ *
+ * <p>{@code @Import} is needed here (unlike {@code CpeDictionaryRepositoryImplTest}): {@link
+ * RegistryPackageMirrorRepository} is a plain interface, not a Spring Data {@code JpaRepository},
+ * because this table has no JPA entity (see that interface's own javadoc for why) — so {@code
+ * @DataJpaTest}'s slice, which only auto-detects real Spring Data repositories, never picks up
+ * {@link RegistryPackageMirrorRepositoryImpl} on its own the way it does for {@code
+ * CpeDictionaryRepositoryImpl} (a custom-implementation fragment of an actual {@code JpaRepository}).
  */
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@Import(RegistryPackageMirrorRepositoryImpl.class)
 class RegistryPackageMirrorRepositoryImplTest {
 
     @Autowired
