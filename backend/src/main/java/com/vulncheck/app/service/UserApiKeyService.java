@@ -4,6 +4,7 @@ import com.vulncheck.app.entity.User;
 import com.vulncheck.app.entity.UserSecret;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.repository.UserSecretRepository;
+import java.util.Locale;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -61,21 +62,18 @@ public class UserApiKeyService {
      * misconfiguration doesn't silently degrade to the 10x-slower unkeyed path with nothing in the
      * logs to explain why (task-backlog item 142 REVISE R2).
      *
-     * <p>Looks the admin user up case-insensitively via {@link
-     * UserRepository#findByEmailIgnoreCase}, matching how {@code AppUserDetailsService} already
-     * grants ROLE_ADMIN via {@code adminEmail.equalsIgnoreCase(user.getEmail())} — {@code
-     * AuthController#register} stores the email as typed, not lowercased, so an {@code
-     * ADMIN_EMAIL} that differs from the stored row only in case must still resolve here, or admin
-     * login would work while this method silently found no user (task-backlog item 142 REVISE R1).
-     * If two rows exist that differ only in case (an edge case the app doesn't otherwise prevent),
-     * {@link UserRepository#findByEmailIgnoreCase} can throw {@code
-     * IncorrectResultSizeDataAccessException}; the existing {@code catch (Exception)} below
-     * degrades that to {@link Optional#empty()} the same as any other lookup failure — intended
-     * behavior, not a bug.
+     * <p>Both {@code AuthController#register} and migration V36 normalize stored {@code
+     * users.email} rows to lowercase (task-backlog item 148), so this method looks the admin user
+     * up the same way {@code AppUserDetailsService} grants ROLE_ADMIN: {@code adminEmail} is
+     * lowercased with {@link Locale#ROOT} and compared for an exact match via {@link
+     * UserRepository#findByEmail}. Using the same normalization rule as the ROLE_ADMIN check (and
+     * not Postgres {@code upper()}-based case-insensitive matching, which folds Unicode characters
+     * like long s U+017F "ſ" differently and could resolve a row {@code AppUserDetailsService}
+     * would correctly reject) is what task-backlog item 148 REVISE R3 fixed.
      *
      * <p>Also falls back to {@link Optional#empty()} (logging a warning rather than throwing) if
      * the lookup or decryption itself fails — e.g. a transient {@code DataAccessException} from
-     * {@link UserRepository#findByEmailIgnoreCase} or a decrypt failure from {@link
+     * {@link UserRepository#findByEmail} or a decrypt failure from {@link
      * SecretEncryptionService#decrypt} (key rotation, AAD mismatch, row corruption). This method's
      * only caller ({@code CpeDictionaryScheduledResync}) runs unattended on a Sunday-night cron,
      * so a transient failure here must degrade to the unkeyed path rather than abort the caller
@@ -86,7 +84,7 @@ public class UserApiKeyService {
             return Optional.empty();
         }
         try {
-            Optional<User> admin = userRepository.findByEmailIgnoreCase(adminEmail);
+            Optional<User> admin = userRepository.findByEmail(adminEmail.toLowerCase(Locale.ROOT));
             if (admin.isEmpty()) {
                 log.warn("ADMIN_EMAIL is set to '{}' but no registered user matches it — "
                         + "running unkeyed against NVD (slower)", adminEmail);
