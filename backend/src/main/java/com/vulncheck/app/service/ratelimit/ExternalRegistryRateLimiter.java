@@ -1,4 +1,4 @@
-package com.vulncheck.app.service.registry;
+package com.vulncheck.app.service.ratelimit;
 
 import java.util.LinkedHashMap;
 import java.util.Map;

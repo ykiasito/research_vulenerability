@@ -12,7 +12,7 @@ import com.vulncheck.app.repository.CsafProductRepository;
 import com.vulncheck.app.repository.CsafProductStatusRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
 import com.vulncheck.app.service.csaf.RedHatCsafSyncService.SyncResult;
-import com.vulncheck.app.service.registry.ExternalRegistryRateLimiter;
+import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;

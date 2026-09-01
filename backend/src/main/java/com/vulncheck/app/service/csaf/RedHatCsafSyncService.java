@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vulncheck.app.entity.CsafSyncState;
 import com.vulncheck.app.repository.CsafAdvisoryRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
-import com.vulncheck.app.service.registry.ExternalRegistryRateLimiter;
+import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;

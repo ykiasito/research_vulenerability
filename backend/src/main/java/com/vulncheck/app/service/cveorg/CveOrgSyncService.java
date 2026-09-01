@@ -48,7 +48,7 @@ public class CveOrgSyncService {
     private static final String BASELINE_ASSET_SUFFIX = "_all_CVEs_at_midnight.zip.zip";
     private static final String DELTA_ASSET_INFIX = "_delta_CVEs_at_";
 
-    private final RestClient externalApiRestClient;
+    private final RestClient cveOrgSyncRestClient;
     private final CveOrgRecordRepository cveOrgRecordRepository;
     private final CveOrgAffectedProductRepository cveOrgAffectedProductRepository;
     private final CveOrgSyncStateRepository cveOrgSyncStateRepository;
@@ -239,7 +239,7 @@ public class CveOrgSyncService {
 
     private GitHubRelease fetchLatestRelease() {
         try {
-            JsonNode release = externalApiRestClient.get()
+            JsonNode release = cveOrgSyncRestClient.get()
                     .uri(LATEST_RELEASE_API)
                     .header("Accept", "application/vnd.github+json")
                     .retrieve()
@@ -266,8 +266,8 @@ public class CveOrgSyncService {
         }
     }
 
-    /** Plain {@link URLConnection}, not the shared {@code externalApiRestClient} bean — that
-     *  client's 10s read timeout (fine for quick API calls) is far too short for a download that
+    /** Plain {@link URLConnection}, not the {@code cveOrgSyncRestClient} bean — that client's 30s
+     *  read timeout (fine for the quick releases-API call) is far too short for a download that
      *  can run for minutes (baseline: well over 1GB). */
     private InputStream download(String url) throws IOException {
         URLConnection connection = URI.create(url).toURL().openConnection();

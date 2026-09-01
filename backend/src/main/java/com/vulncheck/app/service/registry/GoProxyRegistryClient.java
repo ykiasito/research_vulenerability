@@ -1,6 +1,7 @@
 package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import java.math.BigDecimal;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
