@@ -1,5 +1,6 @@
 package com.vulncheck.app.service;
 
+import com.vulncheck.app.entity.User;
 import com.vulncheck.app.entity.UserSecret;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.repository.UserSecretRepository;
@@ -54,7 +55,11 @@ public class UserApiKeyService {
      * just slower" design, for every way this can be unconfigured: {@code ADMIN_EMAIL} unset or
      * blank, no user registered under that email, or that user simply hasn't registered an NVD
      * key. None of these are errors — an operator who hasn't set both up yet just gets the
-     * unkeyed (slower) behavior that already existed before this method.
+     * unkeyed (slower) behavior that already existed before this method. Each of these three
+     * "not configured" cases is logged at WARN (distinguishing which one it was, but never the
+     * key/email lookup result itself beyond the already-configured {@code adminEmail} value) so a
+     * misconfiguration doesn't silently degrade to the 10x-slower unkeyed path with nothing in the
+     * logs to explain why (task-backlog item 142 REVISE R2).
      *
      * <p>Looks the admin user up case-insensitively via {@link
      * UserRepository#findByEmailIgnoreCase}, matching how {@code AppUserDetailsService} already
@@ -81,8 +86,18 @@ public class UserApiKeyService {
             return Optional.empty();
         }
         try {
-            return userRepository.findByEmailIgnoreCase(adminEmail)
-                    .flatMap(user -> getNvdApiKey(user.getId()));
+            Optional<User> admin = userRepository.findByEmailIgnoreCase(adminEmail);
+            if (admin.isEmpty()) {
+                log.warn("ADMIN_EMAIL is set to '{}' but no registered user matches it — "
+                        + "running unkeyed against NVD (slower)", adminEmail);
+                return Optional.empty();
+            }
+            Optional<String> key = getNvdApiKey(admin.get().getId());
+            if (key.isEmpty()) {
+                log.warn("Admin user '{}' has no NVD API key registered — running unkeyed against NVD (slower)",
+                        adminEmail);
+            }
+            return key;
         } catch (Exception e) {
             log.warn("Failed to resolve the admin's NVD key — falling back to unkeyed", e);
             return Optional.empty();

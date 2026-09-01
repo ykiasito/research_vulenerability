@@ -112,7 +112,6 @@ public class CpeDictionaryScheduledResync {
      * background thread.
      */
     void runFullSync() {
-        log.warn("Scheduled weekly NVD CPE dictionary resync starting — this takes hours");
         long startedAt = System.currentTimeMillis();
         // Item 142/143: resolve the admin key *before* the tryBeginFullSync-guarded try block,
         // in its own try/catch. getAdminNvdApiKey() is documented to fall back to
@@ -131,6 +130,11 @@ public class CpeDictionaryScheduledResync {
             log.warn("Could not resolve the admin's NVD key — running this resync unkeyed (slower)", t);
             adminKey = Optional.empty();
         }
+        // Item 142 REVISE R2: log which of the two ~103-minute-vs-~17-hour paths this run is on.
+        // Never log the key/adminEmail value itself here — just the boolean presence, matching
+        // UserApiKeyService#getAdminNvdApiKey()'s own no-secrets-in-logs contract.
+        log.warn("Scheduled weekly NVD CPE dictionary resync starting (admin NVD key present: {}) — "
+                + "this takes hours", adminKey.isPresent());
         try {
             SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(adminKey);
             long minutes = (System.currentTimeMillis() - startedAt) / 60000;
