@@ -118,6 +118,22 @@ class CpeDictionaryScheduledResyncTest {
     }
 
     @Test
+    void runFullSyncFallsBackToUnkeyedAndStillReleasesTheGuardWhenAdminKeyResolutionThrows() {
+        // Regression test for task-backlog item 143: getAdminNvdApiKey() throwing (e.g. a decrypt
+        // failure) must not prevent syncAllAndRelease() from being reached — that call's own
+        // finally-block is the only place the fullSyncRunning guard gets released, so skipping it
+        // would leak the guard until process restart, exactly the item 136/141 bug PR #82
+        // reintroduced.
+        when(userApiKeyService.getAdminNvdApiKey())
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"));
+        when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenReturn(new SyncOutcome(0, true));
+
+        resync.runFullSync();
+
+        verify(nvdCpeSyncService, times(1)).syncAllAndRelease(Optional.empty());
+    }
+
+    @Test
     void runFullSyncPassesTheAdminNvdKeyThroughWhenOneIsConfigured() {
         // Regression test for task-backlog item 142: the scheduled resync must use whatever
         // UserApiKeyService#getAdminNvdApiKey() resolves — an unkeyed weekly run is ~10x slower

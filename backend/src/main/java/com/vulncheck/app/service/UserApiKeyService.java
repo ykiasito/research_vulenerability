@@ -5,6 +5,7 @@ import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.repository.UserSecretRepository;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -16,6 +17,7 @@ import org.springframework.stereotype.Service;
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class UserApiKeyService {
 
     private final UserSecretRepository userSecretRepository;
@@ -53,12 +55,25 @@ public class UserApiKeyService {
      * blank, no user registered under that email, or that user simply hasn't registered an NVD
      * key. None of these are errors — an operator who hasn't set both up yet just gets the
      * unkeyed (slower) behavior that already existed before this method.
+     *
+     * <p>Also falls back to {@link Optional#empty()} (logging a warning rather than throwing) if
+     * the lookup or decryption itself fails — e.g. a transient {@code DataAccessException} from
+     * {@link UserRepository#findByEmail} or a decrypt failure from {@link
+     * SecretEncryptionService#decrypt} (key rotation, AAD mismatch, row corruption). This method's
+     * only caller ({@code CpeDictionaryScheduledResync}) runs unattended on a Sunday-night cron,
+     * so a transient failure here must degrade to the unkeyed path rather than abort the caller
+     * before it ever reaches its own guard-release logic (task-backlog item 143).
      */
     public Optional<String> getAdminNvdApiKey() {
         if (adminEmail == null || adminEmail.isBlank()) {
             return Optional.empty();
         }
-        return userRepository.findByEmail(adminEmail)
-                .flatMap(user -> getNvdApiKey(user.getId()));
+        try {
+            return userRepository.findByEmail(adminEmail)
+                    .flatMap(user -> getNvdApiKey(user.getId()));
+        } catch (Exception e) {
+            log.warn("Failed to resolve the admin's NVD key — falling back to unkeyed", e);
+            return Optional.empty();
+        }
     }
 }
