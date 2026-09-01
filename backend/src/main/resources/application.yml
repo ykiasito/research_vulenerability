@@ -52,10 +52,17 @@ app:
   # One-shot full NVD CPE Dictionary mirror (~1.8M entries) on startup. Off by default: it runs for
   # hours and only needs to happen once per environment. See CpeDictionaryBootstrapSync.
   cpe-full-sync-on-startup: ${CPE_FULL_SYNC_ON_STARTUP:false}
-  # Weekly automatic full re-sync of the same mirror (Sunday 01:00 UTC), so it doesn't just go stale
-  # forever after the one-shot startup sync. Off by default (safety-first, same rationale as the
-  # startup flag above) — see CpeDictionaryScheduledResync and docs/spec/cpe-dictionary-mirror-plan.md.
+  # Weekly automatic full re-sync of the same mirror (Sunday 01:30 UTC by default), so it doesn't
+  # just go stale forever after the one-shot startup sync. Off by default (safety-first, same
+  # rationale as the startup flag above) — see CpeDictionaryScheduledResync and
+  # docs/spec/cpe-dictionary-mirror-plan.md.
   cpe-scheduled-resync-enabled: ${CPE_SCHEDULED_RESYNC_ENABLED:false}
+  # Cron expression for the weekly resync above. Overridable so a scheduled-uptime deployment (see
+  # docs/spec/ec2-deployment-guide.md) can place it strictly after the instance's own start time —
+  # Spring never fires a trigger that already elapsed before the process registered it, so a cron
+  # left coinciding with (or before) the start time silently never runs. See
+  # CpeDictionaryScheduledResync#resyncWeekly's javadoc for the PR #75 REVISE history.
+  cpe-scheduled-resync-cron: ${CPE_SCHEDULED_RESYNC_CRON:0 30 1 * * SUN}
   # High-confidence AI verification backstop (see HighConfidenceVerificationService) — an extra
   # AI+web_search check for Stage1 items that reached a high-confidence CPE match purely via static
   # (Tier1) logic, never reviewed by Tier2/Tier3's AI disambiguation. Off by default so this never
