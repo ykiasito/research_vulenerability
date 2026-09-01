@@ -350,4 +350,69 @@ class CpeDictionaryRepositoryImplTest {
         assertThat(byId.get(lowerId).getCpeString())
                 .isEqualTo("cpe:2.3:a:zzzrevise15distinctvendor:zzzrevise15distinctproduct:1.0:*:*:*:*:*:*:*");
     }
+
+    /**
+     * Plain {@code jdbcTemplate.queryForObject(sql, OffsetDateTime.class, ...)} lets Spring's
+     * {@code SingleColumnRowMapper} hand back whatever type the pgjdbc driver's default {@code
+     * ResultSet.getObject(int)} produces for a {@code timestamptz} column ({@code
+     * java.sql.Timestamp}), which is not assignable to {@code OffsetDateTime} -- a {@code
+     * ClassCastException} at runtime, not a compile-time type mismatch. {@link
+     * CpeDictionaryRepositoryImpl#collect}'s own row mapper avoids this the same way: calling the
+     * type-aware {@code ResultSet.getObject(String, Class)} overload explicitly.
+     */
+    private OffsetDateTime lastSyncedAt(String cpeString) {
+        return jdbcTemplate.queryForObject(
+                "SELECT last_synced_at FROM cpe_dictionary WHERE cpe_string = ?",
+                (rs, rowNum) -> rs.getObject("last_synced_at", OffsetDateTime.class),
+                cpeString);
+    }
+
+    /**
+     * Regression test for PR #75 REVISE item 1: the {@code ON CONFLICT DO UPDATE} in {@code
+     * upsertBatch} must still write when content actually changed. Inserts a row, then upserts the
+     * same {@code cpe_string} again with a different title and asserts the title (and {@code
+     * last_synced_at}) actually changed.
+     */
+    @Test
+    void upsertBatchUpdatesRowWhenTitleChanges() {
+        String cpeString = "cpe:2.3:a:zzzrevise135upsertvendor:zzzrevise135upsertproduct:1.0:*:*:*:*:*:*:*";
+        cpeDictionaryRepository.upsertBatch(List.of(
+                entry(cpeString, "Original Title", "zzzrevise135upsertvendor", "zzzrevise135upsertproduct")));
+
+        OffsetDateTime firstSyncedAt = lastSyncedAt(cpeString);
+
+        cpeDictionaryRepository.upsertBatch(List.of(
+                entry(cpeString, "Changed Title", "zzzrevise135upsertvendor", "zzzrevise135upsertproduct")));
+
+        String title = jdbcTemplate.queryForObject(
+                "SELECT title FROM cpe_dictionary WHERE cpe_string = ?", String.class, cpeString);
+        OffsetDateTime secondSyncedAt = lastSyncedAt(cpeString);
+
+        assertThat(title).isEqualTo("Changed Title");
+        assertThat(secondSyncedAt).isAfterOrEqualTo(firstSyncedAt);
+    }
+
+    /**
+     * Regression test for PR #75 REVISE item 1: when title/vendor/product are all unchanged, the
+     * {@code WHERE ... IS DISTINCT FROM ...} predicate added to {@code ON CONFLICT DO UPDATE} must
+     * make the conflicting row's {@code UPDATE} branch a no-op, so {@code last_synced_at} does not
+     * advance -- verifying the row was genuinely skipped (not rewritten with an identical value) is
+     * the whole point of the fix, since a rewrite with identical values would still cost the same
+     * heap version + GIN index churn this fix exists to avoid.
+     */
+    @Test
+    void upsertBatchDoesNotUpdateLastSyncedAtWhenContentIsUnchanged() {
+        String cpeString = "cpe:2.3:a:zzzrevise135noopvendor:zzzrevise135noopproduct:1.0:*:*:*:*:*:*:*";
+        cpeDictionaryRepository.upsertBatch(List.of(
+                entry(cpeString, "Stable Title", "zzzrevise135noopvendor", "zzzrevise135noopproduct")));
+
+        OffsetDateTime firstSyncedAt = lastSyncedAt(cpeString);
+
+        cpeDictionaryRepository.upsertBatch(List.of(
+                entry(cpeString, "Stable Title", "zzzrevise135noopvendor", "zzzrevise135noopproduct")));
+
+        OffsetDateTime secondSyncedAt = lastSyncedAt(cpeString);
+
+        assertThat(secondSyncedAt).isEqualTo(firstSyncedAt);
+    }
 }

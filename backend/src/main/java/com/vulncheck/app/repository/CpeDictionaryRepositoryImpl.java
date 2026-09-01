@@ -59,10 +59,26 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                               vendor = EXCLUDED.vendor,
                               product = EXCLUDED.product,
                               last_synced_at = now()
+                -- senior-reviewer REVISE (PR #75): only rewrite the row (and its two GIN indexes)
+                -- when content actually changed. Without this predicate, ON CONFLICT DO UPDATE
+                -- unconditionally rewrites all ~1.8M rows every full sync even when NVD reports the
+                -- exact same title/vendor/product, generating a full new heap version + index entry
+                -- (including both GIN indexes) plus an equal amount of dead tuple per week -- a bad
+                -- fit for the 10GB DB size cap this mirror runs under.
+                -- Side effect: last_synced_at now means "last time this row's content changed", not
+                -- "last time NVD reported this row" -- confirmed unread anywhere in the app (not even
+                -- the admin screen) before making this change, so no caller-visible behavior changes.
+                WHERE cpe_dictionary.title IS DISTINCT FROM EXCLUDED.title
+                   OR cpe_dictionary.vendor IS DISTINCT FROM EXCLUDED.vendor
+                   OR cpe_dictionary.product IS DISTINCT FROM EXCLUDED.product
                 """,
                 entries.stream()
                         .map(e -> new Object[] {e.getCpeString(), e.getTitle(), e.getVendor(), e.getProduct()})
                         .toList());
+        // Note: batch.size() upstream (NvdCpeSyncService#sync) still counts every row *processed*
+        // in this batch as "upserted", not just the rows this predicate actually wrote -- that
+        // counter's meaning ("how many dictionary entries did this sync pass over") is unchanged by
+        // this fix, which only affects whether a given row's UPDATE branch is a no-op.
     }
 
     @Override
