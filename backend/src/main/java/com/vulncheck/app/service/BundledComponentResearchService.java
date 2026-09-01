@@ -145,6 +145,12 @@ public class BundledComponentResearchService {
                 continue;
             }
             for (VulnFinding finding : adjudicate(candidate, userId)) {
+                // Task-backlog item 104: finding.url() is NVD/OSV-sourced (not LLM-authored), but
+                // OSV entries are third-party-submitted and NVD reference data isn't scheme-validated
+                // either — sanitize defensively before it reaches jobs/detail.html's th:href, same as
+                // Stage4's citation_url. Dropped to null (not escaped/shown as text) per this app's
+                // existing "silence over a wrong guess" stance for untrusted URLs.
+                String url = SafeUrlValidator.sanitizeHttpUrl(finding.url());
                 // REVISE item 6 (senior review 2026-08-26): vulnerabilities.source records real
                 // provenance (finding.source() — "nvd"/"osv", the LLM never supplies the CVE/GHSA id
                 // itself) rather than the SOURCE constant, which is reserved for
@@ -154,9 +160,9 @@ public class BundledComponentResearchService {
                 // allowed to enrich a row Stage4 previously wrote with null severity/description,
                 // unlike Stage4's own low-trust LLM-named finding.
                 Long vulnerabilityId = vulnerabilityRepository.upsertAndGetId(
-                        finding.cveOrGhsaId(), finding.source(), finding.severity(), finding.description(), finding.url(), finding.fixedVersion());
+                        finding.cveOrGhsaId(), finding.source(), finding.severity(), finding.description(), url, finding.fixedVersion());
                 jobItemVulnerabilityRepository.linkIfAbsentWithBundledComponent(
-                        item.getId(), vulnerabilityId, SOURCE, finding.url(), candidate.componentName(), candidate.version());
+                        item.getId(), vulnerabilityId, SOURCE, url, candidate.componentName(), candidate.version());
                 persisted++;
             }
         }

@@ -158,6 +158,38 @@ class Stage4WebSearchResearchServiceTest {
         verifyNoInteractions(vulnerabilityRepository, jobItemVulnerabilityRepository);
     }
 
+    // --- Task-backlog item 104: citation_url scheme allowlist ---------------------------------------
+
+    @Test
+    void dangerousCitationUrlSchemeIsDroppedToNullBeforePersisting() {
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.webSearchResearch(eq("sk-ant-test"), any(), eq("npm"), eq("some-tool"), any()))
+                .thenReturn(Optional.of(List.of(
+                        new WebSearchVulnFindingDto("CVE-2024-77777", "HIGH", "desc", "javascript:alert(document.cookie)", null))));
+        when(vulnerabilityRepository.insertIfAbsentAndGetId(anyString(), anyString(), any(), any(), any(), any())).thenReturn(600L);
+
+        Stage4WebSearchResearchService.Stage4ResearchResult result = service().research(item(), "npm", "some-tool", USER_ID);
+
+        assertThat(result.persistedCount()).isEqualTo(1);
+        verify(vulnerabilityRepository).insertIfAbsentAndGetId(
+                eq("CVE-2024-77777"), eq("llm_web_search"), eq("HIGH"), eq("desc"), eq((String) null), any());
+        verify(jobItemVulnerabilityRepository).linkIfAbsent(eq(9L), eq(600L), eq("llm_web_search"), eq((String) null));
+    }
+
+    @Test
+    void httpAndHttpsCitationUrlsPassThroughUnchanged() {
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.webSearchResearch(eq("sk-ant-test"), any(), eq("npm"), eq("some-tool"), any()))
+                .thenReturn(Optional.of(List.of(
+                        new WebSearchVulnFindingDto("CVE-2024-88888", "LOW", "desc", "http://example.com/advisory", null))));
+        when(vulnerabilityRepository.insertIfAbsentAndGetId(anyString(), anyString(), any(), any(), any(), any())).thenReturn(601L);
+
+        service().research(item(), "npm", "some-tool", USER_ID);
+
+        verify(vulnerabilityRepository).insertIfAbsentAndGetId(
+                eq("CVE-2024-88888"), eq("llm_web_search"), eq("LOW"), eq("desc"), eq("http://example.com/advisory"), any());
+    }
+
     @Test
     void usesPlatformHintScopeWhenNoEcosystemIsAvailable() {
         when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));

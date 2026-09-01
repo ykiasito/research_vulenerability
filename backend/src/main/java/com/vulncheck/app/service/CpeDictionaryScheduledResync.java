@@ -43,6 +43,7 @@ import org.springframework.stereotype.Component;
 public class CpeDictionaryScheduledResync {
 
     private final NvdCpeSyncService nvdCpeSyncService;
+    private final UserApiKeyService userApiKeyService;
 
     @Value("${app.cpe-scheduled-resync-enabled:false}")
     private boolean enabled;
@@ -75,6 +76,25 @@ public class CpeDictionaryScheduledResync {
             log.warn("Scheduled weekly NVD CPE dictionary resync skipped: another full sync is already running");
             return;
         }
+        try {
+            startWorker();
+        } catch (Throwable t) {
+            // tryBeginFullSync() above already won the slot, but the worker thread itself never
+            // got to run, so syncAllAndRelease()'s own finally-release never fires either —
+            // without this, the slot would stay held until the process restarts (task-backlog
+            // items 81/136/141).
+            nvdCpeSyncService.releaseFullSyncGuard();
+            log.error("Scheduled weekly NVD CPE dictionary resync failed to start — sync slot released", t);
+        }
+    }
+
+    /**
+     * Spawns and starts the worker thread that runs {@link #runFullSync}. Package-private (rather
+     * than inlined in {@link #resyncWeekly}) so a unit test can force this step to fail (e.g. via
+     * a Mockito spy) without needing a real thread-creation failure (native-thread exhaustion, a
+     * SecurityManager denial) to exercise {@link #resyncWeekly}'s guard-release catch block.
+     */
+    void startWorker() {
         Thread worker = new Thread(this::runFullSync, "cpe-scheduled-resync");
         worker.setDaemon(true);
         worker.start();
@@ -92,10 +112,31 @@ public class CpeDictionaryScheduledResync {
      * background thread.
      */
     void runFullSync() {
-        log.warn("Scheduled weekly NVD CPE dictionary resync starting — this takes hours");
         long startedAt = System.currentTimeMillis();
+        // Item 142/143: resolve the admin key *before* the tryBeginFullSync-guarded try block,
+        // in its own try/catch. getAdminNvdApiKey() is documented to fall back to
+        // Optional.empty() on every "not configured" case, but a DB hiccup
+        // (userRepository.findByEmail) or a decrypt failure (SecretEncryptionService, e.g. a
+        // key-rotation/AAD mismatch) can still throw. If that throw happened while evaluating
+        // syncAllAndRelease(...)'s argument, syncAllAndRelease() itself would never be entered —
+        // and its finally-block guard release is the *only* release path here, so the
+        // fullSyncRunning guard would leak until process restart (reintroducing task-backlog
+        // items 136/141). Resolving the key here, ahead of time, guarantees syncAllAndRelease()
+        // is always reached.
+        Optional<String> adminKey;
         try {
-            SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
+            adminKey = userApiKeyService.getAdminNvdApiKey();
+        } catch (Throwable t) {
+            log.warn("Could not resolve the admin's NVD key — running this resync unkeyed (slower)", t);
+            adminKey = Optional.empty();
+        }
+        // Item 142 REVISE R2: log which of the two ~103-minute-vs-~17-hour paths this run is on.
+        // Never log the key/adminEmail value itself here — just the boolean presence, matching
+        // UserApiKeyService#getAdminNvdApiKey()'s own no-secrets-in-logs contract.
+        log.warn("Scheduled weekly NVD CPE dictionary resync starting (admin NVD key present: {}) — "
+                + "this takes hours", adminKey.isPresent());
+        try {
+            SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(adminKey);
             long minutes = (System.currentTimeMillis() - startedAt) / 60000;
             if (outcome.completed()) {
                 log.warn("Scheduled weekly NVD CPE dictionary resync finished: {} entries upserted in {} minutes",

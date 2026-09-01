@@ -82,6 +82,22 @@ public class NvdCpeSyncService {
     }
 
     /**
+     * Releases the full-sync guard without ever having run a sync. For callers of {@link
+     * #tryBeginFullSync} only, and only when they are certain the acquired slot will never reach
+     * {@link #syncAllAndRelease} — e.g. spawning or starting the background worker thread itself
+     * threw, so {@link #syncAllAndRelease}'s own {@code finally}-block release will never run.
+     * Without this escape hatch, that failure mode leaves {@code fullSyncRunning} stuck {@code
+     * true} until the process restarts, permanently locking out every trigger (startup, admin
+     * screen, weekly scheduler — task-backlog items 81/136/141). Calling this after a sync
+     * legitimately reached {@link #syncAllAndRelease} would let a second, concurrent full sync
+     * start against the same NVD rate limit and {@code cpe_dictionary} table, so callers must not
+     * call it once the worker thread has actually started running.
+     */
+    public void releaseFullSyncGuard() {
+        fullSyncRunning.set(false);
+    }
+
+    /**
      * Full mirror sync, no keyword filter. Slow (rate-limited) — intended for a scheduled/off-hours
      * run. Callers must only invoke this after {@link #tryBeginFullSync} returned {@code true}; the
      * slot is released here unconditionally (success or exception) so a failed sync doesn't
