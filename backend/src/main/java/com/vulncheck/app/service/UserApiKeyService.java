@@ -50,7 +50,11 @@ public class UserApiKeyService {
      * Resolves the admin user's own registered NVD key for non-interactive callers that have no
      * logged-in user context of their own (task-backlog item 142) — currently only {@link
      * CpeDictionaryScheduledResync}, which otherwise runs the weekly full CPE resync unkeyed and
-     * so rate-limited to 5 req/30s (~10x slower than a keyed run).
+     * so rate-limited to 5 req/30s instead of 50 req/30s. That per-request limit is 10x lower
+     * unkeyed, but {@code NvdCpeSyncService}'s full sync is only ~182 requests (10,000
+     * results/page), so the actual difference in total sync time is the per-request wait gap
+     * times 182 requests — roughly 18 minutes, not 10x the ~103-minute keyed baseline
+     * (task-backlog item 161).
      *
      * <p>Falls back to {@link Optional#empty()}, matching the existing "works fine without a key,
      * just slower" design, for every way this can be unconfigured: {@code ADMIN_EMAIL} unset or
@@ -59,8 +63,8 @@ public class UserApiKeyService {
      * unkeyed (slower) behavior that already existed before this method. Each of these three
      * "not configured" cases is logged at WARN (distinguishing which one it was, but never the
      * key/email lookup result itself beyond the already-configured {@code adminEmail} value) so a
-     * misconfiguration doesn't silently degrade to the 10x-slower unkeyed path with nothing in the
-     * logs to explain why (task-backlog item 142 REVISE R2).
+     * misconfiguration doesn't silently degrade to the ~18-minutes-slower unkeyed path with
+     * nothing in the logs to explain why (task-backlog item 142 REVISE R2).
      *
      * <p>Both {@code AuthController#register} and migration V36 normalize stored {@code
      * users.email} rows to lowercase (task-backlog item 148), so this method looks the admin user
