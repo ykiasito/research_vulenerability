@@ -51,6 +51,25 @@ class AppUserDetailsServiceTest {
     }
 
     @Test
+    void grantsRoleAdminWhenAdminEmailDiffersOnlyInAsciiCaseFromStoredEmail() {
+        // Regression test for REVISE item 5 (PR#87 REVISE 3, senior-reviewer item 148): the
+        // ADMIN_EMAIL config value is user-typed and may not match the stored (lowercase) row's
+        // exact case, so the ROLE_ADMIN check must still resolve via
+        // adminEmail.toLowerCase(Locale.ROOT).equals(user.getEmail().toLowerCase(Locale.ROOT)),
+        // not a naive equals(). Guards against a future simplification to plain equals() passing
+        // every other test in this file while silently breaking this case.
+        ReflectionTestUtils.setField(service, "adminEmail", "Admin@Example.com");
+        User stored = new User(1L, "admin@example.com", "hash", null);
+        when(userRepository.findByEmail("admin@example.com")).thenReturn(Optional.of(stored));
+
+        UserDetails result = service.loadUserByUsername("admin@example.com");
+
+        assertThat(result.getAuthorities())
+                .extracting(Object::toString)
+                .containsExactlyInAnyOrder("ROLE_USER", "ROLE_ADMIN");
+    }
+
+    @Test
     void doesNotGrantRoleAdminForAUnicodeCaseFoldMismatch() {
         // Regression test for REVISE item 2: equalsIgnoreCase folds Unicode characters (e.g. long s
         // U+017F "ſ") differently than toLowerCase(Locale.ROOT)/Postgres lower(), so under some
