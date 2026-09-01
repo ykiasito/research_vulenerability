@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
  * endpoint (not per-endpoint — confirmed live 2026-08-27, see {@code
  * docs/spec/ghsa-mirror-plan.md} §5-2). Same fixed-gap, no-burst approach as {@code
  * com.vulncheck.app.service.nvd.NvdRateLimiter}, not {@code
- * com.vulncheck.app.service.registry.ExternalRegistryRateLimiter}'s per-key map, since there's
+ * com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter}'s per-key map, since there's
  * only ever one caller/limit here — no per-ecosystem GHSA endpoint to multiplex across.
  *
  * <p><b>Originally added 2026-08-25</b> to pace {@code GhsaVulnerabilitySource}'s old per-item live

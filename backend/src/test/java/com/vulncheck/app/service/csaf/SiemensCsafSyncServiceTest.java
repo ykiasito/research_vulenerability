@@ -13,7 +13,7 @@ import com.vulncheck.app.repository.CsafProductRepository;
 import com.vulncheck.app.repository.CsafProductStatusRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
 import com.vulncheck.app.service.csaf.SiemensCsafSyncService.SyncResult;
-import com.vulncheck.app.service.registry.ExternalRegistryRateLimiter;
+import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.OffsetDateTime;

@@ -155,6 +155,31 @@ public class RestClientConfig {
     }
 
     /**
+     * For CVE.org mirror sync ({@code CveOrgSyncService}) — used only for the one small GitHub
+     * Releases API call ({@code GET .../releases/latest}) that resolves the current baseline/delta
+     * asset URLs. Deliberately NOT the shared {@link #externalApiRestClient} (item 165, 2026-09-01):
+     * that bean is meant to stay a request-path-only egress (10 registries, live NVD, live OSV), and
+     * mixing this sync-time call into it would make it one of the things a future closed-mode branch
+     * would have to carefully carve back out. Same shape as {@link #ghsaSyncRestClient}/{@link
+     * #osvSyncRestClient} (no-auto-redirect, same SSRF-hardening rationale) even though this
+     * particular call has no known redirect in practice, for consistency across the sync clients.
+     * The baseline/delta zip bodies themselves are NOT fetched through this client — {@code
+     * CveOrgSyncService#download} streams them through a plain {@link java.net.URLConnection} with
+     * an unbounded read timeout, same as {@link #ghsaSyncRestClient}/{@link #osvSyncRestClient}'s
+     * large-download callers.
+     */
+    @Bean
+    public RestClient cveOrgSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                noRedirectRequestFactory(Duration.ofSeconds(10), Duration.ofSeconds(30));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (cve.org sync)")
+                .build();
+    }
+
+    /**
      * Points at the Python LLM microservice (Stage1 Tier2/Tier3, Stage4). Longer read timeout
      * than the external-API client — a web_search-enabled Claude call can take well over 10s.
      */

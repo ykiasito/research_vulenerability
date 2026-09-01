@@ -18,7 +18,7 @@ import com.vulncheck.app.repository.ResearchJobItemRepository;
 import com.vulncheck.app.repository.ResearchJobRepository;
 import com.vulncheck.app.service.Stage2VulnerabilityResearchService.Stage2Result;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
-import com.vulncheck.app.service.registry.ExternalRegistryRateLimiter;
+import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.GhsaRateLimiter;
 import com.vulncheck.app.service.vuln.OsvRateLimiter;
 import java.math.BigDecimal;

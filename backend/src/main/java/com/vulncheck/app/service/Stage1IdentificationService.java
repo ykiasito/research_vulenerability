@@ -1,24 +1,15 @@
 package com.vulncheck.app.service;
 
 import com.vulncheck.app.entity.CpeDictionaryEntry;
-import com.vulncheck.app.entity.EcosystemRegistry;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
-import com.vulncheck.app.repository.EcosystemRegistryRepository;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
-import com.vulncheck.app.repository.ResearchJobItemRepository;
-import com.vulncheck.app.service.llm.LlmServiceClient;
 import com.vulncheck.app.service.llm.LlmServiceModels.CandidateDto;
 import com.vulncheck.app.service.llm.LlmServiceModels.DisambiguateResponse;
-import com.vulncheck.app.service.llm.LlmServiceModels.EcosystemCandidateDto;
-import com.vulncheck.app.service.llm.LlmServiceModels.PlatformHintDto;
-import com.vulncheck.app.service.llm.LlmServiceModels.WebSearchIdentifyResponse;
 import com.vulncheck.app.service.nvd.CpeNameVariantCache;
 import com.vulncheck.app.service.nvd.CpeUtils;
 import com.vulncheck.app.service.nvd.NameVariantGenerator;
-import com.vulncheck.app.service.registry.PackageRegistryLookup;
-import com.vulncheck.app.service.registry.RegistryLookupCache;
 import com.vulncheck.app.service.registry.RegistryMatch;
 import com.vulncheck.app.service.registry.RegistryRoutingPolicy;
 import java.math.BigDecimal;
@@ -27,7 +18,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -47,6 +37,16 @@ import org.springframework.stereotype.Service;
  * <p>Tier2/3 both go through {@link UserApiKeyService} for the job owner's own Claude key —
  * if it's not configured, both tiers are silently skipped and this degrades to Tier1-only
  * behavior (same as before Tier2/3 existed), never blocking or failing the item.
+ *
+ * <p>Closed-mode backlog item 166 / {@code docs/spec/closed-mode-plan.md} §3-3 (A3): the Tier1
+ * external-registry fan-out and every Tier2/3 LLM call site used to be interleaved line-by-line
+ * inside this class's own {@code identify}/{@code resolveCandidates}/{@code resolveRegistryMatch}.
+ * Those two seams are now {@link Stage1RegistryIdentification} and {@link Stage1AiArbitration} —
+ * this class keeps only the CPE dictionary path ({@link #localCpeLookup}/{@link #fuzzyMatchCpe}/
+ * {@link #rankCpeCandidates}/{@link #findByNameVariants}/{@link #expandLeadingInitialism} etc.)
+ * plus the orchestration ({@code identify}/{@code resolveCandidates}) that merges all three
+ * signals together — see those two classes' own javadoc for why the orchestration itself, rather
+ * than being fully absorbed into either seam, stays here.
  */
 @Service
 @RequiredArgsConstructor
@@ -170,19 +170,20 @@ public class Stage1IdentificationService {
      */
     private static final String JENKINS_TARGET_SW = "jenkins";
 
-    private final List<PackageRegistryLookup> registryLookups;
-    private final RegistryRoutingPolicy registryRoutingPolicy;
-    private final RegistryLookupCache registryLookupCache;
     private final CpeDictionaryRepository cpeDictionaryRepository;
     private final CpeNameVariantCache cpeNameVariantCache;
     private final IdentifiedProductRepository identifiedProductRepository;
+    // Only ever consulted here for getNvdApiKey (the live NVD CPE keyword-search fallback in
+    // liveNvdCpeLookupWithFallback) — getClaudeApiKey is entirely Stage1RegistryIdentification/
+    // Stage1AiArbitration's concern now, never called from this class.
     private final UserApiKeyService userApiKeyService;
-    private final LlmServiceClient llmServiceClient;
     private final NvdCpeSyncService nvdCpeSyncService;
-    private final EcosystemRegistryRepository ecosystemRegistryRepository;
-    private final ResearchJobItemRepository researchJobItemRepository;
-    private final JobCostBudgetService jobCostBudgetService;
     private final HighConfidenceVerificationService highConfidenceVerificationService;
+    // The two seams closed-mode backlog item 166 extracted — see this class's own javadoc. Both
+    // are the entire "future closed-mode diff" for this file: deleting these two fields plus the
+    // handful of call sites below is the whole cost of dropping the registry/AI paths.
+    private final Stage1RegistryIdentification registryIdentification;
+    private final Stage1AiArbitration aiArbitration;
     @Qualifier("registryLookupExecutor")
     private final Executor registryLookupExecutor;
 
@@ -205,7 +206,8 @@ public class Stage1IdentificationService {
         CompletableFuture<LocalCpeMatches> localCpeFuture = CompletableFuture.supplyAsync(
                 () -> localCpeLookup(item.getVendor(), item.getProductName(), item.getVersion()), registryLookupExecutor);
 
-        RegistryResolution registryResolution = resolveRegistryMatch(item, userId, item.getProductName(), item.getVersion());
+        Stage1RegistryIdentification.RegistryResolution registryResolution =
+                registryIdentification.resolveRegistryMatch(item, userId, item.getProductName(), item.getVersion());
         // A registry match already gives Stage2 vulnerability coverage via OSV/GHSA, so a missing
         // local CPE cache entry isn't worth a ~6.5s (or ~0.7s with an NVD key) live NVD round trip
         // here — NVD-via-CPE is a supplementary Stage2 source in that case, not the only signal.
@@ -216,7 +218,7 @@ public class Stage1IdentificationService {
                 registryEcosystem, registryPackageName, localCpeFuture.join(), item.getVersion());
 
         Optional<IdentifiedProduct> result = (registryResolution.match().isEmpty() && cpeCandidateResult.candidates().isEmpty())
-                ? tryTier3(item, userId)
+                ? aiArbitration.tryTier3(item, userId, this::fuzzyMatchCpe, this::resolveCandidates)
                 : resolveCandidates(item, userId, registryResolution, cpeCandidateResult, IdentifiedProduct.METHOD_STATIC,
                         item.getVendor(), item.getProductName());
 
@@ -241,151 +243,19 @@ public class Stage1IdentificationService {
     }
 
     /**
-     * Tier3: Tier1 found absolutely nothing (common for marketplace/store listing names that
-     * differ from the vendor's real product name). Asks the LLM (with web_search) to resolve the
-     * real vendor/product name, then re-runs Tier1 against that resolved name.
-     *
-     * <p>The LLM is also given the enabled ecosystem list ({@link #ecosystemRegistryRepository})
-     * and may propose {@code ecosystem_candidates} — a guessed exact registry package name per
-     * ecosystem. This is the one place Tier3 is allowed to name a specific package directly
-     * (rather than only a human-readable name fed back into fuzzy lookup): Tier1 already found
-     * literally nothing, so there is no backend-provided candidate list to select from, and a
-     * generic "resolved name" re-query fails whenever the marketplace/official name doesn't
-     * happen to equal the registry's exact slug (e.g. "AWS CLI" vs the real PyPI name "awscli").
-     * Each guess is still verified against the real registry before being trusted — never
-     * persisted on the LLM's say-so alone.
-     */
-    private Optional<IdentifiedProduct> tryTier3(ResearchJobItem item, Long userId) {
-        Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
-        if (apiKey.isEmpty()) {
-            return Optional.empty();
-        }
-        if (!jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER3_WEB_SEARCH_IDENTIFY_COST_USD)) {
-            log.info("Tier3 skipped for item {}: job cost budget exhausted", item.getId());
-            return Optional.empty();
-        }
-
-        List<String> enabledEcosystems = ecosystemRegistryRepository.findByEnabledTrue().stream()
-                .map(EcosystemRegistry::getEcosystem)
-                .toList();
-
-        Optional<WebSearchIdentifyResponse> resolved = llmServiceClient.webSearchIdentify(
-                apiKey.get(), item, enabledEcosystems, JobCostBudgetService.TIER3_WEB_SEARCH_IDENTIFY_COST_USD);
-        if (resolved.isEmpty()) {
-            return Optional.empty();
-        }
-        if (!resolved.get().found()) {
-            applyUnresolvableReasonIfPresent(item, resolved.get().reasoning());
-            return Optional.empty();
-        }
-
-        String resolvedProductName = resolved.get().officialProductName();
-        String resolvedVendor = resolved.get().officialVendor();
-        if (resolvedProductName == null || resolvedProductName.isBlank()) {
-            return Optional.empty();
-        }
-
-        RegistryResolution requeryRegistry = resolveRegistryMatch(item, userId, resolvedProductName, item.getVersion());
-        if (requeryRegistry.match().isEmpty()) {
-            requeryRegistry = new RegistryResolution(
-                    bestEcosystemCandidateMatch(item.getId(), resolved.get().ecosystemCandidates(), item.getVersion()),
-                    false, null);
-        }
-        CpeCandidateResult requeryCpe = fuzzyMatchCpe(resolvedVendor, resolvedProductName, userId,
-                requeryRegistry.match().map(RegistryMatch::ecosystem),
-                requeryRegistry.match().map(RegistryMatch::packageName), item.getVersion());
-
-        if (requeryRegistry.match().isEmpty() && requeryCpe.candidates().isEmpty()) {
-            // Tier3 learned the real name, but re-querying Tier1 with it still found nothing
-            // structural (no ecosystem/cpe) to persist — a known v1 gap, logged for visibility.
-            log.info("Tier3 resolved item {} to '{}' (vendor: {}), but Tier1 re-query still found nothing",
-                    item.getId(), resolvedProductName, resolvedVendor);
-            applyPlatformHintIfPresent(item, resolved.get().platformHint());
-            return Optional.empty();
-        }
-
-        return resolveCandidates(item, userId, requeryRegistry, requeryCpe, IdentifiedProduct.METHOD_LLM_WEB_SEARCH,
-                resolvedVendor, resolvedProductName);
-    }
-
-    /**
-     * Item stays UNIDENTIFIED, but if the AI recognized this as belonging to a distribution
-     * channel this app can't query directly (a marketplace/registry with no adapter here — VS
-     * Code Marketplace, Chrome Web Store, Docker Hub, a Linux distro's own package manager, etc.)
-     * and found a concrete identifier there, save it as a manual-verification hint rather than
-     * silently dropping information the AI already went and found. Generalizes past the VS Code
-     * case: {@code platform}/{@code note} are free text the AI fills in for whatever channel is
-     * actually relevant, not a fixed enum.
-     */
-    private void applyPlatformHintIfPresent(ResearchJobItem item, PlatformHintDto hint) {
-        if (hint == null || hint.identifier() == null || hint.identifier().isBlank()) {
-            return;
-        }
-        String platform = hint.platform() != null && !hint.platform().isBlank() ? hint.platform() : "不明なプラットフォーム";
-        String note = hint.note() != null && !hint.note().isBlank() ? " — " + hint.note() : "";
-        item.setIdentificationHint(platform + ": " + hint.identifier() + note);
-        item.setHintPlatform(platform);
-        item.setHintIdentifier(hint.identifier());
-        researchJobItemRepository.save(item);
-        log.info("Item {} left UNIDENTIFIED but got a manual hint: platform={} identifier={}",
-                item.getId(), hint.platform(), hint.identifier());
-    }
-
-    /**
-     * Item stays UNIDENTIFIED, but when Tier3's web search concluded there's nothing to find at
-     * all (firmware with no public registry, a commercial/proprietary product with no public
-     * source, an internal-only tool, a plain typo with no real matching software, etc.), surface
-     * *why* rather than just leaving a bare UNIDENTIFIED with no explanation — the reasoning was
-     * already computed and previously discarded here. Not a manual-verification hint (there's no
-     * identifier to look up), so this deliberately does not touch hintPlatform/hintIdentifier —
-     * Stage4's hint-based research stays gated on hintIdentifier being present and won't fire on
-     * a reasoning-only explanation.
-     */
-    private void applyUnresolvableReasonIfPresent(ResearchJobItem item, String reasoning) {
-        if (reasoning == null || reasoning.isBlank()) {
-            return;
-        }
-        item.setIdentificationHint("特定不可（AI判定）: " + reasoning);
-        researchJobItemRepository.save(item);
-        log.info("Item {} left UNIDENTIFIED — AI reported why: {}", item.getId(), reasoning);
-    }
-
-    private Optional<RegistryMatch> bestEcosystemCandidateMatch(Long itemId, List<EcosystemCandidateDto> candidates, String version) {
-        if (candidates == null) {
-            return Optional.empty();
-        }
-        for (EcosystemCandidateDto candidate : candidates) {
-            if (candidate.ecosystem() == null || candidate.packageName() == null || candidate.packageName().isBlank()) {
-                continue;
-            }
-            Optional<PackageRegistryLookup> lookup = registryLookups.stream()
-                    .filter(l -> l.ecosystem().equalsIgnoreCase(candidate.ecosystem()))
-                    .findFirst();
-            if (lookup.isEmpty()) {
-                log.warn("AI proposed ecosystem candidate '{}' for item {} which is not an enabled ecosystem — ignored",
-                        candidate.ecosystem(), itemId);
-                continue;
-            }
-            Optional<RegistryMatch> match = safeLookup(lookup.get(), candidate.packageName(), version);
-            if (match.isPresent()) {
-                log.info("AI-guessed ecosystem candidate matched for item {}: ecosystem={} package={}",
-                        itemId, candidate.ecosystem(), candidate.packageName());
-                return match;
-            }
-        }
-        return Optional.empty();
-    }
-
-    /**
      * Merges a registry match and CPE candidate(s) into one {@link IdentifiedProduct}. The common
      * case — at most one CPE candidate — needs no LLM call: it's simply merged with the registry
      * match, exactly as Tier1 always did. Tier2 only fires when the CPE fuzzy search itself
      * returned more than one plausible candidate (genuine ambiguity worth spending a call on).
+     *
+     * <p>Handed to {@link Stage1AiArbitration#tryTier3} as a method reference (see that class's own
+     * javadoc for why) — visible here as a package-private-callable {@code private} method is fine,
+     * since a method reference to it is only ever taken from within this same class.
      */
     private Optional<IdentifiedProduct> resolveCandidates(
             ResearchJobItem item,
             Long userId,
-            RegistryResolution registryResolution,
+            Stage1RegistryIdentification.RegistryResolution registryResolution,
             CpeCandidateResult cpeCandidateResult,
             String methodIfNoDisambiguationNeeded,
             String vendorForCpeRescue,
@@ -408,37 +278,36 @@ public class Stage1IdentificationService {
         if (cpeCandidates.size() > 1) {
             cpeCandidateCount = cpeCandidates.size();
             cpeCandidateVariantDerived = cpeCandidatesAreVariantDerived;
-            Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
-            boolean withinBudget = apiKey.isPresent()
-                    && jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
-            if (withinBudget) {
-                List<CandidateDto> candidateDtos = cpeCandidates.stream()
-                        .map(entry -> new CandidateDto(null, entry.getProduct(), maskCpeVersion(entry.getCpeString()), null, "cpe_dictionary"))
-                        .toList();
-                Optional<DisambiguateResponse> result = llmServiceClient.disambiguate(
-                        apiKey.get(), item, candidateDtos, JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
+            // Building candidateDtos and calling aiArbitration unconditionally (rather than only
+            // when an apiKey/budget check already passed) is behaviorally identical to the
+            // pre-extraction inline check: candidateDtos construction is pure/side-effect-free, and
+            // Stage1AiArbitration#disambiguateCpeCandidates internally applies the exact same
+            // apiKey-presence + job-budget short-circuit before ever calling the LLM, returning
+            // empty for either failure reason — which this method already treats identically to an
+            // LLM call that itself came back empty (both degrade to the same fallback below).
+            List<CandidateDto> candidateDtos = cpeCandidates.stream()
+                    .map(entry -> new CandidateDto(null, entry.getProduct(), maskCpeVersion(entry.getCpeString()), null, "cpe_dictionary"))
+                    .toList();
+            Optional<DisambiguateResponse> result = aiArbitration.disambiguateCpeCandidates(item, userId, candidateDtos);
 
-                if (result.isEmpty()) {
-                    // LLM call failed — degrade to the pre-Tier2 best-effort behavior.
-                    chosenCpe = degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived(
-                            item, cpeCandidates, cpeCandidatesAreRelaxedContainmentDerived);
-                } else if (!result.get().matched()) {
-                    chosenCpe = null;
-                    cpeCandidateCount = null;
-                    cpeCandidateVariantDerived = null;
-                    method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
-                } else if (result.get().selectedIndex() != null
-                        && result.get().selectedIndex() >= 0
-                        && result.get().selectedIndex() < cpeCandidates.size()) {
-                    chosenCpe = cpeCandidates.get(result.get().selectedIndex());
-                    method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
-                    disambiguationConfidence = BigDecimal.valueOf(result.get().confidence());
-                } else {
-                    log.warn("LLM disambiguate returned an invalid selection for item {}: {}", item.getId(), result.get());
-                    chosenCpe = degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived(
-                            item, cpeCandidates, cpeCandidatesAreRelaxedContainmentDerived);
-                }
+            if (result.isEmpty()) {
+                // No AI verdict available at all (no key, exhausted budget, or the LLM call itself
+                // failed) — degrade to the pre-Tier2 best-effort behavior.
+                chosenCpe = degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived(
+                        item, cpeCandidates, cpeCandidatesAreRelaxedContainmentDerived);
+            } else if (!result.get().matched()) {
+                chosenCpe = null;
+                cpeCandidateCount = null;
+                cpeCandidateVariantDerived = null;
+                method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
+            } else if (result.get().selectedIndex() != null
+                    && result.get().selectedIndex() >= 0
+                    && result.get().selectedIndex() < cpeCandidates.size()) {
+                chosenCpe = cpeCandidates.get(result.get().selectedIndex());
+                method = IdentifiedProduct.METHOD_LLM_DISAMBIGUATE;
+                disambiguationConfidence = BigDecimal.valueOf(result.get().confidence());
             } else {
+                log.warn("LLM disambiguate returned an invalid selection for item {}: {}", item.getId(), result.get());
                 chosenCpe = degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived(
                         item, cpeCandidates, cpeCandidatesAreRelaxedContainmentDerived);
             }
@@ -489,7 +358,7 @@ public class Stage1IdentificationService {
                     item.getId(), registryMatch.get().ecosystem(), registryMatch.get().packageName());
         } else if (registryMatch.isPresent() && chosenCpe == null) {
             RegistryMatch weakMatch = registryMatch.get();
-            Optional<DisambiguateResponse> verdict = verifyWeakRegistryMatchWithAi(item, userId, weakMatch);
+            Optional<DisambiguateResponse> verdict = aiArbitration.verifyWeakRegistryMatchWithAi(item, userId, weakMatch);
             if (verdict.isEmpty()) {
                 // REVISE item 3 (senior review 2026-08-26, job 38): no Claude key configured (or the
                 // LLM call itself failed), so the AI-verdict path below never ran — but that doesn't
@@ -567,9 +436,27 @@ public class Stage1IdentificationService {
                 log.info("Dropping CPE {} for item {} — it only passed the target_sw gate via the "
                         + "now-distrusted registry match's ecosystem context, so it cannot stand on its own",
                         chosenCpe.getCpeString(), item.getId());
+                CpeDictionaryEntry discardedCpe = chosenCpe;
                 chosenCpe = null;
                 cpeCandidateCount = null;
                 cpeCandidateVariantDerived = null;
+                // Backlog item 176 (job 203 root-cause): discardedCpe only ever won the earlier
+                // ranking because of the now-distrusted registry match's own ecosystem context — but
+                // the OTHER candidates in the same cpeCandidates pool never depended on that context to
+                // get into the pool in the first place (they're already-ranked, containment-passing
+                // hits). Re-checking them against the same bare gate and taking the best surviving one
+                // (list order = the existing rank, same "first in list" selection {@link
+                // #degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived} already uses elsewhere)
+                // catches the case where a genuinely correct candidate (e.g. openssl:openssl) was
+                // sitting right there the whole time, instead of silently going UNIDENTIFIED.
+                chosenCpe = selectFallbackCpeCandidateAfterRegistryDistrust(discardedCpe, cpeCandidates);
+                if (chosenCpe != null) {
+                    log.info("Falling back to remaining CPE candidate {} for item {} after discarding {} — "
+                            + "it independently passes the bare target_sw gate",
+                            chosenCpe.getCpeString(), item.getId(), discardedCpe.getCpeString());
+                    cpeCandidateCount = cpeCandidates.size();
+                    cpeCandidateVariantDerived = cpeCandidatesAreVariantDerived;
+                }
             }
         }
 
@@ -725,28 +612,6 @@ public class Stage1IdentificationService {
     }
 
     /**
-     * Reuses the Tier2 disambiguate endpoint with a single registry-match candidate — same
-     * anti-hallucination shape (the LLM only ever selects/rejects a backend-provided candidate,
-     * never invents a new package) as CPE disambiguation, just applied to a weak registry hit
-     * instead. Returns empty when no verdict is available at all (no Claude key, or the call
-     * itself failed) — callers treat that as "degrade to the pre-existing best-effort trust",
-     * distinct from an actual {@code matched=false} rejection.
-     */
-    private Optional<DisambiguateResponse> verifyWeakRegistryMatchWithAi(ResearchJobItem item, Long userId, RegistryMatch match) {
-        Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
-        if (apiKey.isEmpty()) {
-            return Optional.empty();
-        }
-        if (!jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD)) {
-            log.info("Weak registry match AI verification skipped for item {}: job cost budget exhausted", item.getId());
-            return Optional.empty();
-        }
-        CandidateDto candidate = new CandidateDto(match.ecosystem(), match.packageName(), null, match.purl(), "registry");
-        return llmServiceClient.disambiguate(
-                apiKey.get(), item, List.of(candidate), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
-    }
-
-    /**
      * REVISE item 1 (senior review, PR #51): the multi-candidate branch of {@link
      * #resolveCandidates} has always degraded to {@code cpeCandidates.get(0)} whenever no AI verdict
      * arbitrated among the pool (no key, exhausted budget, a failed LLM call, or an invalid
@@ -771,6 +636,38 @@ public class Stage1IdentificationService {
         return null;
     }
 
+    /**
+     * Backlog item 176 (job 203 root-cause): after a registry-distrust event discards {@code
+     * discardedCpe} (the previously-chosen CPE, which only passed the target_sw gate via the
+     * now-distrusted registry match's own ecosystem context — see the {@code trustRegistryMatch}
+     * block in {@link #resolveCandidates}), re-checks the rest of the same {@code cpeCandidates}
+     * pool against the bare (no-ecosystem-context) gate and returns the best surviving one.
+     *
+     * <p>{@code cpeCandidates} is already in ranked order (see {@link #rankAndGate}), so — same
+     * "first candidate wins" selection {@link #degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived}
+     * already uses for its own best-effort degrade — this simply walks the list in order and takes
+     * the first (i.e. best-ranked) one that isn't {@code discardedCpe} and independently passes the
+     * bare gate. Deliberately does not touch the ranking itself (a real but separate, riskier
+     * concern — see backlog item 176's own scope note): the premature-context ranking that let
+     * {@code discardedCpe} outrank a correct candidate in the first place is left alone here.
+     *
+     * @return the best surviving candidate, or {@code null} if none of the others pass the bare gate
+     *      either — the caller then correctly falls through to the existing UNIDENTIFIED outcome.
+     */
+    private CpeDictionaryEntry selectFallbackCpeCandidateAfterRegistryDistrust(
+            CpeDictionaryEntry discardedCpe, List<CpeDictionaryEntry> cpeCandidates) {
+        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "");
+        for (CpeDictionaryEntry candidate : cpeCandidates) {
+            if (candidate == discardedCpe) {
+                continue;
+            }
+            if (passesTargetSwGate(candidate, bareContext)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
     /** The (possibly AI-checked) result of {@link #resolveSingleCpeCandidate}: {@code aiConfidence}
      *  is non-null only when an AI call actually determined this candidate was correct, so the
      *  caller can attribute the displayed confidence/method to the real AI verdict rather than a
@@ -787,18 +684,20 @@ public class Stage1IdentificationService {
      * positives (senior review, 2026-08-25) showed both directions produce real wrong single-candidate
      * matches (e.g. "VM Player" -&gt; {@code vlc_media_player}, "AD Manager" -&gt; {@code
      * ams_device_manager}). Forces the same anti-hallucination AI check {@link
-     * #verifyWeakRegistryMatchWithAi} already uses for a weak registry hit, applied to this CPE case
-     * instead — but unlike that method, a missing verdict here (no key, exhausted budget, or the call
-     * itself failing) drops the candidate entirely rather than degrading to trusting it: today's real
-     * -world outcome for these items is UNIDENTIFIED, and dropping preserves exactly that
-     * non-regression baseline instead of risking a confident wrong CPE with nothing to catch it.
+     * Stage1AiArbitration#verifyWeakRegistryMatchWithAi} already uses for a weak registry hit,
+     * applied to this CPE case instead — but unlike that method, a missing verdict here (no key,
+     * exhausted budget, or the call itself failing) drops the candidate entirely rather than
+     * degrading to trusting it: today's real-world outcome for these items is UNIDENTIFIED, and
+     * dropping preserves exactly that non-regression baseline instead of risking a confident wrong
+     * CPE with nothing to catch it.
      */
     private Optional<ChosenCpe> resolveSingleCpeCandidate(
             ResearchJobItem item, Long userId, CpeDictionaryEntry candidate, boolean variantDerived) {
         if (!variantDerived) {
             return Optional.of(new ChosenCpe(candidate, null));
         }
-        Optional<DisambiguateResponse> verdict = verifyVariantDerivedCpeMatchWithAi(item, userId, candidate);
+        Optional<DisambiguateResponse> verdict = aiArbitration.verifyVariantDerivedCpeMatchWithAi(
+                item, userId, candidate, maskCpeVersion(candidate.getCpeString()));
         if (verdict.isEmpty()) {
             log.info("No AI verification available for name-variant-derived CPE candidate on item {} ({}) — "
                     + "dropping it rather than trusting an unverified guess", item.getId(), candidate.getCpeString());
@@ -811,28 +710,6 @@ public class Stage1IdentificationService {
         }
         log.info("AI confirmed name-variant-derived CPE candidate for item {} ({})", item.getId(), candidate.getCpeString());
         return Optional.of(new ChosenCpe(candidate, BigDecimal.valueOf(verdict.get().confidence())));
-    }
-
-    /**
-     * Reuses the Tier2 disambiguate endpoint with a single name-variant-derived CPE candidate — same
-     * anti-hallucination shape as {@link #verifyWeakRegistryMatchWithAi}, applied to a CPE match
-     * instead of a registry one. Callers must NOT degrade to trusting the match when this returns
-     * empty (see {@link #resolveSingleCpeCandidate}'s javadoc for why) — that's the one place this
-     * intentionally differs from the registry-match verification it's modeled on.
-     */
-    private Optional<DisambiguateResponse> verifyVariantDerivedCpeMatchWithAi(ResearchJobItem item, Long userId, CpeDictionaryEntry candidate) {
-        Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
-        if (apiKey.isEmpty()) {
-            return Optional.empty();
-        }
-        if (!jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD)) {
-            log.info("Variant-derived CPE candidate AI verification skipped for item {}: job cost budget exhausted", item.getId());
-            return Optional.empty();
-        }
-        CandidateDto candidateDto = new CandidateDto(
-                null, candidate.getProduct(), maskCpeVersion(candidate.getCpeString()), null, "cpe_dictionary_name_variant");
-        return llmServiceClient.disambiguate(
-                apiKey.get(), item, List.of(candidateDto), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
     }
 
     /**
@@ -870,15 +747,6 @@ public class Stage1IdentificationService {
     }
 
     /**
-     * Outcome of {@link #resolveRegistryMatch}: {@code aiVerified} tells {@link #resolveCandidates}
-     * whether this already went through an AI plausibility check (arbitration among multiple
-     * same-named registry candidates), so it can skip its own single-candidate weak-match check
-     * rather than spending a second, redundant LLM call on an already-answered question.
-     */
-    private record RegistryResolution(Optional<RegistryMatch> match, boolean aiVerified, BigDecimal aiConfidence) {
-    }
-
-    /**
      * Outcome of {@link #resolveCpeCandidates}: {@code variantDerived} tells {@link
      * #resolveCandidates} whether every entry in {@code candidates} came from the name-variant
      * search ({@link #findByNameVariants}) rather than a literal dictionary/live-NVD hit — OR
@@ -906,193 +774,11 @@ public class Stage1IdentificationService {
      * meaning/behavior everywhere else (the single-candidate branch, {@link
      * #resolveSingleCpeCandidate}) rather than repurposed.
      */
-    private record CpeCandidateResult(
+    // Package-private (not private): referenced from Stage1AiArbitration's CpeCandidateLookup/
+    // IdentificationMerger functional-interface parameters (see that class's own javadoc for why
+    // tryTier3 needs method-reference callbacks rather than a constructor-injected back-reference).
+    record CpeCandidateResult(
             List<CpeDictionaryEntry> candidates, boolean variantDerived, boolean relaxedContainmentDerived) {
-    }
-
-    /**
-     * Tier1 static registry lookup, now with the same AI-arbitration pattern CPE Tier2 already
-     * had: a generic/common product name (e.g. "commons-io", "phoenix", "http") can get a match
-     * from *multiple* registries simultaneously — previously this just took the max-confidence one
-     * with no arbitration, so ties/near-ties silently went to whichever registry client happened to
-     * be injected first. Observed live repeatedly, including one case where the AI correctly
-     * rejected a wrong npm hit but the CPE-rescue fallback then landed on yet *another* wrong
-     * generic-name collision from a different registry that was never even considered. When more
-     * than one registry matches, this asks the LLM to pick (or reject all) among them using the
-     * item's usage_text — same anti-hallucination shape as CPE Tier2 (index-select only, never
-     * invents a new package) and the same {@code disambiguate} endpoint/cost as the existing
-     * single-candidate weak-match check, just applied across registries instead of within one.
-     */
-    private RegistryResolution resolveRegistryMatch(ResearchJobItem item, Long userId, String productName, String version) {
-        // Narrowed by RegistryRoutingPolicy *before* any request is issued: each registry's own
-        // naming grammar (npm's @scope/name, Maven's groupId:artifactId, a Go module's host.tld/path,
-        // Composer's vendor/package, ...) can already rule out most registries for a given name with
-        // zero network calls — measured live (job 35): Stage1 spent ~99% of its time on rate-limiter
-        // waits, with Maven Central alone accounting for 32 minutes, much of it on names that could
-        // never have been a Maven coordinate in the first place. Falls back to asking everyone when
-        // the routing rule can't narrow anything down (see RegistryRoutingPolicy's own javadoc).
-        List<PackageRegistryLookup> routedLookups = registryRoutingPolicy.route(productName, registryLookups);
-
-        // Dispatched concurrently, not via a sequential stream: each registry is an independent
-        // several-second network round trip, so scanning them one at a time serializes the
-        // slowest registry's latency behind every other one. Measured live: this was the single
-        // largest contributor to per-item processing time (see registryLookupExecutor's javadoc).
-        List<CompletableFuture<Optional<RegistryMatch>>> futures = routedLookups.stream()
-                .map(lookup -> CompletableFuture.supplyAsync(() -> safeLookup(lookup, productName, version), registryLookupExecutor))
-                .toList();
-        List<RegistryMatch> matches = futures.stream()
-                .map(CompletableFuture::join)
-                .flatMap(Optional::stream)
-                .toList();
-
-        if (matches.isEmpty()) {
-            return new RegistryResolution(Optional.empty(), false, null);
-        }
-        if (matches.size() == 1) {
-            return new RegistryResolution(Optional.of(matches.get(0)), false, null);
-        }
-
-        Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
-        boolean withinBudget = apiKey.isPresent()
-                && jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
-        if (!withinBudget) {
-            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
-        }
-
-        List<CandidateDto> candidateDtos = matches.stream()
-                .map(m -> new CandidateDto(m.ecosystem(), m.packageName(), null, m.purl(), "registry"))
-                .toList();
-        Optional<DisambiguateResponse> result = llmServiceClient.disambiguate(
-                apiKey.get(), item, candidateDtos, JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
-
-        if (result.isEmpty()) {
-            // LLM call failed — degrade to the pre-arbitration best-effort behavior.
-            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
-        }
-        if (!result.get().matched()) {
-            log.info("AI rejected all {} same-named registry candidates for item {} ('{}') as implausible "
-                    + "given the usage text", matches.size(), item.getId(), productName);
-            return new RegistryResolution(Optional.empty(), true, null);
-        }
-        Integer selectedIndex = result.get().selectedIndex();
-        if (selectedIndex == null || selectedIndex < 0 || selectedIndex >= matches.size()) {
-            log.warn("LLM registry arbitration returned an invalid selection for item {}: {}", item.getId(), result.get());
-            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
-        }
-        RegistryMatch selected = matches.get(selectedIndex);
-        log.info("AI arbitrated {} same-named registry candidates for item {} ('{}') -> selected ecosystem={} package={}",
-                matches.size(), item.getId(), productName, selected.ecosystem(), selected.packageName());
-        return new RegistryResolution(Optional.of(selected), true, BigDecimal.valueOf(result.get().confidence()));
-    }
-
-    /** Margin used by {@link #maxConfidenceMatch} to decide whether several matches are "tied" —
-     *  registry clients only ever emit confidence from a small, discrete set of constants (0.4/0.5
-     *  unconfirmed, 0.95 version-confirmed — see e.g. {@link com.vulncheck.app.service.registry.RegistryLookupCache}'s
-     *  VERSION_CONFIRMED/UNCONFIRMED_CONFIDENCE), so in practice this margin only ever collapses
-     *  exact ties, but is expressed as a small tolerance rather than {@code equals} in case a future
-     *  registry client's confidence is computed rather than a fixed constant. */
-    private static final BigDecimal REGISTRY_MATCH_TIE_MARGIN = new BigDecimal("0.05");
-
-    /**
-     * Maps an OSV/registry ecosystem to the {@code usage_text} keywords that indicate it —
-     * deliberately conservative, multi-character phrases (never a bare "go" or "pub", which occur
-     * as ordinary English substrings, e.g. "go"-inside-"django"/"algorithm") so a hit here is real
-     * signal, not noise. Only consulted by {@link #maxConfidenceMatch} as a tie-break among already-
-     * tied top candidates — see that method's javadoc for why this can never override a single clear
-     * winner.
-     *
-     * <p>REVISE item 2 (senior review 2026-08-29, round 1): values are pre-compiled word-boundary {@link
-     * Pattern}s, not plain strings matched via {@link String#contains}. Plain substring containment
-     * let short keywords false-positive inside unrelated words — "JavaScript" contains maven's
-     * "java", "CI pipeline" contains pypi's "pip", "hex editor" contains hex's "hex",
-     * "sourceforge.net" contains nuget's ".net", "Gemini" contains rubygems' "gem" — any of which
-     * could flip a genuine npm/maven (or similar) tie to the wrong ecosystem. {@code
-     * (?<![a-z0-9])keyword(?![a-z0-9])} requires the keyword not be immediately adjacent to another
-     * alphanumeric character on either side, so it only matches a real standalone word/token, not a
-     * substring inside a longer one — {@link Pattern#quote} keeps punctuation-bearing keywords
-     * ({@code .net}, {@code c#}) literal rather than being interpreted as regex metacharacters.
-     */
-    private static final java.util.Map<String, List<Pattern>> ECOSYSTEM_USAGE_TEXT_KEYWORDS =
-            buildEcosystemUsageTextKeywordPatterns();
-
-    private static java.util.Map<String, List<Pattern>> buildEcosystemUsageTextKeywordPatterns() {
-        java.util.Map<String, List<String>> rawKeywords = java.util.Map.ofEntries(
-                java.util.Map.entry("pypi", List.of("pypi", "pip")),
-                java.util.Map.entry("npm", List.of("npm", "node")),
-                java.util.Map.entry("rubygems", List.of("gem", "ruby")),
-                java.util.Map.entry("crates.io", List.of("crate", "rust", "cargo")),
-                java.util.Map.entry("packagist", List.of("packagist", "composer", "php")),
-                java.util.Map.entry("hex", List.of("hex", "elixir")),
-                java.util.Map.entry("pub", List.of("pub.dev", "dart", "flutter")),
-                java.util.Map.entry("maven", List.of("maven", "gradle", "java")),
-                java.util.Map.entry("nuget", List.of("nuget", ".net", "c#")),
-                java.util.Map.entry("go", List.of("go get", "golang")));
-        java.util.Map<String, List<Pattern>> compiled = new java.util.LinkedHashMap<>();
-        rawKeywords.forEach((ecosystem, keywords) -> compiled.put(ecosystem, keywords.stream()
-                .map(keyword -> Pattern.compile("(?<![a-z0-9])" + Pattern.quote(keyword) + "(?![a-z0-9])"))
-                .toList()));
-        return java.util.Map.copyOf(compiled);
-    }
-
-    /**
-     * golden-300 fix (2026-08-29, item 2 "cross-registry same-name collision"): when the AI
-     * disambiguation budget is exhausted (or unavailable), this degrades to picking the
-     * highest-confidence registry match with no other signal — which silently picks whichever
-     * registry happened to be queried/injected first among several equally-confident same-named
-     * matches (numpy, jekyll, redis, phoenix, phoenix_live_view, http all mis-routed this way in
-     * golden-300). {@code item.usage_text} is already stored and available but was never consulted
-     * here at all. Deliberately narrow: only ever consulted when {@code matches} has more than one
-     * candidate within {@link #REGISTRY_MATCH_TIE_MARGIN} of the top confidence — a single clear
-     * leader (the overwhelmingly common case, and the only case reachable when {@code matches} has
-     * exactly one entry in the first place, per this method's only caller) is returned exactly as
-     * before, unaffected by this fallback. Even among tied candidates, this only overrides the
-     * default max-confidence pick when the usage text narrows the tie down to exactly one
-     * ecosystem — 0 or 2+ surviving keyword hits leaves the original (arbitrary but unchanged)
-     * max-confidence behavior in place, so this can only ever narrow an already-ambiguous pick, not
-     * introduce a new wrong one.
-     */
-    private RegistryMatch maxConfidenceMatch(List<RegistryMatch> matches, String usageText) {
-        RegistryMatch best = matches.stream().max((a, b) -> a.confidence().compareTo(b.confidence())).orElseThrow();
-        List<RegistryMatch> tied = matches.stream()
-                .filter(m -> m.confidence().subtract(best.confidence()).abs().compareTo(REGISTRY_MATCH_TIE_MARGIN) <= 0)
-                .toList();
-        if (tied.size() <= 1 || usageText == null || usageText.isBlank()) {
-            return best;
-        }
-        String normalizedUsageText = usageText.toLowerCase(java.util.Locale.ROOT);
-        List<RegistryMatch> usageTextNarrowed = tied.stream()
-                .filter(m -> usageTextMentionsEcosystem(normalizedUsageText, m.ecosystem()))
-                .toList();
-        if (usageTextNarrowed.size() == 1) {
-            log.info("Tie-breaking {} equally-confident same-named registry matches using usage_text -> "
-                    + "ecosystem={} package={}", tied.size(), usageTextNarrowed.get(0).ecosystem(),
-                    usageTextNarrowed.get(0).packageName());
-            return usageTextNarrowed.get(0);
-        }
-        return best;
-    }
-
-    /** @param normalizedUsageText already lower-cased by the caller. */
-    private boolean usageTextMentionsEcosystem(String normalizedUsageText, String ecosystem) {
-        List<Pattern> patterns = ECOSYSTEM_USAGE_TEXT_KEYWORDS.get(ecosystem);
-        if (patterns == null) {
-            return false;
-        }
-        return patterns.stream().anyMatch(p -> p.matcher(normalizedUsageText).find());
-    }
-
-    /** Routes every registry call through {@link RegistryLookupCache} (keyed on ecosystem+productName,
-     *  not version — see that class's javadoc) so a product name repeated across many CSV rows, the
-     *  common case at real inventory scale, costs at most one request per registry instead of one
-     *  per row. */
-    private Optional<RegistryMatch> safeLookup(PackageRegistryLookup lookup, String productName, String version) {
-        try {
-            return registryLookupCache.get(lookup.ecosystem(), productName, version,
-                    () -> lookup.lookup(productName, version));
-        } catch (Exception e) {
-            log.warn("Registry lookup {} threw unexpectedly for product {}", lookup.getClass().getSimpleName(), productName, e);
-            return Optional.empty();
-        }
     }
 
     /**

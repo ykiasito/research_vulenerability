@@ -9,12 +9,12 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.TestPropertySource;
 
 /**
- * Creates the full 400-item AI-included live-cost run (approved 2026-08-29 against a $3.40 real
- * Claude balance, spending risk $2-3 acknowledged) against the corrected {@code real-400.csv}
- * (usage_text round-robin bug fixed 2026-08-25). Owned by user_id=5, which has both an
- * {@code nvd} and a {@code claude} key configured in {@code user_secrets} as of 2026-08-29 (see
- * {@link RealAiValidationJobCreator} for the earlier 150-item cost-measurement run against the
- * same user).
+ * Creates the full 400-item AI-included live-cost run (approved 2026-08-29 against the
+ * then-available Claude balance, with the spending risk acknowledged) against the corrected
+ * {@code real-400.csv} (usage_text round-robin bug fixed 2026-08-25). Owned by user_id=5, which
+ * has both an {@code nvd} and a {@code claude} key configured in {@code user_secrets} as of
+ * 2026-08-29 (see {@link RealAiValidationJobCreator} for the earlier 150-item cost-measurement
+ * run against the same user).
  *
  * <p>Static-only baseline for comparison: job 37 (400 items, 387 IDENTIFIED / 13 UNIDENTIFIED, zero
  * AI cost) — see {@code docs/spec/nfr-status-2026-08.md} section 1.
