@@ -264,6 +264,52 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void fallsBackToAnotherCpeCandidateWhenTheOnlyOneDiscardedByRegistryDistrustNeededItsEcosystemContext() {
+        // Backlog item 176 (job 203 root-cause): an unconfirmed crates.io "OpenSSL" match (really the
+        // unrelated Rust FFI binding crate sfackler:openssl) sits alongside the correct openssl:openssl
+        // CPE candidate in the same pool. Before the registry match's trustworthiness is known,
+        // resolveCpeCandidates ranks with crates.io's ecosystem context in play, which lets the
+        // target_sw=rust candidate's targetSwMatchesEcosystem tie-break outrank the correct one (both
+        // exact-slug-match "openssl"). The registry match is then correctly judged untrustworthy
+        // (exactVersionConfirmed=false) and the wrongly-top-ranked CPE is correctly re-gated and
+        // dropped for only surviving via that now-distrusted ecosystem context — but the other,
+        // actually-correct candidate is still sitting right there in the same pool and independently
+        // passes the bare (no-ecosystem) gate, so it must be picked up as a fallback instead of the
+        // item going UNIDENTIFIED.
+        PackageRegistryLookup cratesLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch(
+                        "crates.io", "openssl", "pkg:cargo/openssl@0.10.55", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "crates.io";
+            }
+        };
+        CpeDictionaryEntry correctOpenssl =
+                cpeEntry("cpe:2.3:a:openssl:openssl:3.3.1:*:*:*:*:*:*:*", "openssl");
+        CpeDictionaryEntry unrelatedRustBinding =
+                cpeEntry("cpe:2.3:a:sfackler:openssl:0.10.55:*:*:*:*:rust:*:*", "openssl");
+        unrelatedRustBinding.setTargetSwValues(java.util.Set.of("rust"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(unrelatedRustBinding, correctOpenssl));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("OpenSSL");
+        item.setVersion("3.3.1");
+        Optional<IdentifiedProduct> result = service(List.of(cratesLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        // The distrusted registry match must not be attached — only the fallback CPE stands on its own.
+        assertThat(result.get().getEcosystem()).isNull();
+        assertThat(result.get().getPackageName()).isNull();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:openssl:openssl:3.3.1:*:*:*:*:*:*:*");
+    }
+
+    @Test
     void unconfirmedVersionRegistryMatchIsStillUsedWhenNoCpeCorroborationExists() {
         // Same weak signal as above, but with no CPE candidate at all — still the only signal
         // available, so it's used as a best-effort fallback (unchanged from prior behavior).
