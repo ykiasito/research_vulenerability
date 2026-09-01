@@ -97,12 +97,17 @@ public class Stage4WebSearchResearchService {
                 continue;
             }
             String dedupeId = scopedId(finding.identifier(), packageName, item.getId());
+            // Task-backlog item 104: citation_url is LLM free text with no scheme allowlist upstream —
+            // a prompt-injected javascript:/data: URL would otherwise become a live XSS link when
+            // jobs/detail.html renders it as th:href. Dropped to null (not escaped/shown as text) per
+            // this app's existing "silence over a wrong guess" stance for low-trust LLM output.
+            String citationUrl = SafeUrlValidator.sanitizeHttpUrl(finding.citationUrl());
             // insertIfAbsentAndGetId (not upsertAndGetId): this is a low-trust LLM finding, so it
             // must never overwrite content an authoritative Stage2 source (NVD/OSV/GHSA) already
             // wrote for the same CVE/GHSA id. It still gets linked to this item below either way.
             Long vulnerabilityId = vulnerabilityRepository.insertIfAbsentAndGetId(
-                    dedupeId, SOURCE, finding.severity(), finding.description(), finding.citationUrl(), finding.fixedVersion());
-            jobItemVulnerabilityRepository.linkIfAbsent(item.getId(), vulnerabilityId, SOURCE, finding.citationUrl());
+                    dedupeId, SOURCE, finding.severity(), finding.description(), citationUrl, finding.fixedVersion());
+            jobItemVulnerabilityRepository.linkIfAbsent(item.getId(), vulnerabilityId, SOURCE, citationUrl);
             persisted++;
         }
 

@@ -1,7 +1,10 @@
 package com.vulncheck.app.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -103,6 +106,25 @@ class AdminControllerTest {
         verify(nvdCpeSyncService).syncAllAndRelease(Optional.empty());
 
         release.countDown();
+    }
+
+    @Test
+    void cpeFullSyncReleasesTheGuardWhenTheWorkerThreadFailsToStart() {
+        // Regression test for task-backlog item 136: if starting the worker thread itself throws
+        // (e.g. native-thread exhaustion) after tryBeginFullSync() already won the slot,
+        // syncAllAndRelease()'s own finally-release never runs — cpeFullSync() must release the
+        // guard itself instead of leaving fullSyncRunning stuck true until a restart.
+        when(nvdCpeSyncService.tryBeginFullSync()).thenReturn(true);
+        AdminController controller = spy(newController());
+        doThrow(new RuntimeException("unable to create native thread")).when(controller).startFullSyncWorker();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.cpeFullSync(model);
+
+        assertThat(view).isEqualTo("admin/cpe-dictionary");
+        assertThat(model.getAttribute("result")).asString().contains("失敗しました");
+        verify(nvdCpeSyncService, times(1)).releaseFullSyncGuard();
+        verify(nvdCpeSyncService, never()).syncAllAndRelease(Optional.empty());
     }
 
     @Test

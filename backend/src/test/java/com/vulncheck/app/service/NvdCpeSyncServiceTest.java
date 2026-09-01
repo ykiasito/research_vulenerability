@@ -89,6 +89,20 @@ class NvdCpeSyncServiceTest {
     }
 
     @Test
+    void releaseFullSyncGuardFreesTheSlotWithoutRunningASync() {
+        // Stand-in for a caller whose worker-thread spawn/start itself failed after winning the
+        // slot: syncAllAndRelease() (and its own finally-release) never runs, so this method is
+        // the only way the slot gets freed again (task-backlog items 81/136/141).
+        assertThat(service.tryBeginFullSync()).isTrue();
+
+        service.releaseFullSyncGuard();
+
+        assertThat(service.tryBeginFullSync())
+                .as("the slot must be free again after an explicit release")
+                .isTrue();
+    }
+
+    @Test
     void syncReportsIncompleteWhenAPageFetchFailsPartWayThrough() {
         // fetchPage() treats a failed HTTP request as an empty result (caught, logged, returns
         // null) rather than throwing — sync() must not report that as a clean finish, since the
