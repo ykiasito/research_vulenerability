@@ -56,9 +56,21 @@ public class UserApiKeyService {
      * key. None of these are errors — an operator who hasn't set both up yet just gets the
      * unkeyed (slower) behavior that already existed before this method.
      *
+     * <p>Looks the admin user up case-insensitively via {@link
+     * UserRepository#findByEmailIgnoreCase}, matching how {@code AppUserDetailsService} already
+     * grants ROLE_ADMIN via {@code adminEmail.equalsIgnoreCase(user.getEmail())} — {@code
+     * AuthController#register} stores the email as typed, not lowercased, so an {@code
+     * ADMIN_EMAIL} that differs from the stored row only in case must still resolve here, or admin
+     * login would work while this method silently found no user (task-backlog item 142 REVISE R1).
+     * If two rows exist that differ only in case (an edge case the app doesn't otherwise prevent),
+     * {@link UserRepository#findByEmailIgnoreCase} can throw {@code
+     * IncorrectResultSizeDataAccessException}; the existing {@code catch (Exception)} below
+     * degrades that to {@link Optional#empty()} the same as any other lookup failure — intended
+     * behavior, not a bug.
+     *
      * <p>Also falls back to {@link Optional#empty()} (logging a warning rather than throwing) if
      * the lookup or decryption itself fails — e.g. a transient {@code DataAccessException} from
-     * {@link UserRepository#findByEmail} or a decrypt failure from {@link
+     * {@link UserRepository#findByEmailIgnoreCase} or a decrypt failure from {@link
      * SecretEncryptionService#decrypt} (key rotation, AAD mismatch, row corruption). This method's
      * only caller ({@code CpeDictionaryScheduledResync}) runs unattended on a Sunday-night cron,
      * so a transient failure here must degrade to the unkeyed path rather than abort the caller
@@ -69,7 +81,7 @@ public class UserApiKeyService {
             return Optional.empty();
         }
         try {
-            return userRepository.findByEmail(adminEmail)
+            return userRepository.findByEmailIgnoreCase(adminEmail)
                     .flatMap(user -> getNvdApiKey(user.getId()));
         } catch (Exception e) {
             log.warn("Failed to resolve the admin's NVD key — falling back to unkeyed", e);
