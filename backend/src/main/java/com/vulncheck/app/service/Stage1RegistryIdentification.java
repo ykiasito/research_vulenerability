@@ -1,10 +1,6 @@
 package com.vulncheck.app.service;
 
 import com.vulncheck.app.entity.ResearchJobItem;
-import com.vulncheck.app.service.llm.LlmServiceClient;
-import com.vulncheck.app.service.llm.LlmServiceModels.CandidateDto;
-import com.vulncheck.app.service.llm.LlmServiceModels.DisambiguateResponse;
-import com.vulncheck.app.service.llm.LlmServiceModels.EcosystemCandidateDto;
 import com.vulncheck.app.service.registry.PackageRegistryLookup;
 import com.vulncheck.app.service.registry.RegistryLookupCache;
 import com.vulncheck.app.service.registry.RegistryMatch;
@@ -27,19 +23,14 @@ import org.springframework.stereotype.Component;
  * Closed-mode backlog item 166 / {@code docs/spec/closed-mode-plan.md} §3-3 (A3): the Tier1
  * external-registry half of what used to be inlined, line-by-line, inside {@link
  * Stage1IdentificationService}. Everything here talks to one of the 10 registry clients ({@link
- * PackageRegistryLookup} implementations) or arbitrates among several same-named registry hits —
- * the whole point of pulling it into its own class is that, in the future closed-processing-mode
- * branch (see the plan doc), this entire file — along with the 10 registry clients themselves —
- * is deleted outright, and {@link Stage1IdentificationService} only has to lose its two
- * constructor arguments for this class and {@link Stage1AiArbitration}, plus a handful of call
- * sites in {@code identify}/{@code resolveCandidates}, rather than having registry logic
- * hand-picked back out of a single interleaved method.
+ * PackageRegistryLookup} implementations) or arbitrates among several same-named registry hits.
  *
- * <p>Depends on {@link LlmServiceClient} for exactly one thing: arbitrating among several
- * same-named registry candidates via the same {@code disambiguate} endpoint CPE Tier2 uses (see
- * {@link #resolveRegistryMatch}). That's fine even though the Java AI path is also deleted in
- * closed mode — this whole class dies in the same changeset, so there's nothing left depending on
- * {@code llmServiceRestClient}/{@code LlmServiceClient} once both are gone.
+ * <p>Closed-mode B2 (docs/spec/closed-mode-plan.md §9-2): this class used to depend on {@code
+ * LlmServiceClient} for exactly one thing — arbitrating among several same-named registry
+ * candidates via Claude when more than one matched. Closed mode never has a Claude API key to call
+ * with, so {@link #resolveRegistryMatch} now always takes the exact fallback it already took
+ * whenever no key was configured: {@link #maxConfidenceMatch}'s usage_text tie-break among the
+ * candidates, with no AI arbitration step at all.
  */
 @Component
 @RequiredArgsConstructor
@@ -98,34 +89,23 @@ public class Stage1RegistryIdentification {
     private final List<PackageRegistryLookup> registryLookups;
     private final RegistryRoutingPolicy registryRoutingPolicy;
     private final RegistryLookupCache registryLookupCache;
-    private final UserApiKeyService userApiKeyService;
-    private final LlmServiceClient llmServiceClient;
-    private final JobCostBudgetService jobCostBudgetService;
     @Qualifier("registryLookupExecutor")
     private final Executor registryLookupExecutor;
 
     /**
-     * Outcome of {@link #resolveRegistryMatch}: {@code aiVerified} tells {@link
-     * Stage1IdentificationService#resolveCandidates} whether this already went through an AI
-     * plausibility check (arbitration among multiple same-named registry candidates), so it can
-     * skip its own single-candidate weak-match check rather than spending a second, redundant LLM
-     * call on an already-answered question.
+     * Outcome of {@link #resolveRegistryMatch}: {@code aiVerified} is always {@code false} now (AI
+     * arbitration is gone — see this class's own javadoc), kept as a field only so {@link
+     * Stage1IdentificationService#resolveCandidates} doesn't need its own read site touched.
      */
     public record RegistryResolution(Optional<RegistryMatch> match, boolean aiVerified, BigDecimal aiConfidence) {
     }
 
     /**
-     * Tier1 static registry lookup, with the same AI-arbitration pattern CPE Tier2 already had: a
-     * generic/common product name (e.g. "commons-io", "phoenix", "http") can get a match from
-     * *multiple* registries simultaneously — previously this just took the max-confidence one with
-     * no arbitration, so ties/near-ties silently went to whichever registry client happened to be
-     * injected first. Observed live repeatedly, including one case where the AI correctly rejected
-     * a wrong npm hit but the CPE-rescue fallback then landed on yet *another* wrong generic-name
-     * collision from a different registry that was never even considered. When more than one
-     * registry matches, this asks the LLM to pick (or reject all) among them using the item's
-     * usage_text — same anti-hallucination shape as CPE Tier2 (index-select only, never invents a
-     * new package) and the same {@code disambiguate} endpoint/cost as the existing single-candidate
-     * weak-match check, just applied across registries instead of within one.
+     * Tier1 static registry lookup. A generic/common product name (e.g. "commons-io", "phoenix",
+     * "http") can get a match from *multiple* registries simultaneously — when that happens, this
+     * always takes {@link #maxConfidenceMatch}'s best-effort pick (own confidence, then a narrow
+     * usage_text ecosystem tie-break), the same fallback the pre-AI code path already used whenever
+     * no Claude key was configured.
      */
     public RegistryResolution resolveRegistryMatch(ResearchJobItem item, Long userId, String productName, String version) {
         // Narrowed by RegistryRoutingPolicy *before* any request is issued: each registry's own
@@ -155,70 +135,7 @@ public class Stage1RegistryIdentification {
         if (matches.size() == 1) {
             return new RegistryResolution(Optional.of(matches.get(0)), false, null);
         }
-
-        Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
-        boolean withinBudget = apiKey.isPresent()
-                && jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
-        if (!withinBudget) {
-            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
-        }
-
-        List<CandidateDto> candidateDtos = matches.stream()
-                .map(m -> new CandidateDto(m.ecosystem(), m.packageName(), null, m.purl(), "registry"))
-                .toList();
-        Optional<DisambiguateResponse> result = llmServiceClient.disambiguate(
-                apiKey.get(), item, candidateDtos, JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
-
-        if (result.isEmpty()) {
-            // LLM call failed — degrade to the pre-arbitration best-effort behavior.
-            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
-        }
-        if (!result.get().matched()) {
-            log.info("AI rejected all {} same-named registry candidates for item {} ('{}') as implausible "
-                    + "given the usage text", matches.size(), item.getId(), productName);
-            return new RegistryResolution(Optional.empty(), true, null);
-        }
-        Integer selectedIndex = result.get().selectedIndex();
-        if (selectedIndex == null || selectedIndex < 0 || selectedIndex >= matches.size()) {
-            log.warn("LLM registry arbitration returned an invalid selection for item {}: {}", item.getId(), result.get());
-            return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
-        }
-        RegistryMatch selected = matches.get(selectedIndex);
-        log.info("AI arbitrated {} same-named registry candidates for item {} ('{}') -> selected ecosystem={} package={}",
-                matches.size(), item.getId(), productName, selected.ecosystem(), selected.packageName());
-        return new RegistryResolution(Optional.of(selected), true, BigDecimal.valueOf(result.get().confidence()));
-    }
-
-    /**
-     * Tier3's one place a specific registry package name gets guessed directly (rather than only a
-     * human-readable name fed back into fuzzy lookup) — see {@link
-     * Stage1AiArbitration#tryTier3}'s own javadoc for why. Each guess is still verified against the
-     * real registry before being trusted — never persisted on the LLM's say-so alone.
-     */
-    public Optional<RegistryMatch> bestEcosystemCandidateMatch(Long itemId, List<EcosystemCandidateDto> candidates, String version) {
-        if (candidates == null) {
-            return Optional.empty();
-        }
-        for (EcosystemCandidateDto candidate : candidates) {
-            if (candidate.ecosystem() == null || candidate.packageName() == null || candidate.packageName().isBlank()) {
-                continue;
-            }
-            Optional<PackageRegistryLookup> lookup = registryLookups.stream()
-                    .filter(l -> l.ecosystem().equalsIgnoreCase(candidate.ecosystem()))
-                    .findFirst();
-            if (lookup.isEmpty()) {
-                log.warn("AI proposed ecosystem candidate '{}' for item {} which is not an enabled ecosystem — ignored",
-                        candidate.ecosystem(), itemId);
-                continue;
-            }
-            Optional<RegistryMatch> match = safeLookup(lookup.get(), candidate.packageName(), version);
-            if (match.isPresent()) {
-                log.info("AI-guessed ecosystem candidate matched for item {}: ecosystem={} package={}",
-                        itemId, candidate.ecosystem(), candidate.packageName());
-                return match;
-            }
-        }
-        return Optional.empty();
+        return new RegistryResolution(Optional.of(maxConfidenceMatch(matches, item.getUsageText())), false, null);
     }
 
     /** Routes every registry call through {@link RegistryLookupCache} (keyed on ecosystem+productName,
@@ -236,21 +153,21 @@ public class Stage1RegistryIdentification {
     }
 
     /**
-     * golden-300 fix (2026-08-29, item 2 "cross-registry same-name collision"): when the AI
-     * disambiguation budget is exhausted (or unavailable), this degrades to picking the
-     * highest-confidence registry match with no other signal — which silently picks whichever
-     * registry happened to be queried/injected first among several equally-confident same-named
-     * matches (numpy, jekyll, redis, phoenix, phoenix_live_view, http all mis-routed this way in
-     * golden-300). {@code item.usage_text} is already stored and available but was never consulted
-     * here at all. Deliberately narrow: only ever consulted when {@code matches} has more than one
-     * candidate within {@link #REGISTRY_MATCH_TIE_MARGIN} of the top confidence — a single clear
-     * leader (the overwhelmingly common case, and the only case reachable when {@code matches} has
-     * exactly one entry in the first place, per this method's only caller) is returned exactly as
-     * before, unaffected by this fallback. Even among tied candidates, this only overrides the
-     * default max-confidence pick when the usage text narrows the tie down to exactly one
-     * ecosystem — 0 or 2+ surviving keyword hits leaves the original (arbitrary but unchanged)
-     * max-confidence behavior in place, so this can only ever narrow an already-ambiguous pick, not
-     * introduce a new wrong one.
+     * golden-300 fix (2026-08-29, item 2 "cross-registry same-name collision"): when several
+     * registries match the same name, this degrades to picking the highest-confidence registry
+     * match with no other signal — which silently picks whichever registry happened to be queried/
+     * injected first among several equally-confident same-named matches (numpy, jekyll, redis,
+     * phoenix, phoenix_live_view, http all mis-routed this way in golden-300). {@code
+     * item.usage_text} is already stored and available but was never consulted here at all.
+     * Deliberately narrow: only ever consulted when {@code matches} has more than one candidate
+     * within {@link #REGISTRY_MATCH_TIE_MARGIN} of the top confidence — a single clear leader (the
+     * overwhelmingly common case, and the only case reachable when {@code matches} has exactly one
+     * entry in the first place, per this method's only caller) is returned exactly as before,
+     * unaffected by this fallback. Even among tied candidates, this only overrides the default
+     * max-confidence pick when the usage text narrows the tie down to exactly one ecosystem — 0 or
+     * 2+ surviving keyword hits leaves the original (arbitrary but unchanged) max-confidence
+     * behavior in place, so this can only ever narrow an already-ambiguous pick, not introduce a new
+     * wrong one.
      */
     private RegistryMatch maxConfidenceMatch(List<RegistryMatch> matches, String usageText) {
         RegistryMatch best = matches.stream().max((a, b) -> a.confidence().compareTo(b.confidence())).orElseThrow();
