@@ -6,6 +6,7 @@ import com.vulncheck.app.repository.CsafProductInsertRow;
 import com.vulncheck.app.repository.CsafProductRepository;
 import com.vulncheck.app.repository.CsafProductStatusInsertRow;
 import com.vulncheck.app.repository.CsafProductStatusRepository;
+import com.vulncheck.app.service.SafeUrlValidator;
 import com.vulncheck.app.service.csaf.CsafProductTreeWalker.ResolvedProduct;
 import com.vulncheck.app.service.csaf.CsafProductTreeWalker.WalkResult;
 import java.math.BigDecimal;
@@ -165,7 +166,14 @@ public class CsafDocumentUpsertService {
      *  not a clean version field, so it's kept as reference text rather than parsed into a version
      *  this app would compute with (plan §8-2(b) — must never reach {@code
      *  vulnerabilities.fixed_version}). Keyed by the ORIGINAL product_id (remediations reference the
-     *  same ids product_status does, pre-fold), matching {@link #upsertCsafDocument}'s lookup. */
+     *  same ids product_status does, pre-fold), matching {@link #upsertCsafDocument}'s lookup.
+     *
+     *  <p>{@code remediation.url} comes straight from the vendor's own CSAF JSON — just as untrusted as
+     *  an LLM's citation URL, and it flows into the same unescaped {@code th:href} sink via {@code
+     *  CsafVulnerabilitySource#findingUrl} once persisted. Sanitized here, at ingestion, with the same
+     *  {@link SafeUrlValidator} allowlist Stage4/BundledComponent use — a dropped ({@code null}) URL here
+     *  makes {@code findingUrl} fall through to its existing hardcoded per-vendor advisory URL, so no
+     *  separate fallback branch is needed downstream. */
     private Map<String, RemediationInfo> extractVendorFixRemediations(JsonNode remediations) {
         Map<String, RemediationInfo> byProductId = new HashMap<>();
         for (JsonNode remediation : remediations) {
@@ -173,7 +181,7 @@ public class CsafDocumentUpsertService {
                 continue;
             }
             String text = remediation.path("details").asText(null);
-            String url = remediation.path("url").asText(null);
+            String url = SafeUrlValidator.sanitizeHttpUrl(remediation.path("url").asText(null));
             for (JsonNode productIdNode : remediation.path("product_ids")) {
                 byProductId.putIfAbsent(productIdNode.asText(), new RemediationInfo(text, url));
             }
