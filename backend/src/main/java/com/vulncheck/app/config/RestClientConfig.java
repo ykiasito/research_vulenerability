@@ -180,6 +180,27 @@ public class RestClientConfig {
     }
 
     /**
+     * For the crates.io sparse-index mirror sync (closed-mode backlog item 176 pilot, {@code
+     * CratesIoMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * item-165 rationale as the other {@code *SyncRestClient} beans above: that bean is meant to stay
+     * a request-path-only egress (the 10 live registries, live NVD, live OSV) so a future full
+     * closed-mode branch can delete it outright without having to first carve sync-time traffic back
+     * out of it. {@code index.crates.io} is a static-file CDN (one small NDJSON response per
+     * package), not an API with SSRF-shaped redirect chains like the CSAF/GHSA/OSV/CVE.org sync
+     * targets above, so a plain {@link #simpleRequestFactory} (auto-follow redirects) is enough here.
+     */
+    @Bean
+    public RestClient cratesIoSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (crates.io mirror sync)")
+                .build();
+    }
+
+    /**
      * Points at the Python LLM microservice (Stage1 Tier2/Tier3, Stage4). Longer read timeout
      * than the external-API client — a web_search-enabled Claude call can take well over 10s.
      */
