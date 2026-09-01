@@ -137,11 +137,18 @@ class Stage1GoldenBenchmarkTest {
         // backstop is no exception, so this is always a no-op for every case in this file.
         HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService(
                 userApiKeyService, llmServiceClient, jobCostBudgetService, identifiedProductRepository);
+        // Closed-mode backlog item 166: see Stage1IdentificationServiceTest's own service() helper
+        // for why this benchmark now composes the two extracted registry/AI collaborator classes
+        // from the same mocks, rather than passing them straight into a single constructor.
+        Stage1RegistryIdentification registryIdentification = new Stage1RegistryIdentification(
+                lookups, registryRoutingPolicy, new RegistryLookupCache(), userApiKeyService, llmServiceClient,
+                jobCostBudgetService, Runnable::run);
+        Stage1AiArbitration aiArbitration = new Stage1AiArbitration(
+                userApiKeyService, jobCostBudgetService, llmServiceClient, ecosystemRegistryRepository,
+                researchJobItemRepository, registryIdentification);
         Stage1IdentificationService service = new Stage1IdentificationService(
-                lookups, registryRoutingPolicy, new RegistryLookupCache(), cpeDictionaryRepository,
-                new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService, llmServiceClient,
-                nvdCpeSyncService, ecosystemRegistryRepository, researchJobItemRepository, jobCostBudgetService,
-                highConfidenceVerificationService, Runnable::run);
+                cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService,
+                nvdCpeSyncService, highConfidenceVerificationService, registryIdentification, aiArbitration, Runnable::run);
 
         Optional<IdentifiedProduct> result = service.identify(item, USER_ID);
 

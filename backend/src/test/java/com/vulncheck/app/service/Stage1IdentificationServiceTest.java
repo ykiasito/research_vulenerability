@@ -113,11 +113,18 @@ class Stage1IdentificationServiceTest {
         // that service's own dedicated coverage.
         HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService(
                 userApiKeyService, llmServiceClient, jobCostBudgetService, identifiedProductRepository);
+        // Closed-mode backlog item 166: Stage1IdentificationService's registry/AI seams are now the
+        // two collaborator classes below, composed here from exactly the same mocks the old
+        // single-constructor call used — see those two classes' own javadoc for why they exist.
+        Stage1RegistryIdentification registryIdentification = new Stage1RegistryIdentification(
+                lookups, registryRoutingPolicy, new RegistryLookupCache(), userApiKeyService, llmServiceClient,
+                jobCostBudgetService, Runnable::run);
+        Stage1AiArbitration aiArbitration = new Stage1AiArbitration(
+                userApiKeyService, jobCostBudgetService, llmServiceClient, ecosystemRegistryRepository,
+                researchJobItemRepository, registryIdentification);
         return new Stage1IdentificationService(
-                lookups, registryRoutingPolicy, new RegistryLookupCache(), cpeDictionaryRepository, new CpeNameVariantCache(),
-                identifiedProductRepository, userApiKeyService,
-                llmServiceClient, nvdCpeSyncService, ecosystemRegistryRepository, researchJobItemRepository,
-                jobCostBudgetService, highConfidenceVerificationService, Runnable::run);
+                cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService,
+                nvdCpeSyncService, highConfidenceVerificationService, registryIdentification, aiArbitration, Runnable::run);
     }
 
     private void stubSaveReturnsArgument() {
@@ -254,6 +261,52 @@ class Stage1IdentificationServiceTest {
         assertThat(result.get().getEcosystem()).isNull();
         assertThat(result.get().getPackageName()).isNull();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:google:gson:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void fallsBackToAnotherCpeCandidateWhenTheOnlyOneDiscardedByRegistryDistrustNeededItsEcosystemContext() {
+        // Backlog item 176 (job 203 root-cause): an unconfirmed crates.io "OpenSSL" match (really the
+        // unrelated Rust FFI binding crate sfackler:openssl) sits alongside the correct openssl:openssl
+        // CPE candidate in the same pool. Before the registry match's trustworthiness is known,
+        // resolveCpeCandidates ranks with crates.io's ecosystem context in play, which lets the
+        // target_sw=rust candidate's targetSwMatchesEcosystem tie-break outrank the correct one (both
+        // exact-slug-match "openssl"). The registry match is then correctly judged untrustworthy
+        // (exactVersionConfirmed=false) and the wrongly-top-ranked CPE is correctly re-gated and
+        // dropped for only surviving via that now-distrusted ecosystem context — but the other,
+        // actually-correct candidate is still sitting right there in the same pool and independently
+        // passes the bare (no-ecosystem) gate, so it must be picked up as a fallback instead of the
+        // item going UNIDENTIFIED.
+        PackageRegistryLookup cratesLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch(
+                        "crates.io", "openssl", "pkg:cargo/openssl@0.10.55", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "crates.io";
+            }
+        };
+        CpeDictionaryEntry correctOpenssl =
+                cpeEntry("cpe:2.3:a:openssl:openssl:3.3.1:*:*:*:*:*:*:*", "openssl");
+        CpeDictionaryEntry unrelatedRustBinding =
+                cpeEntry("cpe:2.3:a:sfackler:openssl:0.10.55:*:*:*:*:rust:*:*", "openssl");
+        unrelatedRustBinding.setTargetSwValues(java.util.Set.of("rust"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(unrelatedRustBinding, correctOpenssl));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("OpenSSL");
+        item.setVersion("3.3.1");
+        Optional<IdentifiedProduct> result = service(List.of(cratesLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        // The distrusted registry match must not be attached — only the fallback CPE stands on its own.
+        assertThat(result.get().getEcosystem()).isNull();
+        assertThat(result.get().getPackageName()).isNull();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:openssl:openssl:3.3.1:*:*:*:*:*:*:*");
     }
 
     @Test

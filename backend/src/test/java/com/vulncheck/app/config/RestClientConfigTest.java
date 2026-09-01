@@ -189,19 +189,23 @@ class RestClientConfigTest {
     }
 
     /**
-     * Behavioral regression coverage for the three SSRF-hardening beans themselves ({@link
+     * Behavioral regression coverage for the SSRF-hardening beans themselves ({@link
      * RestClientConfig#csafSyncRestClient}/{@link RestClientConfig#ghsaSyncRestClient}/{@link
-     * RestClientConfig#osvSyncRestClient}) — not just {@code noRedirectRequestFactory} in
-     * isolation (see {@link #noRedirectRequestFactoryDoesNotFollowRedirects} above). Before this
-     * test existed, a mutation that reverted any one of these three bean bodies from {@link
-     * RestClientConfig#noRedirectRequestFactory} back to {@link
-     * RestClientConfig#simpleRequestFactory} (auto-follow redirects, no SSRF hardening) passed
-     * every other test in this class unchanged, because none of them build the request factory
-     * via the bean method and drive it against a live redirect. {@code
+     * RestClientConfig#osvSyncRestClient}/{@link RestClientConfig#cveOrgSyncRestClient}) — not just
+     * {@code noRedirectRequestFactory} in isolation (see {@link
+     * #noRedirectRequestFactoryDoesNotFollowRedirects} above). Before this test existed, a mutation
+     * that reverted any one of these bean bodies from {@link RestClientConfig#noRedirectRequestFactory}
+     * back to {@link RestClientConfig#simpleRequestFactory} (auto-follow redirects, no SSRF
+     * hardening) passed every other test in this class unchanged, because none of them build the
+     * request factory via the bean method and drive it against a live redirect. {@code
      * SiemensCsafSyncService#fetchBounded}/{@code RedHatCsafSyncService}/{@code
      * GhsaSyncService#resolveRedirectTarget}/{@code OsvSyncService} all assume a 3xx response
      * reaches them unaltered so they can re-validate the redirect target's host themselves; if the
-     * client silently auto-followed instead, that revalidation would never run.
+     * client silently auto-followed instead, that revalidation would never run. {@code
+     * CveOrgSyncService#fetchLatestRelease} doesn't need to re-validate anything today (its one
+     * call, GitHub's releases API, has no known redirect in practice) but shares this same
+     * no-auto-redirect client for consistency with the other sync services (see {@link
+     * RestClientConfig#cveOrgSyncRestClient}'s javadoc).
      *
      * <p>Deliberately asserts on behavior (the 302 and its {@code Location} header surface
      * untouched), not on the request factory's concrete type — {@code
@@ -255,6 +259,12 @@ class RestClientConfigTest {
     @Test
     void osvSyncRestClientDoesNotFollowRedirects() throws Exception {
         RestClient restClient = new RestClientConfig().osvSyncRestClient();
+        assertDoesNotFollowRedirects(requestFactoryOf(restClient));
+    }
+
+    @Test
+    void cveOrgSyncRestClientDoesNotFollowRedirects() throws Exception {
+        RestClient restClient = new RestClientConfig().cveOrgSyncRestClient();
         assertDoesNotFollowRedirects(requestFactoryOf(restClient));
     }
 }

@@ -1,4 +1,4 @@
-package com.vulncheck.app.service.registry;
+package com.vulncheck.app.service.ratelimit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

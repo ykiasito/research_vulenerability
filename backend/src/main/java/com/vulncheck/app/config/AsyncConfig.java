@@ -1,6 +1,7 @@
 package com.vulncheck.app.config;
 
 import java.util.concurrent.Executor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableAsync;
@@ -69,20 +70,31 @@ public class AsyncConfig {
      * deadlock, since there'd be no free thread left to run the inner registry-lookup tasks they're
      * waiting on.
      *
-     * <p>Sized at 8 (matching {@code researchJobExecutor}'s own max pool size) rather than higher:
-     * each concurrent item can itself fan out up to 10 registry lookups onto the shared
-     * {@code registryLookupExecutor} (max 20 threads), so 8 concurrent items already means up to
-     * 80 registry calls contending for that pool at once — a reasonable degree of oversubscription
-     * (queued, not rejected — {@code registryLookupExecutor}'s queue capacity is 200), not worth
-     * pushing further and diluting the per-item registry fan-out's own parallelism benefit. A large
-     * queue capacity (this pool's own core=max, so nothing ever runs beyond 8 at a time) absorbs
-     * the rest of a large job's items while they wait their turn.
+     * <p>Sized at 8 by default (matching {@code researchJobExecutor}'s own max pool size) rather
+     * than higher: each concurrent item can itself fan out up to 10 registry lookups onto the
+     * shared {@code registryLookupExecutor} (max 20 threads), so 8 concurrent items already means
+     * up to 80 registry calls contending for that pool at once — a reasonable degree of
+     * oversubscription (queued, not rejected — {@code registryLookupExecutor}'s queue capacity is
+     * 200), not worth pushing further and diluting the per-item registry fan-out's own parallelism
+     * benefit. A large queue capacity (this pool's own core=max, so nothing ever runs beyond the
+     * configured size at a time) absorbs the rest of a large job's items while they wait their
+     * turn.
+     *
+     * <p>Externalized (item 167, 2026-09-01, {@code docs/spec/closed-mode-plan.md} §3-3 A4/§7 P4)
+     * so a closed-mode deployment can raise it later — this "8" rationale (avoiding registry
+     * fan-out oversubscription) evaporates once the registry clients themselves are gone, and the
+     * only remaining constraint becomes Postgres/HikariCP (see {@code
+     * spring.datasource.hikari.maximum-pool-size} in {@code application.yml}, sized to stay ahead
+     * of this pool). The default (8) is unchanged for now; do not raise it without first measuring
+     * HikariCP connection-acquire p95 under load (§7 P2/P3) — this pool's javadoc will go stale if
+     * that measurement doesn't happen before the size is bumped.
      */
     @Bean(name = "itemProcessingExecutor")
-    public Executor itemProcessingExecutor() {
+    public Executor itemProcessingExecutor(
+            @Value("${app.item-processing-pool-size:8}") int poolSize) {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(8);
-        executor.setMaxPoolSize(8);
+        executor.setCorePoolSize(poolSize);
+        executor.setMaxPoolSize(poolSize);
         executor.setQueueCapacity(5000);
         executor.setThreadNamePrefix("item-processing-");
         executor.initialize();
