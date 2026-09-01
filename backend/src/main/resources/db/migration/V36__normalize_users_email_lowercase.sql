@@ -1,0 +1,17 @@
+-- V36__normalize_users_email_lowercase.sql
+-- Follow-up to V35 (senior-reviewer PR#87 REVISE, task-backlog item 148 follow-up): V35 created a
+-- case-insensitive UNIQUE index on lower(email), but never normalized the *stored* values of
+-- pre-existing rows, only guarded against future case-insensitive duplicates. AppUserDetailsService
+-- now compares/looks up emails via lower(email) too (login lookup and the ROLE_ADMIN check), so the
+-- durable premise those app-level lower() comparisons rely on is that every stored email is already
+-- lowercase, not merely that lookups happen to be case-insensitive. This migration is the DB-level
+-- backstop closing that gap for rows written before AuthController started lowercasing on
+-- insert, or by any future code path that forgets to normalize.
+--
+-- Deliberately a separate migration rather than editing V35 in place: V35 had already been applied
+-- (with its original checksum) against the shared vulncheck_test database by the time this gap was
+-- found, and Flyway migrations that have already run must never be edited afterwards. The UPDATE
+-- itself is safe to run after V35's unique index already exists — it can only ever collapse a row
+-- onto its own already-unique lower(email) value, never collide with another row (V35's duplicate
+-- guard already ruled that out).
+UPDATE users SET email = lower(email) WHERE email <> lower(email);
