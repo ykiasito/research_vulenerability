@@ -283,6 +283,35 @@ class BundledComponentResearchServiceTest {
         verifyNoInteractions(osvLiveQueryClient);
     }
 
+    // --- Task-backlog item 104: adjudicated finding URL scheme allowlist -----------------------
+
+    @Test
+    void dangerousFindingUrlSchemeIsDroppedToNullBeforePersisting() {
+        // Defense-in-depth: finding.url() here comes from NVD/OSV, not the LLM directly, but OSV
+        // reference entries are third-party-submitted and unvalidated upstream — same allowlist
+        // applies as Stage4's citation_url before either reaches jobs/detail.html's th:href.
+        stubChangelogFound("Updated bundled 7-Zip to 26.02.");
+        stubExtraction(new BundledComponentDto("7-Zip", "26.02", "high"));
+        when(cpeDictionaryRepository.findFuzzyMatches(eq("7-Zip"), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(cpeEntry("7-zip", "7-zip", "*")));
+
+        VulnFinding finding = new VulnFinding(
+                "CVE-2026-33333", "nvd", "HIGH", "7-Zip vuln", "javascript:alert(document.cookie)", null);
+        when(nvdVulnerabilitySource.fetchFromNvdCached(eq("cpe:2.3:a:7-zip:7-zip:26.02:*:*:*:*:*:*:*"), eq(USER_ID)))
+                .thenReturn(SourceResult.success(List.of(finding)));
+        when(vulnerabilityRepository.upsertAndGetId(
+                eq("CVE-2026-33333"), eq("nvd"), eq("HIGH"), eq("7-Zip vuln"), eq((String) null), any()))
+                .thenReturn(778L);
+
+        int count = service().research(item(), USER_ID);
+
+        assertThat(count).isEqualTo(1);
+        verify(vulnerabilityRepository).upsertAndGetId(
+                eq("CVE-2026-33333"), eq("nvd"), eq("HIGH"), eq("7-Zip vuln"), eq((String) null), any());
+        verify(jobItemVulnerabilityRepository).linkIfAbsentWithBundledComponent(
+                eq(9L), eq(778L), eq("bundled_component"), eq((String) null), eq("7-Zip"), eq("26.02"));
+    }
+
     @Test
     void noCpeMatchAndNoOsvEcosystemGuessIsInconclusiveAndPersistsNothing() {
         stubChangelogFound("changelog text");

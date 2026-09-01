@@ -446,4 +446,50 @@ class CsafDocumentUpsertServiceTest {
         assertThat(fixedRow.getStatus()).isEqualTo("fixed");
         assertThat(notAffectedRow.getStatus()).isEqualTo("known_not_affected");
     }
+
+    // Senior-reviewer REVISE (2026-09-01, PR#79 peer review): a vendor CSAF document's own
+    // remediations[].url is just as untrusted as an LLM's citation URL, and reaches the same
+    // unescaped th:href sink (CsafVulnerabilitySource#findingUrl -> vulnerabilities.url /
+    // job_item_vulnerabilities.citation_url -> jobs/detail.html) once persisted. A disallowed
+    // scheme must be dropped to null here at ingestion, same as SafeUrlValidator already does for
+    // Stage4/BundledComponent — the free-text remediation details (fixed_version) still persist.
+    private static final String SSA_MALICIOUS_REMEDIATION_URL = """
+            {
+              "document": {
+                "title": "SSA-MALICIOUS-TEST: test-only fixture for a hostile remediation url scheme",
+                "tracking": { "id": "SSA-MALICIOUS-TEST", "status": "final", "version": "1",
+                  "initial_release_date": "2026-01-01T00:00:00Z", "current_release_date": "2026-01-01T00:00:00Z" },
+                "distribution": { "tlp": { "label": "WHITE" } }
+              },
+              "product_tree": { "branches": [ { "name": "Siemens", "category": "vendor", "branches": [
+                { "name": "Widget Gadget", "category": "product_name", "branches": [
+                  { "name": "1.0", "category": "product_version",
+                    "product": { "product_id": "widget-1", "name": "Widget Gadget 1.0" } }
+                ] }
+              ] } ] },
+              "vulnerabilities": [
+                { "cve": "CVE-2026-00004",
+                  "product_status": { "known_affected": ["widget-1"] },
+                  "remediations": [
+                    { "product_ids": ["widget-1"], "category": "vendor_fix",
+                      "details": "Update to V2.0 or later version",
+                      "url": "javascript:alert(document.cookie)" }
+                  ]
+                }
+              ]
+            }
+            """;
+
+    @Test
+    void aRemediationUrlWithADisallowedSchemeIsDroppedRatherThanPersisted() throws Exception {
+        service().upsertCsafDocument("siemens", parse(SSA_MALICIOUS_REMEDIATION_URL));
+
+        List<CsafProductStatus> statuses = csafProductStatusRepository.findAll().stream()
+                .filter(s -> "SSA-MALICIOUS-TEST".equals(s.getAdvisoryId()))
+                .toList();
+        assertThat(statuses).hasSize(1);
+        // The free-text remediation details still persist — only the URL is dropped.
+        assertThat(statuses.get(0).getFixedVersion()).isEqualTo("Update to V2.0 or later version");
+        assertThat(statuses.get(0).getRemediationUrl()).isNull();
+    }
 }
