@@ -12,6 +12,7 @@ import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.repository.UserSecretRepository;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
 /**
@@ -60,6 +61,35 @@ class UserApiKeyServiceTest {
         User admin = new User(42L, "admin@example.com", "hash", null);
         when(userRepository.findByEmail("admin@example.com")).thenReturn(Optional.of(admin));
         when(userSecretRepository.findByUserIdAndProvider(42L, UserSecret.PROVIDER_NVD)).thenReturn(Optional.empty());
+
+        assertThat(service.getAdminNvdApiKey()).isEmpty();
+    }
+
+    @Test
+    void getAdminNvdApiKeyReturnsEmptyWhenDecryptThrows() {
+        // Regression test for task-backlog item 143: a decrypt failure (key rotation, AAD
+        // mismatch, row corruption) must degrade to Optional.empty(), matching this method's own
+        // javadoc contract, rather than propagate and abort CpeDictionaryScheduledResync before it
+        // ever reaches syncAllAndRelease()'s guard-releasing finally block.
+        ReflectionTestUtils.setField(service, "adminEmail", "admin@example.com");
+        User admin = new User(42L, "admin@example.com", "hash", null);
+        UserSecret secret = new UserSecret(1L, 42L, UserSecret.PROVIDER_NVD, "encrypted-blob", null);
+        when(userRepository.findByEmail("admin@example.com")).thenReturn(Optional.of(admin));
+        when(userSecretRepository.findByUserIdAndProvider(42L, UserSecret.PROVIDER_NVD))
+                .thenReturn(Optional.of(secret));
+        when(secretEncryptionService.decrypt("encrypted-blob", 42L, UserSecret.PROVIDER_NVD))
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"));
+
+        assertThat(service.getAdminNvdApiKey()).isEmpty();
+    }
+
+    @Test
+    void getAdminNvdApiKeyReturnsEmptyWhenTheUserLookupFails() {
+        // Regression test for task-backlog item 143: a transient DB failure while resolving the
+        // admin user must degrade to Optional.empty() the same way, not propagate.
+        ReflectionTestUtils.setField(service, "adminEmail", "admin@example.com");
+        when(userRepository.findByEmail("admin@example.com"))
+                .thenThrow(new DataAccessResourceFailureException("DB unavailable"));
 
         assertThat(service.getAdminNvdApiKey()).isEmpty();
     }
