@@ -113,11 +113,18 @@ class Stage1IdentificationServiceTest {
         // that service's own dedicated coverage.
         HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService(
                 userApiKeyService, llmServiceClient, jobCostBudgetService, identifiedProductRepository);
+        // Closed-mode backlog item 166: Stage1IdentificationService's registry/AI seams are now the
+        // two collaborator classes below, composed here from exactly the same mocks the old
+        // single-constructor call used — see those two classes' own javadoc for why they exist.
+        Stage1RegistryIdentification registryIdentification = new Stage1RegistryIdentification(
+                lookups, registryRoutingPolicy, new RegistryLookupCache(), userApiKeyService, llmServiceClient,
+                jobCostBudgetService, Runnable::run);
+        Stage1AiArbitration aiArbitration = new Stage1AiArbitration(
+                userApiKeyService, jobCostBudgetService, llmServiceClient, ecosystemRegistryRepository,
+                researchJobItemRepository, registryIdentification);
         return new Stage1IdentificationService(
-                lookups, registryRoutingPolicy, new RegistryLookupCache(), cpeDictionaryRepository, new CpeNameVariantCache(),
-                identifiedProductRepository, userApiKeyService,
-                llmServiceClient, nvdCpeSyncService, ecosystemRegistryRepository, researchJobItemRepository,
-                jobCostBudgetService, highConfidenceVerificationService, Runnable::run);
+                cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService,
+                nvdCpeSyncService, highConfidenceVerificationService, registryIdentification, aiArbitration, Runnable::run);
     }
 
     private void stubSaveReturnsArgument() {
