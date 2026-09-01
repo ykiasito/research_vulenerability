@@ -1,5 +1,6 @@
 package com.vulncheck.app.service;
 
+import com.vulncheck.app.entity.User;
 import com.vulncheck.app.entity.UserSecret;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.repository.UserSecretRepository;
@@ -54,11 +55,27 @@ public class UserApiKeyService {
      * just slower" design, for every way this can be unconfigured: {@code ADMIN_EMAIL} unset or
      * blank, no user registered under that email, or that user simply hasn't registered an NVD
      * key. None of these are errors — an operator who hasn't set both up yet just gets the
-     * unkeyed (slower) behavior that already existed before this method.
+     * unkeyed (slower) behavior that already existed before this method. Each of these three
+     * "not configured" cases is logged at WARN (distinguishing which one it was, but never the
+     * key/email lookup result itself beyond the already-configured {@code adminEmail} value) so a
+     * misconfiguration doesn't silently degrade to the 10x-slower unkeyed path with nothing in the
+     * logs to explain why (task-backlog item 142 REVISE R2).
+     *
+     * <p>Looks the admin user up case-insensitively via {@link
+     * UserRepository#findByEmailIgnoreCase}, matching how {@code AppUserDetailsService} already
+     * grants ROLE_ADMIN via {@code adminEmail.equalsIgnoreCase(user.getEmail())} — {@code
+     * AuthController#register} stores the email as typed, not lowercased, so an {@code
+     * ADMIN_EMAIL} that differs from the stored row only in case must still resolve here, or admin
+     * login would work while this method silently found no user (task-backlog item 142 REVISE R1).
+     * If two rows exist that differ only in case (an edge case the app doesn't otherwise prevent),
+     * {@link UserRepository#findByEmailIgnoreCase} can throw {@code
+     * IncorrectResultSizeDataAccessException}; the existing {@code catch (Exception)} below
+     * degrades that to {@link Optional#empty()} the same as any other lookup failure — intended
+     * behavior, not a bug.
      *
      * <p>Also falls back to {@link Optional#empty()} (logging a warning rather than throwing) if
      * the lookup or decryption itself fails — e.g. a transient {@code DataAccessException} from
-     * {@link UserRepository#findByEmail} or a decrypt failure from {@link
+     * {@link UserRepository#findByEmailIgnoreCase} or a decrypt failure from {@link
      * SecretEncryptionService#decrypt} (key rotation, AAD mismatch, row corruption). This method's
      * only caller ({@code CpeDictionaryScheduledResync}) runs unattended on a Sunday-night cron,
      * so a transient failure here must degrade to the unkeyed path rather than abort the caller
@@ -69,8 +86,18 @@ public class UserApiKeyService {
             return Optional.empty();
         }
         try {
-            return userRepository.findByEmail(adminEmail)
-                    .flatMap(user -> getNvdApiKey(user.getId()));
+            Optional<User> admin = userRepository.findByEmailIgnoreCase(adminEmail);
+            if (admin.isEmpty()) {
+                log.warn("ADMIN_EMAIL is set to '{}' but no registered user matches it — "
+                        + "running unkeyed against NVD (slower)", adminEmail);
+                return Optional.empty();
+            }
+            Optional<String> key = getNvdApiKey(admin.get().getId());
+            if (key.isEmpty()) {
+                log.warn("Admin user '{}' has no NVD API key registered — running unkeyed against NVD (slower)",
+                        adminEmail);
+            }
+            return key;
         } catch (Exception e) {
             log.warn("Failed to resolve the admin's NVD key — falling back to unkeyed", e);
             return Optional.empty();
