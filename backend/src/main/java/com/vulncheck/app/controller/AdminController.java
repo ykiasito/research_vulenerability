@@ -16,6 +16,7 @@ import com.vulncheck.app.service.csaf.SiemensCsafSyncService.SyncResult;
 import com.vulncheck.app.service.cveorg.CveOrgSyncService;
 import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.osv.OsvSyncService;
+import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -53,6 +54,7 @@ public class AdminController {
     private final OsvSyncService osvSyncService;
     private final OsvSyncStateRepository osvSyncStateRepository;
     private final OsvSyncFailureRepository osvSyncFailureRepository;
+    private final RegistryMirrorSyncService registryMirrorSyncService;
 
     @GetMapping("/admin/cpe-dictionary")
     public String form() {
@@ -272,5 +274,64 @@ public class AdminController {
             return label + "をスキップしました: 別の同期処理が既に実行中です。";
         }
         return label + "が完了しました: " + result.upserted() + " 件のレコードを同期、" + result.failed() + " 件が失敗しました。";
+    }
+
+    @GetMapping("/admin/registry-mirror")
+    public String registryMirrorForm() {
+        return "admin/registry-mirror";
+    }
+
+    /**
+     * Starts a full registry-mirror sync (all 9 ecosystems, see {@link RegistryMirrorSyncService})
+     * on its own daemon thread and returns immediately — same shape as {@link #cpeFullSync}. Shares
+     * {@link RegistryMirrorSyncService#tryBeginFullSync}'s guard with {@code
+     * RegistryMirrorScheduledSync}, so a second click (or a click racing the scheduled resync)
+     * while one is already running doesn't start a competing sync against the same 9 ecosystems'
+     * rate limits and the same {@code registry_package_mirror} upserts.
+     */
+    @PostMapping("/admin/registry-mirror/sync-all")
+    public String registryMirrorFullSync(Model model) {
+        if (!registryMirrorSyncService.tryBeginFullSync()) {
+            model.addAttribute("result", "同期を開始できませんでした: 別の同期が既に実行中です。");
+            return "admin/registry-mirror";
+        }
+
+        try {
+            startRegistryMirrorSyncWorker();
+        } catch (Throwable t) {
+            // Same rationale as cpeFullSync's equivalent catch block (task-backlog items
+            // 81/136/141 lineage) — see that method's javadoc.
+            registryMirrorSyncService.releaseFullSyncGuard();
+            log.error("Registry mirror sync (admin-triggered) failed to start — sync slot released", t);
+            model.addAttribute("result", "同期の開始に失敗しました。バックエンドのログを確認してください。");
+            return "admin/registry-mirror";
+        }
+
+        model.addAttribute("result", "同期を開始しました。完了までしばらくかかります。バックエンドのログで進捗を確認してください。");
+        return "admin/registry-mirror";
+    }
+
+    /**
+     * Spawns and starts the worker thread that runs the actual sync. Package-private (rather than
+     * inlined in {@link #registryMirrorFullSync}) so a unit test can force this step to fail (e.g.
+     * via a Mockito spy) without needing a real thread-creation failure to exercise {@link
+     * #registryMirrorFullSync}'s guard-release catch block.
+     */
+    void startRegistryMirrorSyncWorker() {
+        Thread worker = new Thread(() -> {
+            log.warn("Registry mirror sync starting (admin-triggered)");
+            long startedAt = System.currentTimeMillis();
+            try {
+                RegistryMirrorSyncService.SyncOutcome outcome = registryMirrorSyncService.syncAllAndRelease();
+                long minutes = (System.currentTimeMillis() - startedAt) / 60000;
+                log.warn("Registry mirror sync (admin-triggered) finished in {} minutes: {} synced, {} unresolved, "
+                        + "observed name counts: {}", minutes, outcome.totalSynced(), outcome.totalUnresolved(),
+                        outcome.observedNameCountByEcosystem());
+            } catch (Exception e) {
+                log.error("Registry mirror sync (admin-triggered) aborted", e);
+            }
+        }, "registry-mirror-sync-admin");
+        worker.setDaemon(true);
+        worker.start();
     }
 }
