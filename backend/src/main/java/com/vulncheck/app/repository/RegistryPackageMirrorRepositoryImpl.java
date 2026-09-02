@@ -26,12 +26,29 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
      * is turned on -- an N+1 pattern across all 9 registries at CSV-job scale, for a value that only
      * ever changes when a sync job actually writes rows (see {@link #upsertBatch}, which proactively
      * refreshes this cache the moment that happens -- the primary invalidation path). This TTL is a
-     * safety net for the one case that bypasses that proactive path: rows appearing or disappearing
-     * out-of-band (e.g. a direct DB fix) rather than through this repository's own write method.
+     * safety net for the one case that bypasses that proactive path: rows appearing out-of-band (e.g.
+     * a direct DB fix) rather than through this repository's own write method.
+     *
+     * <p><b>Only {@code true} results are ever cached (see {@link #hasAnyEntries}) -- REVISE fix,
+     * closed-mode item 179 round 2.</b> A negative result used to be cached too, which raced against
+     * {@link #upsertBatch}'s proactive {@code true} write: a thread's {@code SELECT EXISTS} could
+     * observe "no rows yet" just before a concurrent sync's {@code INSERT} commits, and if that
+     * thread's {@code false} write landed in the map *after* the sync's {@code true} write, it clobbered
+     * the correct answer for up to this whole TTL. Since {@code hasAnyEntries==false} always means "no
+     * mirror yet, fall back to live" and there is no live network in closed-mode, that clobber was a
+     * guaranteed lookup failure for every item of that registry until the stale entry expired -- not
+     * merely a missed optimization. Caching only {@code true} closes this: both writers can only ever
+     * write {@code true}, so no ordering between them can produce a wrong cached value. The cost is
+     * that an ecosystem with no mirror yet re-queries the DB on every call -- acceptable, since that's
+     * a single indexed {@code EXISTS} query, and once any given ecosystem's mirror is actually synced
+     * (the steady-state, hot-path case this cache exists for), the result is {@code true} and gets
+     * cached exactly as before.
      */
     private static final long HAS_ANY_ENTRIES_CACHE_TTL_MILLIS = 5 * 60 * 1000L;
 
-    private record HasAnyEntriesCacheEntry(boolean value, long expiresAtMillis) {
+    // No boolean payload: only a positive hasAnyEntries result is ever cached (see the TTL constant's
+    // javadoc above), so an entry's mere presence (and being unexpired) already means "true".
+    private record HasAnyEntriesCacheEntry(long expiresAtMillis) {
     }
 
     private final JdbcTemplate jdbcTemplate;
@@ -46,7 +63,7 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
         long now = System.currentTimeMillis();
         HasAnyEntriesCacheEntry cached = hasAnyEntriesCache.get(ecosystem);
         if (cached != null && cached.expiresAtMillis() > now) {
-            return cached.value();
+            return true;
         }
         // Deliberately no @Transactional here (unlike findVersions/upsertBatch below): this is a
         // single JdbcTemplate statement, which runs correctly on a plain pooled connection without an
@@ -56,7 +73,12 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
                 "SELECT EXISTS(SELECT 1 FROM registry_package_mirror WHERE ecosystem = ?)",
                 Boolean.class, ecosystem);
         boolean result = Boolean.TRUE.equals(exists);
-        hasAnyEntriesCache.put(ecosystem, new HasAnyEntriesCacheEntry(result, now + HAS_ANY_ENTRIES_CACHE_TTL_MILLIS));
+        // Only cache true (see this cache's own field javadoc for why false is never written here):
+        // caching a false here as well raced against upsertBatch's proactive true write, and a false
+        // that lost that race could clobber the correct true for up to the whole TTL.
+        if (result) {
+            hasAnyEntriesCache.put(ecosystem, new HasAnyEntriesCacheEntry(now + HAS_ANY_ENTRIES_CACHE_TTL_MILLIS));
+        }
         return result;
     }
 
@@ -124,7 +146,7 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
         // accepts for out-of-band DB changes, so not worth the extra complexity of an after-commit
         // hook for it.)
         hasAnyEntriesCache.put(ecosystem,
-                new HasAnyEntriesCacheEntry(true, System.currentTimeMillis() + HAS_ANY_ENTRIES_CACHE_TTL_MILLIS));
+                new HasAnyEntriesCacheEntry(System.currentTimeMillis() + HAS_ANY_ENTRIES_CACHE_TTL_MILLIS));
     }
 
     private List<String> toStringList(Array sqlArray) throws SQLException {
