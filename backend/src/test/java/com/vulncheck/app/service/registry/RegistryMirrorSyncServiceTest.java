@@ -99,14 +99,43 @@ class RegistryMirrorSyncServiceTest {
         when(cratesIoMirrorSyncService.syncPackages(anyList())).thenThrow(new RuntimeException("crates.io unreachable"));
 
         assertThat(service.tryBeginFullSync()).isTrue();
-        try {
-            service.syncAllAndRelease();
-        } catch (RuntimeException expected) {
-            // propagates — the point of this test is only that the guard is released regardless.
-        }
+        service.syncAllAndRelease();
 
         assertThat(service.tryBeginFullSync())
                 .as("guard must be released even though the sync threw")
+                .isTrue();
+    }
+
+    /**
+     * Senior review, PR #145 REVISE (closed-mode backlog item 186): before this fix, {@code
+     * syncAll} collected each ecosystem's future with {@code .join()} in task order, so the first
+     * ecosystem to fail threw immediately and left the other 8 ecosystems' futures un-awaited (and
+     * whatever they themselves logged/threw silently discarded) while {@code syncAllAndRelease}'s
+     * {@code finally} had already released the guard — a real race for a second sync to start while
+     * those 8 were still running. A per-ecosystem failure must now be isolated: the other 8
+     * ecosystems still get synced, {@code syncAllAndRelease} returns normally (never throws) rather
+     * than propagating the failing ecosystem's exception, and the guard is available again only
+     * once every ecosystem's task has actually finished.
+     */
+    @Test
+    void syncAllAndReleaseIsolatesAPerEcosystemFailureFromTheOther8Ecosystems() {
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("crates.io"))
+                .thenReturn(List.of("serde"));
+        when(cratesIoMirrorSyncService.syncPackages(anyList())).thenThrow(new RuntimeException("crates.io unreachable"));
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("npm")).thenReturn(List.of("lodash"));
+        when(npmMirrorSyncService.syncPackages(List.of("lodash")))
+                .thenReturn(new NpmMirrorSyncService.SyncOutcome(1, 0));
+
+        assertThat(service.tryBeginFullSync()).isTrue();
+        RegistryMirrorSyncService.SyncOutcome outcome = service.syncAllAndRelease();
+
+        verify(npmMirrorSyncService).syncPackages(List.of("lodash"));
+        assertThat(outcome.totalSynced())
+                .as("the failing ecosystem contributes 0, but npm's 1 still counts")
+                .isEqualTo(1);
+        assertThat(outcome.observedNameCountByEcosystem()).containsEntry("npm", 1);
+        assertThat(service.tryBeginFullSync())
+                .as("guard must be released once every ecosystem's task (including the failing one) has finished")
                 .isTrue();
     }
 

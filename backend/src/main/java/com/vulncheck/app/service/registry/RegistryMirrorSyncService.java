@@ -371,11 +371,19 @@ public class RegistryMirrorSyncService {
      * class's javadoc) — running all 9 concurrently paces each one exactly as it would running
      * alone, it just stops one slow ecosystem's run from serializing behind the other 8. Wall-clock
      * cost for a full sync therefore drops from roughly the *sum* of every ecosystem's own sync time
-     * to roughly the *slowest single ecosystem's* sync time. {@link CompletableFuture#join} (not
-     * {@code get}) is used when collecting results so a per-ecosystem sync failure surfaces as an
-     * unchecked exception here, same as the previous sequential call would have thrown directly —
-     * {@link #syncAllAndRelease}'s {@code finally} still releases {@link #fullSyncRunning} either
-     * way.
+     * to roughly the *slowest single ecosystem's* sync time.
+     *
+     * <p><b>Per-ecosystem failures are isolated, not propagated</b> (senior review, PR #145 REVISE):
+     * an earlier version let {@link CompletableFuture#join} on the first task's future throw as soon
+     * as that one ecosystem failed, while the other 8 tasks were still running unobserved on {@link
+     * #registryMirrorSyncExecutor} — {@link #syncAllAndRelease}'s {@code finally} released {@link
+     * #fullSyncRunning} at that point regardless, so a second admin click or the weekly schedule
+     * could start a competing sync while those 8 tasks were still in flight, and whichever of them
+     * failed too did so silently (no log line at all). Each task submitted below therefore catches
+     * its own {@link RuntimeException} internally, logs it, and returns a zero outcome instead of
+     * letting the exception reach the {@link CompletableFuture} — {@link #syncAll} (and so {@link
+     * #syncAllAndRelease}) now always returns normally once every task's future completes, and one
+     * ecosystem failing never stops, or hides the failure of, any of the other 8.
      */
     private SyncOutcome syncAll() {
         List<EcosystemSyncTask> tasks = List.of(
@@ -417,16 +425,23 @@ public class RegistryMirrorSyncService {
                 }));
 
         List<CompletableFuture<int[]>> futures = tasks.stream()
-                .map(task -> CompletableFuture.supplyAsync(
-                        () -> syncEcosystem(task.ecosystem(), task.syncOneChunk()), registryMirrorSyncExecutor))
+                .map(task -> CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return syncEcosystem(task.ecosystem(), task.syncOneChunk());
+                    } catch (RuntimeException e) {
+                        log.error("Registry mirror sync ({}) failed — other ecosystems are unaffected",
+                                task.ecosystem(), e);
+                        return new int[] {0, 0, 0};
+                    }
+                }, registryMirrorSyncExecutor))
                 .toList();
 
         int totalSynced = 0;
         int totalUnresolved = 0;
         Map<String, Integer> observedNameCountByEcosystem = new LinkedHashMap<>();
         for (int i = 0; i < tasks.size(); i++) {
-            // .join() (not .get()) surfaces a task failure as an unchecked exception directly,
-            // same as the previous sequential call to syncEcosystem would have thrown.
+            // .join() never throws here — a per-ecosystem failure is already caught and logged
+            // inside the supplyAsync task above, so every future always completes normally.
             int[] result = futures.get(i).join();
             totalSynced += result[0];
             totalUnresolved += result[1];
