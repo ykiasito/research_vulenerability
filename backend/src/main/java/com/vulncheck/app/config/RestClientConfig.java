@@ -262,6 +262,30 @@ public class RestClientConfig {
     }
 
     /**
+     * For the PyPI Simple API (PEP 691 JSON) mirror sync (closed-mode backlog item 176 rollout,
+     * PyPI, {@code PyPiMirrorSyncService}) — deliberately NOT the shared {@link
+     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * #rubyGemsSyncRestClient}/{@link #packagistSyncRestClient}/{@link #hexSyncRestClient} and the
+     * other {@code *SyncRestClient} beans above. {@code pypi.org/simple/} is served through Fastly
+     * with no redirect chain observed against a package's already-PEP-503-normalized name
+     * (confirmed live 2026-09-02 against requests/django-extensions — a non-normalized name like
+     * {@code Django-Extensions} does 301-redirect to the normalized path, which is exactly why
+     * {@link PyPiMirrorSyncService} always normalizes the name into the URL itself rather than
+     * relying on this client to follow a redirect), so a plain {@link #simpleRequestFactory}
+     * (auto-follow redirects, matching the other static-index sync clients) is enough here.
+     */
+    @Bean
+    public RestClient pypiSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (pypi mirror sync)")
+                .build();
+    }
+
+    /**
      * Points at the Python LLM microservice (Stage1 Tier2/Tier3, Stage4). Longer read timeout
      * than the external-API client — a web_search-enabled Claude call can take well over 10s.
      */
