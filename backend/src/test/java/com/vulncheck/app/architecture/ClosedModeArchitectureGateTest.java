@@ -34,18 +34,23 @@ import org.springframework.core.io.FileSystemResource;
  * classpath-relative file read, so this suite stays fast and, unlike most of this module's other
  * tests, never needs {@code --network research_vulenerability_default} or a running postgres.
  *
- * <p><b>Repo-root-relative checks (docker-compose.yml, {@code llm-service/}) and the {@code
- * mvn test} sandbox</b>: {@code CLAUDE.md}'s documented single-shot verification command mounts
- * only {@code backend/} into the Maven container ({@code -v <worktree>/backend:/build -w /build}),
- * not the repository root, so a path one level above the module root (e.g. {@code
- * ../docker-compose.yml}) resolves to nothing inside that container even when the real file exists
- * on the host. Rather than hard-failing the whole suite on an environment limitation that has
- * nothing to do with the invariant being tested, those specific assertions use {@link
- * Assumptions#assumeTrue} to skip (not pass, not fail) when the repo root isn't reachable from the
- * test's working directory — this shows up distinctly as "skipped" in the Surefire summary rather
- * than a false green. To actually exercise them, run {@code mvn test} with the repository root
- * mounted (e.g. {@code -v <worktree>:/workspace -w /workspace/backend}) instead of just {@code
- * backend/}.
+ * <p><b>Repo-root-relative checks (docker-compose.yml, {@code llm-service/}) and the local {@code
+ * mvn test} sandbox</b>: when this module's tests are run by mounting only the {@code backend/}
+ * directory into a Maven container (rather than the whole repository checkout), a path one level
+ * above the module root (e.g. {@code ../docker-compose.yml}) resolves to nothing inside that
+ * container even when the real file exists on the host. Rather than hard-failing the whole suite
+ * on an environment limitation that has nothing to do with the invariant being tested, those
+ * specific assertions use {@link Assumptions#assumeTrue} to skip (not pass, not fail) when the
+ * repo root isn't reachable from the test's working directory — this shows up distinctly as
+ * "skipped" in the Surefire summary rather than a false green.
+ *
+ * <p>The canonical execution path that actually exercises these repo-root-relative checks is
+ * {@code .github/workflows/closed-mode-architecture-gate.yml} — it checks out the full repository
+ * and passes {@code -Dclosedmode.gate.require-repo-root=true}, which flips a null repo root from a
+ * skip into a hard failure (see {@link #REQUIRE_REPO_ROOT_PROPERTY}), so this suite can't silently
+ * stop covering them without CI noticing. Running {@code mvn test} locally with only {@code
+ * backend/} mounted remains a legitimate reduced/offline way to run the rest of this suite; those
+ * two checks are simply expected to skip there.
  */
 class ClosedModeArchitectureGateTest {
 

@@ -23,11 +23,11 @@ import org.springframework.context.ApplicationContext;
  * (items 2 and 4) that genuinely need a real {@link ApplicationContext} rather than plain
  * reflection over a known class, since what's actually asserted is "Spring's own DI wiring", not
  * just "does this method/class exist somewhere on the classpath" (that half is covered by {@link
- * ClosedModeArchitectureGateTest}). Needs {@code --network research_vulenerability_default} when
- * run via the {@code docker run} command in {@code CLAUDE.md} (this app's {@code
- * @SpringBootTest} contexts validate their Flyway schema against a running {@code vulncheck_test}
- * postgres on startup) — same requirement as every other {@code @SpringBootTest} in this module,
- * not something new this test suite introduces.
+ * ClosedModeArchitectureGateTest}). Must run on a network that can reach a running {@code
+ * vulncheck_test} postgres (this app's {@code @SpringBootTest} contexts validate their Flyway
+ * schema against it on startup) — same requirement as every other {@code @SpringBootTest} in this
+ * module (e.g. {@code SessionCookieSecureDefaultTest}/{@code SessionCookieSecureEnabledTest}), not
+ * something new this test suite introduces.
  */
 @SpringBootTest
 class ClosedModeBeanArchitectureGateTest {
