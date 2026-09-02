@@ -130,7 +130,10 @@ public class CpeDictionaryScheduledResync {
             log.warn("Could not resolve the admin's NVD key — running this resync unkeyed (slower)", t);
             adminKey = Optional.empty();
         }
-        // Item 142 REVISE R2: log which of the two ~103-minute-vs-~17-hour paths this run is on.
+        // Item 142 REVISE R2, corrected per item 161: log which path this run is on. With
+        // RESULTS_PER_PAGE=10000 the full sync is only ~182 requests, so the keyed-vs-unkeyed
+        // difference is the per-request rate-limit wait times 182 requests (~18 minutes total),
+        // not the ~103-minute-vs-~17-hour gap an earlier version of this comment claimed.
         // Never log the key/adminEmail value itself here — just the boolean presence, matching
         // UserApiKeyService#getAdminNvdApiKey()'s own no-secrets-in-logs contract.
         log.warn("Scheduled weekly NVD CPE dictionary resync starting (admin NVD key present: {}) — "

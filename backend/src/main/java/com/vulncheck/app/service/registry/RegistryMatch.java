@@ -17,10 +17,9 @@ import java.util.List;
  *                  {@link PackageRegistryLookup} implementations check {@code exactVersionConfirmed}
  *                  by scanning exactly this list, then previously discarded it). Empty when the
  *                  implementation doesn't have one in hand (e.g. Maven Central's search API only
- *                  returns a version count/matching rows per query, not a full list; the Go proxy
- *                  has no single-call equivalent) — {@link RegistryLookupCache} falls back to its
- *                  pre-existing per-version caching for those rather than fetching an extra page
- *                  just to populate this field.
+ *                  returns a version count/matching rows per query, not a full list) — {@link
+ *                  RegistryLookupCache} falls back to its pre-existing per-version caching for those
+ *                  rather than fetching an extra page just to populate this field.
  */
 public record RegistryMatch(String ecosystem, String packageName, String purl, BigDecimal confidence,
         boolean exactVersionConfirmed, List<String> versions) {

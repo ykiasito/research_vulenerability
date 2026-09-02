@@ -5,10 +5,12 @@ import static org.springframework.test.web.client.match.MockRestRequestMatchers.
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
+import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -24,7 +26,12 @@ class PackagistRegistryClientTest {
     void setUp() {
         RestClient.Builder builder = RestClient.builder();
         server = MockRestServiceServer.bindTo(builder).build();
-        client = new PackagistRegistryClient(builder.build(), ExternalRegistryRateLimiter.disabledForTesting());
+        // mirrorEnabled defaults to false (this @Value field is never injected outside a Spring
+        // context), so every test below exercises the pre-existing live path, same as before the
+        // mirror wiring was added -- no need to stub the mock's hasAnyEntries/findVersions.
+        RegistryPackageMirrorRepository mirrorRepository = Mockito.mock(RegistryPackageMirrorRepository.class);
+        client = new PackagistRegistryClient(
+                builder.build(), ExternalRegistryRateLimiter.disabledForTesting(), mirrorRepository);
     }
 
     @Test
