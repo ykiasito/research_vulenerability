@@ -149,4 +149,22 @@ class PackagistMirrorSyncServiceTest {
         Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("packagist"), batchCaptor.capture());
         assertThat(batchCaptor.getValue()).isEmpty();
     }
+
+    @Test
+    void neverConsumesARateLimitSlotForAnInvalidPackageName() {
+        // Closed-mode backlog item 184 REVISE: the name-grammar check must run before
+        // rateLimiter.awaitTurn, not just before the HTTP call -- otherwise a name that's going to
+        // be rejected anyway still delays the next name in the batch by Packagist's ~500ms pacing.
+        ExternalRegistryRateLimiter mockRateLimiter = Mockito.mock(ExternalRegistryRateLimiter.class);
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer mockServer = MockRestServiceServer.bindTo(builder).build();
+        PackagistMirrorSyncService serviceWithMockedLimiter = new PackagistMirrorSyncService(
+                builder.build(), mockRateLimiter, registryPackageMirrorRepository);
+
+        SyncOutcome outcome = serviceWithMockedLimiter.syncPackages(List.of("../monolog"));
+
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        mockServer.verify();
+        Mockito.verify(mockRateLimiter, Mockito.never()).awaitTurn(Mockito.anyString());
+    }
 }

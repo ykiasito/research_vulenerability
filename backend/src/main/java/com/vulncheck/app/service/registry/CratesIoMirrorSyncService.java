@@ -85,6 +85,18 @@ public class CratesIoMirrorSyncService {
                 continue;
             }
             String packageName = rawName.trim();
+            // Closed-mode backlog item 184 REVISE: reject a package name outside crates.io's own
+            // naming grammar before rateLimiter.awaitTurn below, so a name that's going to be
+            // rejected anyway never consumes a rate-limit slot at the expense of delaying the next
+            // (possibly valid) name in the batch. See RegistryMirrorPackageNameValidator's class
+            // javadoc for why this check is needed even though this method's caller already sits
+            // behind RegistryMirrorSyncService#isValidSeedName's wider, upload-time gate.
+            if (!RegistryMirrorPackageNameValidator.isValidSimpleName(packageName)) {
+                log.warn("crates.io mirror sync rejected package name as invalid for URL assembly: "
+                        + "package={}", packageName);
+                unresolved++;
+                continue;
+            }
             rateLimiter.awaitTurn(ECOSYSTEM);
             Optional<List<String>> versions = fetchVersions(packageName);
             if (versions.isEmpty()) {
@@ -106,11 +118,8 @@ public class CratesIoMirrorSyncService {
      *  "transient failure, retry later" (a manual re-run of {@link #syncPackages} covers both). */
     private Optional<List<String>> fetchVersions(String packageName) {
         try {
-            // Closed-mode backlog item 184: reject a package name outside crates.io's own naming
-            // grammar before it ever reaches the URL below (see RegistryMirrorPackageNameValidator's
-            // class javadoc for why this is needed even though this method's caller already sits
-            // behind RegistryMirrorSyncService#isValidSeedName's wider, upload-time gate).
-            RegistryMirrorPackageNameValidator.validateSimpleName(packageName);
+            // packageName is already validated by RegistryMirrorPackageNameValidator in
+            // syncPackages (closed-mode backlog item 184 REVISE), before this method is ever called.
             // Not .uri("https://index.crates.io/{path}", sparseIndexPath(...)): RestClient treats a
             // single {placeholder} substitution as one opaque path *segment* and percent-encodes any
             // "/" inside the substituted value (confirmed: produced .../se%2Frd%2Fserde instead of
@@ -145,10 +154,6 @@ public class CratesIoMirrorSyncService {
                 return Optional.empty();
             }
             return Optional.of(versions);
-        } catch (IllegalArgumentException e) {
-            log.warn("crates.io mirror sync rejected package name as invalid for URL assembly: "
-                    + "package={} ({})", packageName, e.getMessage());
-            return Optional.empty();
         } catch (HttpClientErrorException.NotFound e) {
             log.debug("crates.io sparse index has no entry for package={}", packageName);
             return Optional.empty();
