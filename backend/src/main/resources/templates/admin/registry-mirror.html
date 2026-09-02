@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>パッケージレジストリミラー同期 - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>パッケージレジストリミラー同期</h1>
+
+<p>
+    crates.io / RubyGems / Packagist / Hex / npm / PyPI / NuGet / Go / pub.dev の9レジストリ分のミラー
+    （<code>registry_package_mirror</code>）を、これまでにこのアプリが実際に解決したパッケージ名
+    （<code>identified_products</code>に記録済みのもの）を元に同期します。Maven Centralはミラー対象外です。
+</p>
+
+<p th:if="${result}" th:text="${result}" style="color: green;"></p>
+
+<p style="color: #b00;">
+    観測済みパッケージ名の件数に応じて時間がかかります。ボタンを押すとサーバー側のバックグラウンドスレッドで
+    開始し、このページはすぐに応答を返します。進捗・完了はバックエンドのログで確認してください。
+</p>
+<p style="color: #b00;">
+    既に同期が実行中の場合は、このボタンを押しても新たな同期は開始されません（二重起動防止）。
+</p>
+<form th:action="@{/admin/registry-mirror/sync-all}" method="post"
+      onsubmit="return confirm('レジストリミラー同期を開始します。よろしいですか？');">
+    <button type="submit">同期を開始</button>
+</form>
+
+<p><a th:href="@{/}">ホームに戻る</a></p>
+</body>
+</html>

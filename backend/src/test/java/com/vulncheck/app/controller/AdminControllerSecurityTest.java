@@ -18,6 +18,7 @@ import com.vulncheck.app.service.csaf.SiemensCsafSyncService;
 import com.vulncheck.app.service.cveorg.CveOrgSyncService;
 import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.osv.OsvSyncService;
+import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -73,6 +74,8 @@ class AdminControllerSecurityTest {
     private OsvSyncStateRepository osvSyncStateRepository;
     @MockBean
     private OsvSyncFailureRepository osvSyncFailureRepository;
+    @MockBean
+    private RegistryMirrorSyncService registryMirrorSyncService;
 
     @Test
     void unauthenticatedRequestIsRedirectedToLogin() throws Exception {
@@ -91,6 +94,28 @@ class AdminControllerSecurityTest {
     @WithMockUser(roles = "ADMIN")
     void adminUserIsAllowedThrough() throws Exception {
         mockMvc.perform(post("/admin/cpe-dictionary/sync-all").with(csrf()))
+                .andExpect(status().is2xxSuccessful());
+    }
+
+    /** Same {@code /admin/**} -> {@code hasRole("ADMIN")} rule, exercised against the new
+     *  registry-mirror sync endpoint (closed-mode backlog item 183). */
+    @Test
+    void unauthenticatedRequestToRegistryMirrorSyncIsRedirectedToLogin() throws Exception {
+        mockMvc.perform(post("/admin/registry-mirror/sync-all").with(csrf()))
+                .andExpect(status().is3xxRedirection());
+    }
+
+    @Test
+    @WithMockUser(roles = "USER")
+    void authenticatedNonAdminUserIsForbiddenFromRegistryMirrorSync() throws Exception {
+        mockMvc.perform(post("/admin/registry-mirror/sync-all").with(csrf()))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @WithMockUser(roles = "ADMIN")
+    void adminUserIsAllowedThroughToRegistryMirrorSync() throws Exception {
+        mockMvc.perform(post("/admin/registry-mirror/sync-all").with(csrf()))
                 .andExpect(status().is2xxSuccessful());
     }
 }
