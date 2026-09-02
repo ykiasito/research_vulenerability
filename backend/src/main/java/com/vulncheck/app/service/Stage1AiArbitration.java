@@ -212,9 +212,13 @@ public class Stage1AiArbitration {
      * empty (see {@code Stage1IdentificationService#resolveSingleCpeCandidate}'s javadoc for why)
      * — that's the one place this intentionally differs from the registry-match verification it's
      * modeled on.
+     *
+     * <p>Takes {@link MaskedCpeString} rather than a plain {@code String} (closed-mode backlog items
+     * 169/170, senior review 2026-09-01) so "the CPE shown to the LLM is always version-masked" is
+     * enforced by the type system instead of caller discipline.
      */
     public Optional<DisambiguateResponse> verifyVariantDerivedCpeMatchWithAi(
-            ResearchJobItem item, Long userId, CpeDictionaryEntry candidate, String maskedCpeString) {
+            ResearchJobItem item, Long userId, CpeDictionaryEntry candidate, MaskedCpeString maskedCpe) {
         Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
         if (apiKey.isEmpty()) {
             return Optional.empty();
@@ -224,7 +228,7 @@ public class Stage1AiArbitration {
             return Optional.empty();
         }
         CandidateDto candidateDto = new CandidateDto(
-                null, candidate.getProduct(), maskedCpeString, null, "cpe_dictionary_name_variant");
+                null, candidate.getProduct(), maskedCpe.value(), null, "cpe_dictionary_name_variant");
         return llmServiceClient.disambiguate(
                 apiKey.get(), item, List.of(candidateDto), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
     }
@@ -236,9 +240,16 @@ public class Stage1AiArbitration {
      * available" without needing to know *why* (no key, no budget, or the LLM call itself failing
      * are all folded into the same empty return, matching this method's pre-extraction inline
      * behavior).
+     *
+     * <p>Takes {@link CpeDisambiguationCandidate} (which itself wraps a {@link MaskedCpeString})
+     * rather than a raw {@code List<CandidateDto>} (closed-mode backlog items 169/170, senior review
+     * 2026-09-01) — a plain {@code CandidateDto} carries an unconstrained {@code String cpe} field
+     * a caller could pass unmasked, whereas building the {@code CandidateDto}s here from a
+     * {@code MaskedCpeString}-backed type keeps "the LLM only ever sees masked CPEs" a guarantee
+     * of this method's own signature instead of caller discipline.
      */
     public Optional<DisambiguateResponse> disambiguateCpeCandidates(
-            ResearchJobItem item, Long userId, List<CandidateDto> candidateDtos) {
+            ResearchJobItem item, Long userId, List<CpeDisambiguationCandidate> candidates) {
         Optional<String> apiKey = userApiKeyService.getClaudeApiKey(userId);
         if (apiKey.isEmpty()) {
             return Optional.empty();
@@ -246,6 +257,21 @@ public class Stage1AiArbitration {
         if (!jobCostBudgetService.tryReserve(item.getJobId(), JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD)) {
             return Optional.empty();
         }
+        List<CandidateDto> candidateDtos = candidates.stream()
+                .map(c -> new CandidateDto(null, c.product(), c.cpe().value(), null, "cpe_dictionary"))
+                .toList();
         return llmServiceClient.disambiguate(apiKey.get(), item, candidateDtos, JobCostBudgetService.TIER2_DISAMBIGUATE_COST_USD);
+    }
+
+    /**
+     * One candidate for {@link #disambiguateCpeCandidates}: a CPE-dictionary product name paired
+     * with its version-masked CPE string. Every real caller today (see {@link
+     * Stage1IdentificationService#resolveCandidates}) fills in exactly this — dictionary-derived
+     * {@code ecosystem=null}/{@code purl=null}/{@code source="cpe_dictionary"} — so bundling those
+     * fixed fields here rather than exposing full {@link CandidateDto} construction to callers is
+     * both simpler and (per this class's own note above) forces the CPE through {@link
+     * MaskedCpeString}.
+     */
+    public record CpeDisambiguationCandidate(String product, MaskedCpeString cpe) {
     }
 }
