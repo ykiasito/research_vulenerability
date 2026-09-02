@@ -1,6 +1,8 @@
 package com.vulncheck.app.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -14,11 +16,13 @@ import com.vulncheck.app.repository.CpeDictionaryRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
+import com.vulncheck.app.repository.NvdCveSyncStateRepository;
 import com.vulncheck.app.repository.OsvSyncFailureRepository;
 import com.vulncheck.app.repository.OsvSyncStateRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.NvdCpeSyncService;
 import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
+import com.vulncheck.app.service.NvdCveSyncService;
 import com.vulncheck.app.service.UserApiKeyService;
 import com.vulncheck.app.service.csaf.RedHatCsafSyncService;
 import com.vulncheck.app.service.csaf.SiemensCsafSyncService;
@@ -77,12 +81,16 @@ class AdminControllerTest {
     private OsvSyncFailureRepository osvSyncFailureRepository;
     @Mock
     private RegistryMirrorSyncService registryMirrorSyncService;
+    @Mock
+    private NvdCveSyncService nvdCveSyncService;
+    @Mock
+    private NvdCveSyncStateRepository nvdCveSyncStateRepository;
 
     private AdminController newController() {
         return new AdminController(nvdCpeSyncService, userApiKeyService, userRepository, cveOrgSyncService,
                 siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository, ghsaSyncService,
                 ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService, osvSyncStateRepository,
-                osvSyncFailureRepository, registryMirrorSyncService);
+                osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService, nvdCveSyncStateRepository);
     }
 
     @Test
@@ -184,7 +192,8 @@ class AdminControllerTest {
         AdminController controller = new AdminController(sharedService, userApiKeyService, userRepository,
                 cveOrgSyncService, siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository,
                 ghsaSyncService, ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService,
-                osvSyncStateRepository, osvSyncFailureRepository, registryMirrorSyncService);
+                osvSyncStateRepository, osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService,
+                nvdCveSyncStateRepository);
         Model model = new ExtendedModelMap();
 
         String view = controller.cpeFullSync(model);
@@ -327,5 +336,72 @@ class AdminControllerTest {
 
         assertThat(view).isEqualTo("admin/registry-mirror");
         assertThat(model.getAttribute("result")).asString().contains("上限");
+    }
+
+    @Test
+    void nvdCveSyncNowStartsABackgroundTickAndReturnsImmediately() throws InterruptedException {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(nvdCveSyncService.tryBeginRun()).thenReturn(true);
+        when(nvdCveSyncService.runBackfillTickAndRelease(eq(Optional.empty()), any())).thenAnswer(invocation -> {
+            started.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return new NvdCveSyncService.SyncOutcome(120, false);
+        });
+
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.nvdCveSyncNow(model);
+
+        assertThat(view).isEqualTo("admin/nvd-cve");
+        assertThat(model.getAttribute("result")).asString().contains("開始しました");
+        assertThat(started.await(2, TimeUnit.SECONDS))
+                .as("background thread should have invoked runBackfillTickAndRelease() by now")
+                .isTrue();
+        verify(nvdCveSyncService).runBackfillTickAndRelease(eq(Optional.empty()), any());
+
+        release.countDown();
+    }
+
+    @Test
+    void nvdCveSyncNowRejectsASecondStartWhileOneIsAlreadyRunning() {
+        when(nvdCveSyncService.tryBeginRun()).thenReturn(false);
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.nvdCveSyncNow(model);
+
+        assertThat(view).isEqualTo("admin/nvd-cve");
+        assertThat(model.getAttribute("result")).asString().contains("既に実行中");
+        verify(nvdCveSyncService, never()).runBackfillTickAndRelease(any(), any());
+    }
+
+    @Test
+    void nvdCveSyncNowReleasesTheGuardWhenTheWorkerThreadFailsToStart() {
+        when(nvdCveSyncService.tryBeginRun()).thenReturn(true);
+        AdminController controller = spy(newController());
+        doThrow(new RuntimeException("unable to create native thread")).when(controller).startNvdCveBackfillWorker();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.nvdCveSyncNow(model);
+
+        assertThat(view).isEqualTo("admin/nvd-cve");
+        assertThat(model.getAttribute("result")).asString().contains("失敗しました");
+        verify(nvdCveSyncService, times(1)).releaseRunGuard();
+        verify(nvdCveSyncService, never()).runBackfillTickAndRelease(any(), any());
+    }
+
+    @Test
+    void nvdCveFormExposesTheSyncStateToTheModel() {
+        com.vulncheck.app.entity.NvdCveSyncState state = new com.vulncheck.app.entity.NvdCveSyncState();
+        when(nvdCveSyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.nvdCveForm(model);
+
+        assertThat(view).isEqualTo("admin/nvd-cve");
+        assertThat(model.getAttribute("syncState")).isSameAs(state);
     }
 }

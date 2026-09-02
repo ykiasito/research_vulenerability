@@ -137,6 +137,26 @@ app:
   # a positive (>= 1) value — 0 or negative falls back to RegistryMirrorSyncService's own
   # DEFAULT_CHUNK_SIZE (200), logging a warning, rather than hanging/throwing (PR #122 REVISE).
   registry-mirror-sync-chunk-size: ${REGISTRY_MIRROR_SYNC_CHUNK_SIZE:200}
+  # NVD CVE API bulk mirror (closed-mode backlog item 202, docs/spec/closed-mode-plan.md §4-2):
+  # nvd_cve_records/nvd_cve_cpe_match, populated by NvdCveSyncService via
+  # NvdCveBackfillScheduledRunner (daily, self-terminating once baseline_completed) or the manual
+  # /admin/nvd-cve kick. Off by default -- required, not optional: the estimated ~2-3GB storage
+  # impact (§4-2-6) is on top of this app's existing 15GB DB size hard cap, so growing this mirror
+  # must be a deliberate per-environment opt-in, same convention as every other *-mirror-enabled/
+  # *-scheduled-resync-enabled flag above.
+  nvd-cve-backfill:
+    enabled: ${NVD_CVE_BACKFILL_ENABLED:false}
+    # 06:00 UTC daily by default -- see NvdCveBackfillScheduledRunner#runBackfillTick's javadoc for
+    # why this slot was chosen relative to every other sync job (in particular, why it must not
+    # collide with the CPE dictionary's Sunday 01:30 UTC weekly resync -- both share the same
+    # process-wide NvdRateLimiter).
+    cron: ${NVD_CVE_BACKFILL_CRON:0 0 6 * * *}
+    # Per-run budget, counted in fetch *attempts* (not successes -- see NvdCveSyncService's class
+    # javadoc for why) so a chunk stuck retrying a persistent error can't consume unlimited
+    # wall-clock time within one run. At these defaults, a full ~245-300 request backfill
+    # (docs/spec/closed-mode-plan.md §4-2-3) finishes in roughly 4-5 daily runs.
+    max-requests-per-run: ${NVD_CVE_BACKFILL_MAX_REQUESTS_PER_RUN:60}
+    max-duration-minutes: ${NVD_CVE_BACKFILL_MAX_DURATION_MINUTES:60}
 
 server:
   port: 8080
