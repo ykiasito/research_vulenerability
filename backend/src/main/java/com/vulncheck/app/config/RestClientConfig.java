@@ -180,6 +180,204 @@ public class RestClientConfig {
     }
 
     /**
+     * For the crates.io sparse-index mirror sync (closed-mode backlog item 176 pilot, {@code
+     * CratesIoMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * item-165 rationale as the other {@code *SyncRestClient} beans above: that bean is meant to stay
+     * a request-path-only egress (the 10 live registries, live NVD, live OSV) so a future full
+     * closed-mode branch can delete it outright without having to first carve sync-time traffic back
+     * out of it. {@code index.crates.io} is a static-file CDN (one small NDJSON response per
+     * package), not an API with SSRF-shaped redirect chains like the CSAF/GHSA/OSV/CVE.org sync
+     * targets above, so a plain {@link #simpleRequestFactory} (auto-follow redirects) is enough here.
+     */
+    @Bean
+    public RestClient cratesIoSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (crates.io mirror sync)")
+                .build();
+    }
+
+    /**
+     * For the RubyGems compact-index mirror sync (closed-mode backlog item 176 rollout, {@code
+     * RubyGemsMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * item-165 rationale as {@link #cratesIoSyncRestClient} and the other {@code *SyncRestClient}
+     * beans above. {@code index.rubygems.org} is served through Fastly with no redirect chain
+     * observed against real gem lookups (confirmed live 2026-09-02), so a plain {@link
+     * #simpleRequestFactory} (auto-follow redirects) is enough here, matching {@link
+     * #cratesIoSyncRestClient}'s reasoning for its own equivalent static-index target.
+     */
+    @Bean
+    public RestClient rubyGemsSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (rubygems mirror sync)")
+                .build();
+    }
+
+    /**
+     * For the Packagist {@code p2/} provider-metadata mirror sync (closed-mode backlog item 176
+     * rollout, {@code PackagistMirrorSyncService}) — deliberately NOT the shared {@link
+     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * #rubyGemsSyncRestClient} and the other {@code *SyncRestClient} beans above. {@code
+     * repo.packagist.org} is served through a static-file CDN (one small JSON response per package,
+     * confirmed live 2026-09-02 with no redirect chain observed), same shape as the crates.io/RubyGems
+     * index targets, so a plain {@link #simpleRequestFactory} (auto-follow redirects) is enough here.
+     */
+    @Bean
+    public RestClient packagistSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (packagist mirror sync)")
+                .build();
+    }
+
+    /**
+     * For the Hex.pm mirror sync (closed-mode backlog item 176, Hex rollout, {@code
+     * HexMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient} and the
+     * other {@code *SyncRestClient} beans above. {@code hex.pm} is served through Fastly with no
+     * redirect chain observed against real package lookups (confirmed live 2026-09-02 against
+     * jason/phoenix), so a plain {@link #simpleRequestFactory} (auto-follow redirects) is enough
+     * here, matching {@link #cratesIoSyncRestClient}'s/{@link #rubyGemsSyncRestClient}'s reasoning
+     * for their own equivalent static-index targets.
+     */
+    @Bean
+    public RestClient hexSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (hex mirror sync)")
+                .build();
+    }
+
+    /**
+     * For the npm registry mirror sync (closed-mode backlog item 176 rollout, npm, {@code
+     * NpmMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient}/{@link
+     * #packagistSyncRestClient}/{@link #hexSyncRestClient} and the other {@code *SyncRestClient} beans
+     * above. {@code registry.npmjs.org}'s per-package document endpoint ({@code GET /{package}}) is
+     * served with no redirect chain observed against real package lookups (confirmed live 2026-09-02
+     * against {@code lodash} and the fully-percent-encoded scoped package path {@code
+     * %40types%2Fnode}), same shape as the crates.io/RubyGems/Packagist/Hex index targets, so a plain
+     * {@link #simpleRequestFactory} (auto-follow redirects) is enough here.
+     */
+    @Bean
+    public RestClient npmSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (npm mirror sync)")
+                .build();
+    }
+
+    /**
+     * For the PyPI Simple API (PEP 691 JSON) mirror sync (closed-mode backlog item 176 rollout,
+     * PyPI, {@code PyPiMirrorSyncService}) — deliberately NOT the shared {@link
+     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * #rubyGemsSyncRestClient}/{@link #packagistSyncRestClient}/{@link #hexSyncRestClient} and the
+     * other {@code *SyncRestClient} beans above. {@code pypi.org/simple/} is served through Fastly
+     * with no redirect chain observed against a package's already-PEP-503-normalized name
+     * (confirmed live 2026-09-02 against requests/django-extensions — a non-normalized name like
+     * {@code Django-Extensions} does 301-redirect to the normalized path, which is exactly why
+     * {@link PyPiMirrorSyncService} always normalizes the name into the URL itself rather than
+     * relying on this client to follow a redirect), so a plain {@link #simpleRequestFactory}
+     * (auto-follow redirects, matching the other static-index sync clients) is enough here.
+     */
+    @Bean
+    public RestClient pypiSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (pypi mirror sync)")
+                .build();
+    }
+
+    /**
+     * For the NuGet flat-container package-base-address mirror sync (closed-mode backlog item 176
+     * rollout, NuGet, {@code NuGetMirrorSyncService}) — deliberately NOT the shared {@link
+     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * #rubyGemsSyncRestClient}/{@link #packagistSyncRestClient}/{@link #hexSyncRestClient}/{@link
+     * #npmSyncRestClient}/{@link #pypiSyncRestClient} and the other {@code *SyncRestClient} beans
+     * above. {@code api.nuget.org}'s flat-container endpoint is served directly off Azure Blob
+     * Storage with no redirect chain observed against real package lookups (confirmed live
+     * 2026-09-02 against {@code newtonsoft.json} and a nonexistent id — the response's own {@code
+     * x-ms-blob-type}/{@code X-CDN-Rewrite} headers confirm the blob-storage origin), same shape as
+     * the crates.io/RubyGems/Packagist/Hex/npm/PyPI index targets, so a plain {@link
+     * #simpleRequestFactory} (auto-follow redirects) is enough here.
+     */
+    @Bean
+    public RestClient nugetSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (nuget mirror sync)")
+                .build();
+    }
+
+    /**
+     * For the Go module proxy per-module version-list mirror sync (closed-mode backlog item 176
+     * rollout, Go, {@code GoMirrorSyncService}) — deliberately NOT the shared {@link
+     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * #rubyGemsSyncRestClient}/{@link #packagistSyncRestClient}/{@link #hexSyncRestClient}/{@link
+     * #npmSyncRestClient}/{@link #pypiSyncRestClient}/{@link #nugetSyncRestClient} and the other
+     * {@code *SyncRestClient} beans above. {@code proxy.golang.org}'s {@code @v/list} endpoint
+     * returns its plain-text version list with no redirect chain observed against real module
+     * lookups (confirmed live 2026-09-02 against {@code github.com/gin-gonic/gin} and a nonexistent
+     * module — plain 404, no body), same shape as the crates.io/RubyGems/Packagist/Hex/npm/PyPI/
+     * NuGet index targets, so a plain {@link #simpleRequestFactory} (auto-follow redirects) is
+     * enough here.
+     */
+    @Bean
+    public RestClient goSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (go mirror sync)")
+                .build();
+    }
+
+    /**
+     * For the pub.dev per-package document sync (closed-mode backlog item 176 rollout, pub.dev,
+     * {@code PubMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient},
+     * same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient}/
+     * {@link #packagistSyncRestClient}/{@link #hexSyncRestClient}/{@link #npmSyncRestClient}/{@link
+     * #pypiSyncRestClient}/{@link #nugetSyncRestClient} and the other {@code *SyncRestClient} beans
+     * above. {@code pub.dev/api/packages/{name}} is served with no redirect chain observed against a
+     * real package lookup (confirmed live 2026-09-02 against {@code http}) and, unlike {@code
+     * /api/package-names}, does not require a specific {@code Accept-Encoding} header, so a plain
+     * {@link #simpleRequestFactory} (auto-follow redirects) is enough here.
+     */
+    @Bean
+    public RestClient pubSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (pub.dev mirror sync)")
+                .build();
+    }
+
+    /**
      * Points at the Python LLM microservice (Stage1 Tier2/Tier3, Stage4). Longer read timeout
      * than the external-API client — a web_search-enabled Claude call can take well over 10s.
      */
