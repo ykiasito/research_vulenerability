@@ -245,18 +245,92 @@ class RegistryMirrorSyncServiceTest {
 
     @Test
     void addOperatorSuppliedNamesTrimsBlanksAndDeduplicatesBeforeInserting() {
-        int submitted = service.addOperatorSuppliedNames("npm",
+        RegistryMirrorSyncService.SeedNameSubmissionOutcome outcome = service.addOperatorSuppliedNames("npm",
                 List.of(" left-pad ", "left-pad", "", "  ", "is-odd"));
 
-        assertThat(submitted).isEqualTo(2);
+        assertThat(outcome.accepted()).isEqualTo(2);
+        assertThat(outcome.rejected()).isEqualTo(0);
         verify(registryMirrorSeedNameRepository).insertBatch("npm", List.of("left-pad", "is-odd"));
     }
 
     @Test
     void addOperatorSuppliedNamesIsANoOpForAnAllBlankList() {
-        int submitted = service.addOperatorSuppliedNames("npm", List.of("", "   ", "\n"));
+        RegistryMirrorSyncService.SeedNameSubmissionOutcome outcome =
+                service.addOperatorSuppliedNames("npm", List.of("", "   ", "\n"));
 
-        assertThat(submitted).isEqualTo(0);
+        assertThat(outcome.accepted()).isEqualTo(0);
+        assertThat(outcome.rejected()).isEqualTo(0);
+        verifyNoInteractions(registryMirrorSeedNameRepository);
+    }
+
+    /**
+     * Senior review, PR #126 REVISE (closed-mode backlog item 185): a {@code ..} path segment must
+     * be rejected and must never reach {@code insertBatch}, since a name that leaks through would
+     * flow straight into {@code CratesIoMirrorSyncService}/{@code PackagistMirrorSyncService}'s
+     * un-encoded URL assembly (closed-mode backlog item 184).
+     */
+    @Test
+    void addOperatorSuppliedNamesRejectsATraversalSegmentAndNeverReachesInsertBatch() {
+        RegistryMirrorSyncService.SeedNameSubmissionOutcome outcome =
+                service.addOperatorSuppliedNames("npm", List.of("../../etc/passwd", "left-pad"));
+
+        assertThat(outcome.accepted()).isEqualTo(1);
+        assertThat(outcome.rejected()).isEqualTo(1);
+        verify(registryMirrorSeedNameRepository).insertBatch("npm", List.of("left-pad"));
+    }
+
+    /** Same REVISE item: a name over 200 characters must be rejected. */
+    @Test
+    void addOperatorSuppliedNamesRejectsANameOver200Characters() {
+        String tooLong = "a".repeat(201);
+        RegistryMirrorSyncService.SeedNameSubmissionOutcome outcome =
+                service.addOperatorSuppliedNames("npm", List.of(tooLong, "left-pad"));
+
+        assertThat(outcome.accepted()).isEqualTo(1);
+        assertThat(outcome.rejected()).isEqualTo(1);
+        verify(registryMirrorSeedNameRepository).insertBatch("npm", List.of("left-pad"));
+    }
+
+    /**
+     * Same REVISE item: every legitimate name shape across the 9 mirrored ecosystems must pass —
+     * see {@link RegistryMirrorSyncService}'s {@code SEED_NAME_ALLOWED_CHARS} javadoc.
+     */
+    @Test
+    void addOperatorSuppliedNamesAcceptsLegitimateNamesFromEveryEcosystemShape() {
+        List<String> legitimateNames = List.of("github.com/foo/bar", "@scope/pkg", "vendor/pkg", "Newtonsoft.Json");
+
+        RegistryMirrorSyncService.SeedNameSubmissionOutcome outcome =
+                service.addOperatorSuppliedNames("npm", legitimateNames);
+
+        assertThat(outcome.accepted()).isEqualTo(4);
+        assertThat(outcome.rejected()).isEqualTo(0);
+        verify(registryMirrorSeedNameRepository).insertBatch("npm", legitimateNames);
+    }
+
+    /** Same REVISE item: a mixed valid/invalid list inserts only the valid names and reports both counts. */
+    @Test
+    void addOperatorSuppliedNamesInsertsOnlyValidNamesAndReportsBothCountsForAMixedList() {
+        RegistryMirrorSyncService.SeedNameSubmissionOutcome outcome = service.addOperatorSuppliedNames("npm",
+                List.of("left-pad", "..", "is-odd", "//double-slash", "chalk"));
+
+        assertThat(outcome.accepted()).isEqualTo(3);
+        assertThat(outcome.rejected()).isEqualTo(2);
+        verify(registryMirrorSeedNameRepository).insertBatch("npm", List.of("left-pad", "is-odd", "chalk"));
+    }
+
+    /**
+     * Senior review, PR #126 REVISE (closed-mode backlog item 185): a submission whose cleaned-up
+     * name count exceeds the 10,000-name cap must be rejected in full — no partial insert, and the
+     * repository must never be touched.
+     */
+    @Test
+    void addOperatorSuppliedNamesRejectsTheWholeBatchWhenOver10000NamesRatherThanTouchingTheRepository() {
+        List<String> tooManyNames = java.util.stream.IntStream.range(0, 10_001)
+                .mapToObj(i -> "package-" + i)
+                .toList();
+
+        assertThatThrownBy(() -> service.addOperatorSuppliedNames("npm", tooManyNames))
+                .isInstanceOf(RegistryMirrorSyncService.SeedNameBatchTooLargeException.class);
         verifyNoInteractions(registryMirrorSeedNameRepository);
     }
 }

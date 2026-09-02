@@ -268,7 +268,7 @@ class AdminControllerTest {
     @Test
     void registryMirrorAddSeedNamesSplitsOnNewlinesAndCommasAndReportsTheSubmittedCount() {
         when(registryMirrorSyncService.addOperatorSuppliedNames("npm", List.of("left-pad", "is-odd", "chalk")))
-                .thenReturn(3);
+                .thenReturn(new RegistryMirrorSyncService.SeedNameSubmissionOutcome(3, 0));
         AdminController controller = newController();
         Model model = new ExtendedModelMap();
 
@@ -277,6 +277,24 @@ class AdminControllerTest {
         assertThat(view).isEqualTo("admin/registry-mirror");
         assertThat(model.getAttribute("result")).asString().contains("3件");
         verify(registryMirrorSyncService).addOperatorSuppliedNames("npm", List.of("left-pad", "is-odd", "chalk"));
+    }
+
+    /**
+     * Senior review, PR #126 REVISE (closed-mode backlog item 185): both the accepted count and the
+     * rejected count must reach the operator, since a silently-skipped invalid name would otherwise
+     * be indistinguishable from one that was never submitted.
+     */
+    @Test
+    void registryMirrorAddSeedNamesReportsBothTheAcceptedAndRejectedCounts() {
+        when(registryMirrorSyncService.addOperatorSuppliedNames("npm", List.of("left-pad", "..")))
+                .thenReturn(new RegistryMirrorSyncService.SeedNameSubmissionOutcome(1, 1));
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.registryMirrorAddSeedNames("npm", "left-pad\n..", model);
+
+        assertThat(view).isEqualTo("admin/registry-mirror");
+        assertThat(model.getAttribute("result")).asString().contains("1件").contains("却下");
     }
 
     @Test
@@ -290,5 +308,24 @@ class AdminControllerTest {
 
         assertThat(view).isEqualTo("admin/registry-mirror");
         assertThat(model.getAttribute("result")).asString().contains("不正");
+    }
+
+    /**
+     * Senior review, PR #126 REVISE (closed-mode backlog item 185): an over-10,000-name submission
+     * must surface a clear rejection message to the operator rather than propagating a raw 500 (this
+     * app has no {@code @ControllerAdvice}/{@code @ExceptionHandler}).
+     */
+    @Test
+    void registryMirrorAddSeedNamesReportsAClearMessageWhenTheBatchIsTooLarge() {
+        when(registryMirrorSyncService.addOperatorSuppliedNames("npm", List.of("left-pad")))
+                .thenThrow(new RegistryMirrorSyncService.SeedNameBatchTooLargeException(
+                        "シード名の投稿を却下しました（npm）: クリーンアップ後 10001 件が上限（10000件）を超えています。"));
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.registryMirrorAddSeedNames("npm", "left-pad", model);
+
+        assertThat(view).isEqualTo("admin/registry-mirror");
+        assertThat(model.getAttribute("result")).asString().contains("上限");
     }
 }

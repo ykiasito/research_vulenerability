@@ -344,15 +344,24 @@ public class AdminController {
      * #registryMirrorFullSync}): this only writes {@code registry_mirror_seed_name} rows, it doesn't
      * itself call any registry, so there's no long-running work to background here. The names take
      * effect the next time a sync (admin-triggered or scheduled) runs.
+     *
+     * <p>Reports both the accepted and rejected counts (senior review, PR #126 REVISE) — {@link
+     * RegistryMirrorSyncService#addOperatorSuppliedNames} skips (rather than throws for) any name
+     * that fails its per-name validation, so without surfacing both counts here an operator would
+     * have no way to tell a silently-skipped name apart from one that was never in their submission.
      */
     @PostMapping("/admin/registry-mirror/seed-names")
     public String registryMirrorAddSeedNames(@RequestParam("ecosystem") String ecosystem,
             @RequestParam("names") String namesText, Model model) {
         List<String> names = Arrays.stream(namesText.split("[\\r\\n,]+")).toList();
         try {
-            int submitted = registryMirrorSyncService.addOperatorSuppliedNames(ecosystem, names);
-            model.addAttribute("result", submitted + "件の名前をシード一覧に追加しました（" + ecosystem
-                    + "）。既に登録済みの名前は無視されます。反映するには「同期を開始」を実行してください。");
+            RegistryMirrorSyncService.SeedNameSubmissionOutcome outcome =
+                    registryMirrorSyncService.addOperatorSuppliedNames(ecosystem, names);
+            model.addAttribute("result", outcome.accepted() + "件の名前をシード一覧に追加しました（" + ecosystem
+                    + "）。却下（不正な形式）: " + outcome.rejected() + "件。既に登録済みの名前は無視されます。"
+                    + "反映するには「同期を開始」を実行してください。");
+        } catch (RegistryMirrorSyncService.SeedNameBatchTooLargeException e) {
+            model.addAttribute("result", e.getMessage());
         } catch (IllegalArgumentException e) {
             model.addAttribute("result", "エコシステムの指定が不正です: " + ecosystem);
         }
