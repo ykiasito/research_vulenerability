@@ -49,6 +49,19 @@ import org.springframework.core.io.FileSystemResource;
  */
 class ClosedModeArchitectureGateTest {
 
+    /**
+     * System property (see {@code .github/workflows/closed-mode-architecture-gate.yml}) that
+     * flips {@link #repoRootOrSkip(String)} from skipping (via {@link Assumptions#assumeTrue})
+     * to failing outright when the repository root isn't reachable. Locally — e.g. {@code mvn
+     * test} with only {@code backend/} mounted into a container — that unreachability is an
+     * expected environment limitation, so those specific checks should skip rather than fail.
+     * Under CI, the whole repository is checked out, so a null repo root there would mean this
+     * suite silently stopped exercising those checks (e.g. because a checkout-path change broke
+     * {@link #repoRoot()}'s "one level up from the backend module root" assumption) — that must
+     * be a hard failure, not a skip, or the regression could go unnoticed indefinitely.
+     */
+    private static final String REQUIRE_REPO_ROOT_PROPERTY = "closedmode.gate.require-repo-root";
+
     private static final String REGISTRY_PACKAGE = "com.vulncheck.app.service.registry";
 
     /** The 10 Stage1 Tier1 registry clients (§3-8) — every implementor of {@code
@@ -93,10 +106,8 @@ class ClosedModeArchitectureGateTest {
      */
     @Test
     void llmServiceDirectoryIsAbsentFromRepository() throws IOException {
-        Path repoRoot = repoRoot();
-        Assumptions.assumeTrue(repoRoot != null, "repository root not reachable from this sandbox "
-                + "(see class javadoc) — this run cannot verify llm-service/ absence, only "
-                + "LlmServiceClient's");
+        Path repoRoot = repoRootOrSkip(
+                "this run cannot verify llm-service/ absence, only LlmServiceClient's");
 
         Path llmService = repoRoot.resolve("llm-service");
         assertThat(Files.exists(llmService))
@@ -138,9 +149,7 @@ class ClosedModeArchitectureGateTest {
 
     @Test
     void dockerComposeHasNoLlmServiceService() throws IOException {
-        Path repoRoot = repoRoot();
-        Assumptions.assumeTrue(repoRoot != null, "repository root not reachable from this sandbox "
-                + "(see class javadoc) — cannot read docker-compose.yml from here");
+        Path repoRoot = repoRootOrSkip("cannot read docker-compose.yml from here");
 
         Path composeFile = repoRoot.resolve("docker-compose.yml");
         Assumptions.assumeTrue(Files.exists(composeFile), "docker-compose.yml not found at " + composeFile);
@@ -283,5 +292,29 @@ class ClosedModeArchitectureGateTest {
             return candidate;
         }
         return null;
+    }
+
+    /**
+     * Resolves the repository root for a repo-root-relative check, or aborts the test — see
+     * {@link #REQUIRE_REPO_ROOT_PROPERTY} for how "aborts" differs between a local run (skip) and
+     * {@code .github/workflows/closed-mode-architecture-gate.yml} (hard failure).
+     */
+    private static Path repoRootOrSkip(String reasonIfUnreachable) {
+        Path repoRoot = repoRoot();
+        if (repoRoot != null) {
+            return repoRoot;
+        }
+        if (Boolean.getBoolean(REQUIRE_REPO_ROOT_PROPERTY)) {
+            throw new AssertionError(
+                    "repository root not reachable from this sandbox, but -D" + REQUIRE_REPO_ROOT_PROPERTY
+                            + "=true was set (expected under "
+                            + ".github/workflows/closed-mode-architecture-gate.yml, which checks out the full "
+                            + "repository) — " + reasonIfUnreachable + ". Treating this as a hard failure "
+                            + "instead of a skip so a checkout-path regression can't silently stop this check "
+                            + "from ever running in CI.");
+        }
+        Assumptions.assumeTrue(false, "repository root not reachable from this sandbox (see class javadoc) — "
+                + reasonIfUnreachable);
+        throw new AssertionError("unreachable: assumeTrue(false, ...) always aborts the test");
     }
 }
