@@ -1,6 +1,7 @@
 package com.vulncheck.app.service.registry;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -9,6 +10,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.vulncheck.app.repository.IdentifiedProductRepository;
+import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -135,5 +137,58 @@ class RegistryMirrorSyncServiceTest {
         assertThat(outcome.totalSynced()).isEqualTo(4);
         assertThat(outcome.totalUnresolved()).isEqualTo(1);
         assertThat(outcome.observedNameCountByEcosystem()).containsEntry("npm", 5);
+    }
+
+    /**
+     * Regression test for senior review, PR #122 REVISE: {@code chunkSize=0} used to turn {@code
+     * chunk}'s {@code i += chunkSize} into an infinite loop (unbounded empty-sublist accumulation,
+     * eventual OOM, guard never released since {@code syncAllAndRelease}'s {@code finally} is never
+     * reached). {@code assertTimeoutPreemptively} fails the test on a timeout instead of hanging
+     * the whole build if this regresses.
+     */
+    @Test
+    void syncEcosystemFallsBackToDefaultChunkSizeWhenConfiguredZeroRatherThanHanging() {
+        ReflectionTestUtils.setField(service, "chunkSize", 0);
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("npm"))
+                .thenReturn(List.of("a", "b", "c"));
+        when(npmMirrorSyncService.syncPackages(List.of("a", "b", "c")))
+                .thenReturn(new NpmMirrorSyncService.SyncOutcome(3, 0));
+
+        assertThat(service.tryBeginFullSync()).isTrue();
+        RegistryMirrorSyncService.SyncOutcome outcome = assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> service.syncAllAndRelease());
+
+        // Falls back to DEFAULT_CHUNK_SIZE (200) -- 3 names all fit in a single chunk/call.
+        verify(npmMirrorSyncService, times(1)).syncPackages(List.of("a", "b", "c"));
+        assertThat(outcome.totalSynced()).isEqualTo(3);
+        // The finally block in syncAllAndRelease was actually reached (not stuck in an infinite
+        // chunk() loop before ever returning).
+        assertThat(service.tryBeginFullSync())
+                .as("guard must be released once the (non-hanging) sync completes")
+                .isTrue();
+    }
+
+    /**
+     * Same regression coverage as the {@code chunkSize=0} case above, for a negative value —
+     * before the fix this threw {@code IndexOutOfBoundsException} from {@code List#subList}
+     * instead of hanging, but was equally an unvalidated bad value driving loop/slicing logic.
+     */
+    @Test
+    void syncEcosystemFallsBackToDefaultChunkSizeWhenConfiguredNegative() {
+        ReflectionTestUtils.setField(service, "chunkSize", -1);
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("npm"))
+                .thenReturn(List.of("a", "b", "c"));
+        when(npmMirrorSyncService.syncPackages(List.of("a", "b", "c")))
+                .thenReturn(new NpmMirrorSyncService.SyncOutcome(3, 0));
+
+        assertThat(service.tryBeginFullSync()).isTrue();
+        RegistryMirrorSyncService.SyncOutcome outcome = assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> service.syncAllAndRelease());
+
+        verify(npmMirrorSyncService, times(1)).syncPackages(List.of("a", "b", "c"));
+        assertThat(outcome.totalSynced()).isEqualTo(3);
+        assertThat(service.tryBeginFullSync())
+                .as("guard must be released once the (non-throwing) sync completes")
+                .isTrue();
     }
 }
