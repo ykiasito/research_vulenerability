@@ -1,6 +1,5 @@
 package com.vulncheck.app.service;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.vulncheck.app.entity.CpeDictionaryEntry;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
@@ -16,25 +15,18 @@ import org.springframework.stereotype.Component;
  * closed mode never has a Claude API key to call with, so every method here now unconditionally
  * returns the exact same fallback {@link Stage1IdentificationService}/{@link
  * Stage1RegistryIdentification} already used whenever no key was configured (see each method's own
- * javadoc below for what that fallback means at each call site). {@link CandidateDto}/{@link
- * DisambiguateResponse} are kept as minimal local record shapes (trimmed of the {@code usage}/cost
- * fields that only ever mattered for real Claude billing) purely so those two callers' existing
- * multi-branch decision trees keep compiling and behaving exactly as they already did on their own
- * "no AI verdict available" path — not because this class calls anything with them anymore.
+ * javadoc below for what that fallback means at each call site). {@link DisambiguateResponse} is
+ * kept as a minimal local record shape (trimmed of the {@code usage}/cost fields that only ever
+ * mattered for real Claude billing) purely so its callers' existing multi-branch decision trees
+ * keep compiling and behaving exactly as they already did on their own "no AI verdict available"
+ * path — not because this class calls anything with it anymore. {@code CandidateDto} (the old
+ * {@code LlmServiceModels.CandidateDto} stand-in this class used to carry) was dropped once the
+ * mainline (non-closed-mode) branch's own type-safety refactor (closed-mode backlog items 169/170)
+ * moved every real caller over to {@link CpeDisambiguationCandidate}/{@link MaskedCpeString} — see
+ * that record's own javadoc.
  */
 @Component
 public class Stage1AiArbitration {
-
-    /** Trimmed local stand-in for the deleted {@code LlmServiceModels.CandidateDto} — kept only so
-     *  callers building a candidate list to hand to {@link #disambiguateCpeCandidates} still compile;
-     *  no method here ever inspects or sends it anywhere. */
-    public record CandidateDto(
-            String ecosystem,
-            @JsonProperty("package_name") String packageName,
-            String cpe,
-            String purl,
-            String source) {
-    }
 
     /** Trimmed local stand-in for the deleted {@code LlmServiceModels.DisambiguateResponse} — never
      *  actually instantiated by this class anymore (every method returns {@link Optional#empty()}),
@@ -108,8 +100,9 @@ public class Stage1AiArbitration {
      * degrade-to-first-candidate-unless-relaxed-containment-derived rule takes over unconditionally.
      *
      * <p>Takes {@link CpeDisambiguationCandidate} (which itself wraps a {@link MaskedCpeString})
-     * rather than a raw {@code List<CandidateDto>} (closed-mode backlog items 169/170, senior review
-     * 2026-09-01), same rationale as {@link #verifyVariantDerivedCpeMatchWithAi} above.
+     * rather than a raw {@code List<LlmServiceModels.CandidateDto>} (closed-mode backlog items
+     * 169/170, senior review 2026-09-01), same rationale as {@link #verifyVariantDerivedCpeMatchWithAi}
+     * above.
      */
     public Optional<DisambiguateResponse> disambiguateCpeCandidates(
             ResearchJobItem item, Long userId, List<CpeDisambiguationCandidate> candidates) {
@@ -121,9 +114,9 @@ public class Stage1AiArbitration {
      * with its version-masked CPE string. Every real caller today (see {@link
      * Stage1IdentificationService#resolveCandidates}) fills in exactly this — dictionary-derived
      * {@code ecosystem=null}/{@code purl=null}/{@code source="cpe_dictionary"} — so bundling those
-     * fixed fields here rather than exposing full {@link CandidateDto} construction to callers is
-     * both simpler and (per this class's own note above) forces the CPE through {@link
-     * MaskedCpeString}.
+     * fixed fields here rather than exposing full {@code LlmServiceModels.CandidateDto} construction
+     * to callers is both simpler and (per this class's own note above) forces the CPE through
+     * {@link MaskedCpeString}.
      */
     public record CpeDisambiguationCandidate(String product, MaskedCpeString cpe) {
     }
