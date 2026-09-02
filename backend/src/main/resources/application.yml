@@ -137,6 +137,13 @@ app:
   # a positive (>= 1) value — 0 or negative falls back to RegistryMirrorSyncService's own
   # DEFAULT_CHUNK_SIZE (200), logging a warning, rather than hanging/throwing (PR #122 REVISE).
   registry-mirror-sync-chunk-size: ${REGISTRY_MIRROR_SYNC_CHUNK_SIZE:200}
+  # How many days a seed name's registry_package_mirror.last_synced_at can be old and still be
+  # skipped by RegistryMirrorSyncService (closed-mode backlog item 186) instead of being re-synced
+  # this run — bounds cost so a weekly full sync doesn't unconditionally re-fetch every observed
+  # name every week. See RegistryMirrorSyncService#freshnessDays' own javadoc. 0 or negative
+  # disables the filter entirely (every observed name is always re-synced); a name never synced
+  # before is never excluded by this, regardless of the value set here.
+  registry-mirror-sync-freshness-days: ${REGISTRY_MIRROR_SYNC_FRESHNESS_DAYS:7}
   # NVD CVE API bulk mirror (closed-mode backlog item 202, docs/spec/closed-mode-plan.md §4-2):
   # nvd_cve_records/nvd_cve_cpe_match, populated by NvdCveSyncService via
   # NvdCveBackfillScheduledRunner (daily, self-terminating once baseline_completed) or the manual
