@@ -182,7 +182,17 @@ class ClosedModeArchitectureGateTest {
         Path repoRoot = repoRootOrSkip("cannot read docker-compose.yml from here");
 
         Path composeFile = repoRoot.resolve("docker-compose.yml");
-        Assumptions.assumeTrue(Files.exists(composeFile), "docker-compose.yml not found at " + composeFile);
+        // 2026-09-02 (REVISE R7): this used to be Assumptions.assumeTrue, which meant a
+        // renamed/deleted docker-compose.yml made the whole check skip (green) even under CI with
+        // -Dclosedmode.gate.require-repo-root=true — the exact "silent skip under CI" failure mode
+        // repoRootOrSkip above exists to close, just reopened one level down. Once repoRootOrSkip
+        // has confirmed the repo root itself is reachable, the compose file's existence is part of
+        // the invariant being asserted, not an environment limitation, so it must be a hard
+        // assertion.
+        assertThat(Files.exists(composeFile))
+                .as("docker-compose.yml must exist at %s (repo root was reachable) — its "
+                        + "disappearance/rename must fail this gate, not silently skip it", composeFile)
+                .isTrue();
 
         // Same technique as com.vulncheck.app.config.PoolSizeConfigBindingTest: load the YAML
         // directly with Spring's own loader rather than hand-rolling a parser, then inspect the
@@ -192,8 +202,23 @@ class ClosedModeArchitectureGateTest {
         YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
         List<PropertySource<?>> loaded = loader.load("docker-compose", new FileSystemResource(composeFile));
 
-        boolean hasLlmServiceKey = loaded.stream()
+        Set<String> propertyNames = loaded.stream()
                 .flatMap(source -> streamPropertyNames(source))
+                .collect(Collectors.toSet());
+
+        // 2026-09-02 (REVISE R7): guard against a vacuous pass. If the YAML loader (or the
+        // compose file's structure) produced zero services.* keys at all, the anyMatch check below
+        // would report "no services.llm-service key" — true, but for the wrong reason (nothing was
+        // extracted, not "llm-service specifically is absent"). Assert the extraction actually
+        // found some services.* keys before trusting its absence of services.llm-service.
+        assertThat(propertyNames)
+                .as("docker-compose.yml must yield at least one services.* property key once "
+                        + "loaded — an empty result here means the YAML loader (or the compose "
+                        + "file's structure) is broken, which would make the services.llm-service "
+                        + "absence check below vacuously (and wrongly) pass")
+                .anyMatch(name -> name.startsWith("services."));
+
+        boolean hasLlmServiceKey = propertyNames.stream()
                 .anyMatch(name -> name.startsWith("services.llm-service"));
 
         assertThat(hasLlmServiceKey)
