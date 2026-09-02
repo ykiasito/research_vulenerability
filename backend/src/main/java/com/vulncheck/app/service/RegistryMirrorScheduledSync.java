@@ -10,11 +10,14 @@ import org.springframework.stereotype.Component;
 
 /**
  * Weekly automatic sync of the 9 registry mirrors (crates.io/RubyGems/Packagist/Hex/npm/PyPI/
- * NuGet/Go/pub.dev, {@code registry_package_mirror}) from every package name this app has ever
- * resolved via a live registry lookup ({@code identified_products}) — closed-mode backlog item
- * 183. Same shape and rationale as {@link CpeDictionaryScheduledResync} (its own javadoc explains
- * why a scheduled resync is needed at all: without one, a mirror only ever gets populated by a
- * manually-triggered admin sync, which requires a human to remember to act).
+ * NuGet/Go/pub.dev, {@code registry_package_mirror}) from every seed package name this app knows
+ * about — both every name ever resolved via a live registry lookup ({@code identified_products})
+ * and every name an admin has explicitly uploaded ({@code registry_mirror_seed_name}, closed-mode
+ * backlog item 185) — see {@link RegistryMirrorSyncService}'s class javadoc for why both sources
+ * exist (closed-mode backlog item 183). Same shape and rationale as {@link
+ * CpeDictionaryScheduledResync} (its own javadoc explains why a scheduled resync is needed at all:
+ * without one, a mirror only ever gets populated by a manually-triggered admin sync, which requires
+ * a human to remember to act).
  *
  * <p>Off by default (env var {@code REGISTRY_MIRROR_SCHEDULED_SYNC_ENABLED}), matching every other
  * closed-mode-related sync flag's safety-first default — this never changes existing behavior for

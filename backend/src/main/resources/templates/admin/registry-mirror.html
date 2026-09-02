@@ -28,6 +28,34 @@
     <button type="submit">同期を開始</button>
 </form>
 
+<h2>シード名の追加</h2>
+<p>
+    これまでに一度も解決したことがないパッケージ名は、上記の同期対象（<code>identified_products</code>由来）に
+    含まれません。ここでエコシステムとパッケージ名の一覧（改行またはカンマ区切り）を入力すると、同期対象の
+    シード一覧に追加されます。反映されるのは、上の「同期を開始」を実行したタイミングです。
+</p>
+<form th:action="@{/admin/registry-mirror/seed-names}" method="post">
+    <p>
+        <label for="ecosystem">エコシステム:</label>
+        <select id="ecosystem" name="ecosystem">
+            <option value="crates.io">crates.io</option>
+            <option value="rubygems">RubyGems</option>
+            <option value="packagist">Packagist</option>
+            <option value="hex">Hex</option>
+            <option value="npm">npm</option>
+            <option value="pypi">PyPI</option>
+            <option value="nuget">NuGet</option>
+            <option value="go">Go</option>
+            <option value="pub">pub.dev</option>
+        </select>
+    </p>
+    <p>
+        <label for="names">パッケージ名一覧（改行またはカンマ区切り）:</label><br/>
+        <textarea id="names" name="names" rows="8" cols="60"></textarea>
+    </p>
+    <button type="submit">シード一覧に追加</button>
+</form>
+
 <p><a th:href="@{/}">ホームに戻る</a></p>
 </body>
 </html>
