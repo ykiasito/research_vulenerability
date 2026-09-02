@@ -21,8 +21,9 @@ import org.springframework.web.util.UriComponentsBuilder;
  * Populates/refreshes the {@code registry_package_mirror} table for {@code ecosystem = 'packagist'}
  * from Packagist's public "provider" metadata (the {@code p2/} endpoint) — closed-mode backlog item
  * 176 rollout (Packagist), same pattern as the crates.io/RubyGems mirrors (see {@code
- * CratesIoMirrorSyncService}'s class javadoc). {@link PackagistRegistryClient} reads from that table
- * when {@code app.closed-mode.packagist-mirror-enabled} is on; this service is the only writer.
+ * CratesIoMirrorSyncService}'s class javadoc). {@link PackagistRegistryClient} reads unconditionally
+ * from that table (the {@code app.closed-mode.packagist-mirror-enabled} flag that used to gate this
+ * has since been removed); this service is the only writer.
  *
  * <p><b>p2 endpoint shape</b> (confirmed live 2026-09-02 against real packages — monolog/monolog,
  * symfony/console — rather than assumed from documentation alone, per this project's own repeated

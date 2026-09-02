@@ -19,8 +19,9 @@ import org.springframework.web.client.RestClient;
  * the Go module proxy's per-module version list ({@code
  * GET https://proxy.golang.org/{module}/@v/list}) — closed-mode backlog item 176 rollout (Go), same
  * pattern as the crates.io/RubyGems/Packagist/Hex/npm/PyPI/NuGet mirrors (see {@code
- * NuGetMirrorSyncService}'s javadoc). {@link GoProxyRegistryClient} reads from that table when
- * {@code app.closed-mode.go-mirror-enabled} is on; this service is the only writer.
+ * NuGetMirrorSyncService}'s javadoc). {@link GoProxyRegistryClient} reads unconditionally from that
+ * table (the {@code app.closed-mode.go-mirror-enabled} flag that used to gate this has since been
+ * removed); this service is the only writer.
  *
  * <p><b>Per-module sync, not the bulk {@code index.golang.org/index} feed</b>: {@code
  * docs/spec/closed-mode-plan.md} §5-3 documents a Go-team-official bulk enumeration endpoint

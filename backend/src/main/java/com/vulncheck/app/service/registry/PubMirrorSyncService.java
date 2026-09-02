@@ -20,8 +20,8 @@ import org.springframework.web.client.RestClient;
  * pub.dev's public per-package document endpoint ({@code https://pub.dev/api/packages/{name}}) —
  * closed-mode backlog item 176 rollout (pub.dev), same pattern as the crates.io/RubyGems/Packagist/
  * Hex/npm/PyPI mirrors (see {@code NpmMirrorSyncService}'s javadoc). {@link PubRegistryClient} reads
- * from that table when {@code app.closed-mode.pub-mirror-enabled} is on; this service is the only
- * writer.
+ * unconditionally from that table (the {@code app.closed-mode.pub-mirror-enabled} flag that used to
+ * gate this has since been removed); this service is the only writer.
  *
  * <p><b>Endpoint choice, confirmed live 2026-09-02</b> (not assumed from {@code
  * docs/spec/closed-mode-plan.md}'s §5-2 entry alone — this project has repeatedly been burned by

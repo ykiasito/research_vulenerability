@@ -167,8 +167,10 @@ public class ResearchJobProcessingService {
             // Items within this one job are processed concurrently (bounded by
             // itemProcessingExecutor, currently 8 at a time) rather than one at a time — see
             // AsyncConfig's javadoc on itemProcessingExecutor for why this is a separate pool from
-            // researchJobExecutor (job-level, 8 concurrent jobs) and registryLookupExecutor
-            // (per-item registry fan-out). Every service processItem calls into
+            // researchJobExecutor (job-level, 8 concurrent jobs). Closed-mode B3 removed the
+            // per-item registryLookupExecutor pool that used to fan out live registry HTTP calls —
+            // registry lookups are now a local mirror DB read done synchronously on this thread (see
+            // AsyncConfig's itemProcessingExecutor javadoc). Every service processItem calls into
             // (Stage1/Stage2/Stage4/JobCostBudgetService, the external-call rate limiters) is a
             // stateless/thread-safe singleton already relied on for concurrent use across different
             // *jobs*, so concurrent items within one job is the same safety story, just a higher

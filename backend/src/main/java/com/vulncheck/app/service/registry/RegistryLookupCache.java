@@ -12,13 +12,18 @@ import org.springframework.stereotype.Component;
 
 /**
  * Process-wide memo of "what did this registry say about this package", so a name that appears
- * more than once never costs more than one request per registry.
+ * more than once never costs more than one lookup per registry.
  *
- * <p>This is the single largest source of avoidable load on the public registries. Measured across
- * the real test corpora (jobs 30 and 31, 2026-08-25): <b>1,350 items covered only 443 distinct
- * product names</b> — two thirds of every lookup was a repeat of one already answered. Software
- * inventories are like this by nature; the same runtime, framework or utility is installed on many
- * hosts, and each host is its own CSV row.
+ * <p>Closed-mode B3 turned every registry lookup into a local {@code registry_package_mirror} DB
+ * read instead of a rate-limited public-registry HTTP call, but that didn't remove the case for
+ * this cache — its value was never really about hiding network latency, it was about not repeating
+ * work for duplicate-heavy input. Measured across the real test corpora (jobs 30 and 31,
+ * 2026-08-25): <b>1,350 items covered only 443 distinct product names</b> — two thirds of every
+ * lookup was a repeat of one already answered. Software inventories are like this by nature; the
+ * same runtime, framework or utility is installed on many hosts, and each host is its own CSV row.
+ * With up to a ten-way registry fan-out per item (see {@code RegistryRoutingPolicy}), skipping the
+ * repeat still saves real per-item DB round trips at job scale, even though each individual one is
+ * now cheap rather than a multi-second network call.
  *
  * <p><b>Keyed by (ecosystem, productName) only — deliberately not version.</b> The cache used to
  * include the version in its key, which measured 2026-08-25 data showed was nearly useless: those
@@ -67,11 +72,11 @@ public class RegistryLookupCache {
      * Returns the cached answer for this (ecosystem, productName) at this version, or computes and
      * stores it.
      *
-     * <p>Deliberately not {@code computeIfAbsent}: the supplier performs a rate-limited network
-     * call taking seconds, and {@code computeIfAbsent} would hold a bin lock on the map for that
-     * whole time, blocking unrelated keys that happen to hash to the same bin. Two concurrent
-     * lookups of the same key can therefore both issue a request — harmless and rare, and much
-     * cheaper than serializing the map.
+     * <p>Deliberately not {@code computeIfAbsent}: the supplier performs a database read (against
+     * the shared HikariCP connection pool), and {@code computeIfAbsent} would hold a bin lock on
+     * the map for that whole round trip, blocking unrelated keys that happen to hash to the same
+     * bin. Two concurrent lookups of the same key can therefore both issue a query — harmless and
+     * rare, and much cheaper than serializing the map.
      */
     public Optional<RegistryMatch> get(String ecosystem, String productName, String version,
             Supplier<Optional<RegistryMatch>> lookup) {
