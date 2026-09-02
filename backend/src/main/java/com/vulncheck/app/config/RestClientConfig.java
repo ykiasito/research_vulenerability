@@ -332,6 +332,30 @@ public class RestClientConfig {
     }
 
     /**
+     * For the Go module proxy per-module version-list mirror sync (closed-mode backlog item 176
+     * rollout, Go, {@code GoMirrorSyncService}) — deliberately NOT the shared {@link
+     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * #rubyGemsSyncRestClient}/{@link #packagistSyncRestClient}/{@link #hexSyncRestClient}/{@link
+     * #npmSyncRestClient}/{@link #pypiSyncRestClient}/{@link #nugetSyncRestClient} and the other
+     * {@code *SyncRestClient} beans above. {@code proxy.golang.org}'s {@code @v/list} endpoint
+     * returns its plain-text version list with no redirect chain observed against real module
+     * lookups (confirmed live 2026-09-02 against {@code github.com/gin-gonic/gin} and a nonexistent
+     * module — plain 404, no body), same shape as the crates.io/RubyGems/Packagist/Hex/npm/PyPI/
+     * NuGet index targets, so a plain {@link #simpleRequestFactory} (auto-follow redirects) is
+     * enough here.
+     */
+    @Bean
+    public RestClient goSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (go mirror sync)")
+                .build();
+    }
+
+    /**
      * Points at the Python LLM microservice (Stage1 Tier2/Tier3, Stage4). Longer read timeout
      * than the external-API client — a web_search-enabled Claude call can take well over 10s.
      */

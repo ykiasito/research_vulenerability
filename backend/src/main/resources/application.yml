@@ -87,6 +87,7 @@ app:
     npm-mirror-enabled: ${CLOSED_MODE_NPM_MIRROR_ENABLED:false}
     pypi-mirror-enabled: ${CLOSED_MODE_PYPI_MIRROR_ENABLED:false}
     nuget-mirror-enabled: ${CLOSED_MODE_NUGET_MIRROR_ENABLED:false}
+    go-mirror-enabled: ${CLOSED_MODE_GO_MIRROR_ENABLED:false}
   # High-confidence AI verification backstop (see HighConfidenceVerificationService) — an extra
   # AI+web_search check for Stage1 items that reached a high-confidence CPE match purely via static
   # (Tier1) logic, never reviewed by Tier2/Tier3's AI disambiguation. Off by default so this never
