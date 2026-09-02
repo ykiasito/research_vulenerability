@@ -14,21 +14,7 @@
 <h3>1-1. アカウント登録・ログイン</h3>
 <p>トップページから登録済みのアカウントでログインしてください。未登録の場合は登録画面から作成できます。</p>
 
-<h3>1-2. Claude APIキーの登録（任意・推奨）</h3>
-<p>
-    <a th:href="@{/settings/secrets}">APIキー設定</a>画面からAnthropicのClaude APIキー（<code>sk-ant-...</code>）を登録できます。
-    登録すると以下の機能が有効になります。未登録でも無料の静的調査（NVD/OSV/GHSA・パッケージレジストリ）だけで動作します。
-</p>
-<ul>
-    <li><strong>あいまい候補の判定（Tier2）</strong>: CPE辞書で複数の候補が見つかった時、どれが正しいかをAIが判断します</li>
-    <li><strong>製品名のWeb検索特定（Tier3）</strong>: マーケットプレース名などで静的照合が全く一致しなかった時、AIがWeb検索で正式名称・パッケージ識別子を特定します</li>
-    <li><strong>脆弱性調査の最終手段（Stage4）</strong>: NVD/OSV/GHSAで何も見つからなかった時（またはStage1で識別自体ができなかった時）、AIがWeb検索でベンダー公式アドバイザリー等を探します</li>
-</ul>
-<p>
-    Claude APIキーは<a href="https://console.anthropic.com" target="_blank" rel="noopener">Anthropic Console</a>で発行できます（要支払い方法登録・従量課金）。
-    キーはデータベースにAES-256-GCMで暗号化して保存され、平文で再表示されることはありません。
-</p>
-<h3>1-3. NVD APIキーの登録（任意・推奨）</h3>
+<h3>1-2. NVD APIキーの登録（任意・推奨）</h3>
 <p>
     <a th:href="@{/settings/secrets}">APIキー設定</a>画面からNVDの無料APIキーも登録できます。
     費用は一切かかりません。登録すると、CPE辞書のライブ照会・NVD脆弱性検索のレート制限が緩和されます
@@ -67,27 +53,17 @@ Wireshark,4.6.0,,インフラチームがパケット解析に使用,</pre>
     <tr><th>列</th><th>意味</th></tr>
     </thead>
     <tbody>
-    <tr><td>状態</td><td><code>IDENTIFIED</code>=製品を特定できた / <code>UNIDENTIFIED</code>=特定できなかった。UNIDENTIFIEDでも黄色い「ヒント」が出ることがあります（後述）</td></tr>
+    <tr><td>状態</td><td><code>IDENTIFIED</code>=製品を特定できた / <code>UNIDENTIFIED</code>=特定できなかった</td></tr>
     <tr><td>エコシステム / パッケージ名</td><td>対応レジストリ（<a th:href="@{/guide/integrations}">一覧はこちら</a>）のいずれかで実在が確認できた場合の情報</td></tr>
     <tr><td>CPE</td><td>NVDのCPE辞書と一致した場合の識別子（バージョンはCSVの実バージョンに差し替えて表示）</td></tr>
     <tr><td>信頼度</td><td>識別の確からしさ（0〜1）。赤い警告が出ている場合はレジストリでバージョンが確認できなかったことを意味します。グレーの注記は「製品名は一致したがバージョンは未検証（CPE照合のみ）」を意味します</td></tr>
-    <tr><td>脆弱性</td><td>見つかった既知の脆弱性一覧。末尾の<code>[nvd]</code> <code>[osv]</code> <code>[ghsa]</code>は公的データベース由来、<code>[llm_web_search]</code>はAIのWeb検索由来（一次情報を必ず確認してください）</td></tr>
+    <tr><td>脆弱性</td><td>見つかった既知の脆弱性一覧。末尾の<code>[nvd]</code> <code>[osv]</code> <code>[ghsa]</code>は公的データベース由来</td></tr>
     </tbody>
 </table>
 
-<h3>2-4. 「ヒント」について</h3>
+<h3>2-4. 費用について</h3>
 <p>
-    製品を特定できなかった（UNIDENTIFIED）場合でも、AIがVS Code拡張機能・Chrome拡張・Dockerイメージなど、
-    このアプリが自動照会できない配布経路の識別子を見つけられた時は、黄色い「ヒント」として表示されます。
-    この識別子を使って簡易的な脆弱性調査（AIのWeb検索）も自動的に行われ、その結果は同じ「脆弱性」列に表示されます。
-    ただしヒント自体はAIの推測であり、断定ではありません。表示されたヒントの内容は必ずご自身でも確認してください。
-</p>
-
-<h3>2-5. 費用について</h3>
-<p>
-    静的調査（NVD/OSV/GHSA・パッケージレジストリ）は無料です。Claude APIキーを登録した場合のみ、
-    Tier2/3・Stage4が発火した分だけAPI利用料（Claude Haiku 4.5 + Web検索ツール）が発生します。
-    「影響のある脆弱性が静的調査だけで見つかった場合はAIを使わない」設計のため、通常は一部のアイテムでのみ課金が発生します。
+    このデプロイでは静的調査（NVD/OSV/GHSA・パッケージレジストリ）のみで動作しており、費用は一切かかりません。
 </p>
 
 <p><a th:href="@{/}">ホームに戻る</a></p>
