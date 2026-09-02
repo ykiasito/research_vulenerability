@@ -427,4 +427,33 @@ class NvdCveSyncServiceTest {
         verify(chunkRepository, times(2)).save(any(NvdCveSyncChunk.class));
         verify(stateRepository, times(1)).save(state);
     }
+
+    /** Closed-mode backlog item 202, REVISE round 1, point 3: the very first delta tick after
+     *  baseline completion (before {@code last_delta_synced_at} has ever been set) must fall back
+     *  to {@code baseline_started_at}, not {@code now.minusDays(1)} -- the latter would leave a
+     *  multi-day gap between whatever the backfill's chunk queue was seeded up to and the first
+     *  delta tick's own window. */
+    @Test
+    void deltaTickFallsBackToBaselineStartedAtMinusTheSafetyMarginBeforeAnyDeltaHasEverSynced() {
+        NvdCveSyncState state = freshState();
+        state.setBaselineCompleted(true);
+        OffsetDateTime baselineStartedAt = OffsetDateTime.of(2026, 8, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+        state.setBaselineStartedAt(baselineStartedAt);
+        // lastDeltaSyncedAt is intentionally left null -- this is the first delta tick ever.
+        when(stateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(pageJson(0, "[]"), MediaType.APPLICATION_JSON));
+
+        service.runDeltaTickAndRelease(Optional.empty(), new RunBudget(5, Duration.ofMinutes(5)));
+
+        syncServer.verify();
+        ArgumentCaptor<NvdCveSyncChunk> captor = ArgumentCaptor.forClass(NvdCveSyncChunk.class);
+        verify(chunkRepository, atLeastOnce()).save(captor.capture());
+        NvdCveSyncChunk enqueuedChunk = captor.getAllValues().get(0);
+        assertThat(enqueuedChunk.getWindowStart())
+                .as("must fall back to baselineStartedAt (minus the clock-skew safety margin), not "
+                        + "now.minusDays(1), which would leave a multi-day gap between the backfill's "
+                        + "chunk queue seed time and this first delta tick")
+                .isEqualTo(baselineStartedAt.minus(Duration.ofHours(2)));
+    }
 }

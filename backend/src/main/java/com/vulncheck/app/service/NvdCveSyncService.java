@@ -222,7 +222,7 @@ public class NvdCveSyncService {
         }
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        OffsetDateTime cursor = state.getLastDeltaSyncedAt() != null ? state.getLastDeltaSyncedAt() : now.minusDays(1);
+        OffsetDateTime cursor = resolveDeltaCursor(state, now);
         NvdCveSyncChunk chunk = new NvdCveSyncChunk();
         chunk.setWindowStart(cursor.minus(DELTA_SAFETY_MARGIN));
         chunk.setWindowEnd(now);
@@ -247,6 +247,30 @@ public class NvdCveSyncService {
             nvdCveSyncStateRepository.save(state);
         }
         return new SyncOutcome(totalUpserted, chunkFinished);
+    }
+
+    /** Cursor fallback chain for the first delta tick after a state row exists, in order of
+     *  preference (closed-mode backlog item 202, REVISE round 1, point 3): {@code
+     *  last_delta_synced_at} (the normal case, every tick after the first) -> {@code
+     *  baseline_started_at} (the very first delta tick ever run against this mirror) -> {@code
+     *  now.minusDays(1)} (only if even {@code baseline_started_at} is somehow unset — defensive,
+     *  should not happen once {@link #runBackfillTick} has run at least once). {@code
+     *  baseline_started_at} is deliberately preferred over {@code now.minusDays(1)}: the baseline
+     *  backfill's own chunk queue is seeded once, at backfill start, up to {@code now} as it stood
+     *  then — any CVE whose {@code lastModified} moved between that seed time and this, the first
+     *  delta tick, falls in the gap neither the (already-seeded, backward-looking) backfill nor a
+     *  {@code now.minusDays(1)}-anchored delta would ever cover, a gap that can span the backfill's
+     *  entire multi-day completion time (§4-2-4). {@link #DELTA_SAFETY_MARGIN} is applied uniformly
+     *  to whichever cursor wins here, same as any other tick — re-fetching a bit of overlap is
+     *  harmless (every write is an upsert/replace), missing a just-modified CVE isn't. */
+    private OffsetDateTime resolveDeltaCursor(NvdCveSyncState state, OffsetDateTime now) {
+        if (state.getLastDeltaSyncedAt() != null) {
+            return state.getLastDeltaSyncedAt();
+        }
+        if (state.getBaselineStartedAt() != null) {
+            return state.getBaselineStartedAt();
+        }
+        return now.minusDays(1);
     }
 
     private NvdCveSyncState loadState() {
