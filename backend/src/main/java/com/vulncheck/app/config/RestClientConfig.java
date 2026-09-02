@@ -221,6 +221,26 @@ public class RestClientConfig {
     }
 
     /**
+     * For the Packagist {@code p2/} provider-metadata mirror sync (closed-mode backlog item 176
+     * rollout, {@code PackagistMirrorSyncService}) — deliberately NOT the shared {@link
+     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * #rubyGemsSyncRestClient} and the other {@code *SyncRestClient} beans above. {@code
+     * repo.packagist.org} is served through a static-file CDN (one small JSON response per package,
+     * confirmed live 2026-09-02 with no redirect chain observed), same shape as the crates.io/RubyGems
+     * index targets, so a plain {@link #simpleRequestFactory} (auto-follow redirects) is enough here.
+     */
+    @Bean
+    public RestClient packagistSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (packagist mirror sync)")
+                .build();
+    }
+
+    /**
      * For the Hex.pm mirror sync (closed-mode backlog item 176, Hex rollout, {@code
      * HexMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
      * item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient} and the

@@ -72,14 +72,16 @@ app:
   # CpeDictionaryScheduledResync#resyncWeekly's javadoc for the PR #75 REVISE history.
   cpe-scheduled-resync-cron: ${CPE_SCHEDULED_RESYNC_CRON:0 30 1 * * SUN}
   # Closed-mode registry mirror (backlog item 176): when true, CratesIoRegistryClient / RubyGemsRegistryClient /
-  # HexRegistryClient answer their Tier1 lookups from the local registry_package_mirror table (populated by
-  # CratesIoMirrorSyncService / RubyGemsMirrorSyncService / HexMirrorSyncService respectively) instead of a live
-  # HTTP call. Off by default, same safety-first convention as the CPE flags above — enabling any flag before
+  # PackagistRegistryClient / HexRegistryClient answer their Tier1 lookups from the local
+  # registry_package_mirror table (populated by CratesIoMirrorSyncService / RubyGemsMirrorSyncService /
+  # PackagistMirrorSyncService / HexMirrorSyncService respectively) instead of a live HTTP call. Off by
+  # default, same safety-first convention as the CPE flags above — enabling any of these flags before
   # ever running that ecosystem's mirror sync degrades transparently to the live path (see each
   # registry client's own javadoc), it does not break lookups.
   closed-mode:
     crates-io-mirror-enabled: ${CLOSED_MODE_CRATES_IO_MIRROR_ENABLED:false}
     rubygems-mirror-enabled: ${CLOSED_MODE_RUBYGEMS_MIRROR_ENABLED:false}
+    packagist-mirror-enabled: ${CLOSED_MODE_PACKAGIST_MIRROR_ENABLED:false}
     hex-mirror-enabled: ${CLOSED_MODE_HEX_MIRROR_ENABLED:false}
   # High-confidence AI verification backstop (see HighConfidenceVerificationService) — an extra
   # AI+web_search check for Stage1 items that reached a high-confidence CPE match purely via static

@@ -50,6 +50,7 @@ app:
   closed-mode:
     crates-io-mirror-enabled: false
     rubygems-mirror-enabled: false
+    packagist-mirror-enabled: false
 
 server:
   port: 8080
