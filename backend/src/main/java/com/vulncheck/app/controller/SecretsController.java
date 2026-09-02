@@ -37,7 +37,10 @@ public class SecretsController {
 
     // Matches the user_secrets.provider CHECK constraint (V1__init.sql) — validated here too so
     // a bad provider value fails with a friendly form error instead of a DB constraint exception.
-    private static final Set<String> VALID_PROVIDERS = Set.of(UserSecret.PROVIDER_CLAUDE, UserSecret.PROVIDER_NVD);
+    // Closed-mode B2 (docs/spec/closed-mode-plan.md §9-2) removed the only reader of a Claude
+    // key (UserApiKeyService#getClaudeApiKey), so this UI no longer offers registering one —
+    // see UserApiKeyService's own javadoc for why UserSecret.PROVIDER_CLAUDE itself is untouched.
+    private static final Set<String> VALID_PROVIDERS = Set.of(UserSecret.PROVIDER_NVD);
 
     private final UserRepository userRepository;
     private final UserSecretRepository userSecretRepository;
@@ -49,8 +52,6 @@ public class SecretsController {
         Map<String, UserSecret> byProvider = userSecretRepository.findByUserId(user.getId()).stream()
                 .collect(Collectors.toMap(UserSecret::getProvider, s -> s));
 
-        model.addAttribute("claudeConfigured", byProvider.containsKey(UserSecret.PROVIDER_CLAUDE));
-        model.addAttribute("claudeMasked", maskOrNull(byProvider.get(UserSecret.PROVIDER_CLAUDE)));
         model.addAttribute("nvdConfigured", byProvider.containsKey(UserSecret.PROVIDER_NVD));
         model.addAttribute("nvdMasked", maskOrNull(byProvider.get(UserSecret.PROVIDER_NVD)));
 
