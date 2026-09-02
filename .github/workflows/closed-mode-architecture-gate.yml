@@ -1,0 +1,54 @@
+name: closed-mode architecture gate
+
+# 目的: closed-mode backlog item 196 (B7, docs/spec/closed-mode-plan.md §3-6) —
+# 「masterからの差分は削除のみ」という§3-2の中核不変条件を機械的に強制する。
+#
+# 注記(§3-2の例外): closed-modeブランチは本来「削除のみ・足さない」が原則だが、
+# このワークフロー自体はその不変条件を検証するためのCI成果物であり、
+# §3-6が閉域ブランチ専用の検証手段を要求しているため、明示的な例外として追加する。
+#
+# ClosedModeBeanArchitectureGateTest(@SpringBootTest、稼働中のvulncheck_test
+# postgresが要る)はここに含めない——サービスコンテナ構成は別途設計が必要な
+# ためスコープ外。そちらは従来通りローカルの `mvn test` で回す。
+
+on:
+  pull_request:
+    branches:
+      - closed-mode
+  push:
+    branches:
+      - closed-mode
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  architecture-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: Run ClosedModeArchitectureGateTest
+        # -Dclosedmode.gate.require-repo-root=true flips this suite's repo-root-relative
+        # checks (llm-service/ absence, docker-compose.yml content) from a silent
+        # Assumptions.assumeTrue skip into a hard failure when the repo root isn't
+        # reachable. Locally (only backend/ mounted into a container) that unreachability
+        # is an expected environment limitation, so those checks skip. Here the whole
+        # repository is checked out, so a null repo root would mean something (e.g. a
+        # checkout-path change) broke this suite's "one level up from the backend module
+        # root" assumption — that must fail loudly, not skip quietly.
+        run: >
+          mvn -B -f backend/pom.xml test
+          -Dtest=ClosedModeArchitectureGateTest
+          -DfailIfNoSpecifiedTests=false
+          -Dclosedmode.gate.require-repo-root=true
