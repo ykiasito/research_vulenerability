@@ -262,6 +262,28 @@ public class RestClientConfig {
     }
 
     /**
+     * For the npm registry mirror sync (closed-mode backlog item 176 rollout, npm, {@code
+     * NpmMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient}/{@link
+     * #packagistSyncRestClient}/{@link #hexSyncRestClient} and the other {@code *SyncRestClient} beans
+     * above. {@code registry.npmjs.org}'s per-package document endpoint ({@code GET /{package}}) is
+     * served with no redirect chain observed against real package lookups (confirmed live 2026-09-02
+     * against {@code lodash} and the fully-percent-encoded scoped package path {@code
+     * %40types%2Fnode}), same shape as the crates.io/RubyGems/Packagist/Hex index targets, so a plain
+     * {@link #simpleRequestFactory} (auto-follow redirects) is enough here.
+     */
+    @Bean
+    public RestClient npmSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (npm mirror sync)")
+                .build();
+    }
+
+    /**
      * For the PyPI Simple API (PEP 691 JSON) mirror sync (closed-mode backlog item 176 rollout,
      * PyPI, {@code PyPiMirrorSyncService}) — deliberately NOT the shared {@link
      * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
