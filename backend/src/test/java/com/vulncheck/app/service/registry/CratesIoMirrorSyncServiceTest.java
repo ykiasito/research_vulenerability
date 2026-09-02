@@ -124,6 +124,39 @@ class CratesIoMirrorSyncServiceTest {
     }
 
     @Test
+    void rejectsAFourDotNameWhoseDerivedPathWouldTraverseEvenThoughTheWholeNameIsNotADotOrDotDot() {
+        // Closed-mode backlog item 184 REVISE: sparseIndexPath("....") == "../../....", which climbs
+        // two directories, but the name "...." itself is neither "." nor ".." as a whole segment --
+        // a check that only asks "is the full name a traversal token" would miss this. It's caught
+        // here because crates.io names may not contain "." at all (see
+        // RegistryMirrorPackageNameValidator#validateSimpleName).
+        SyncOutcome outcome = service.syncPackages(List.of("...."));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("crates.io"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
+
+    @Test
+    void rejectsANameWhoseTwoCharacterPrefixIsADotDotSegmentEvenThoughTheWholeNameIsNot() {
+        // Closed-mode backlog item 184 REVISE: sparseIndexPath("..ab") == "../ab/..ab" -- the first
+        // path segment ("..") comes from a two-character substring of the name, not the name as a
+        // whole, so "is the full name '..'" would also miss this one. Same fix as the "...." case
+        // above: "." is simply not an allowed character in a crates.io name.
+        SyncOutcome outcome = service.syncPackages(List.of("..ab"));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("crates.io"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
+
+    @Test
     void sparseIndexPathFollowsTheConfirmedLiveConvention() {
         assertThat(CratesIoMirrorSyncService.sparseIndexPath("x")).isEqualTo("1/x");
         assertThat(CratesIoMirrorSyncService.sparseIndexPath("io")).isEqualTo("2/io");
