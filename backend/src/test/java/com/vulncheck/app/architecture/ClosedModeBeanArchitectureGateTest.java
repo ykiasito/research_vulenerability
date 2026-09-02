@@ -84,6 +84,18 @@ class ClosedModeBeanArchitectureGateTest {
 
     // ------------------------------------------------------------------------------------------
     // §3-6 item 4: List<PackageRegistryLookup> DI must be all-mirror (no lookupLive method).
+    //
+    // Note on the gap between this test and §3-6's original wording: the plan document's item 4
+    // literally reads "the injection result is empty" — i.e. it was written expecting B3 to
+    // delete the 10 *RegistryClient classes outright, the same way B1 deletes LlmServiceClient.
+    // B3 (item 193) instead chose to keep the classes and gut only their live HTTP lookup path,
+    // turning them into mirror-only PackageRegistryLookup implementations (§3-8) — a decision
+    // made after the original §3-6 text was written, once Phase D's registry mirror (§5) became
+    // available as a same-quality replacement for the live path. That is a deliberate, documented
+    // divergence from the literal plan text, not a bug in either the plan or this test. The
+    // resulting stronger invariant, and what this test (plus EGRESS_CAPABLE_TYPES above) actually
+    // enforces post-B3, is: all 10 clients are present AND none of them has the physical
+    // capability to make a live network call.
     // ------------------------------------------------------------------------------------------
 
     @Test

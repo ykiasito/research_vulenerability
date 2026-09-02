@@ -83,6 +83,15 @@ class ClosedModeArchitectureGateTest {
     // ------------------------------------------------------------------------------------------
     // §3-6 item 1: classpath must not contain anthropic / LlmServiceClient / live *RegistryClient
     // / NvdVulnerabilitySource / OsvLiveQueryClient.
+    //
+    // Note on "live *RegistryClient": §3-6's original text was written expecting B3 to delete the
+    // 10 *RegistryClient classes outright (same treatment as LlmServiceClient for B1). B3 (item
+    // 193) instead kept all 10 classes and removed only their live HTTP lookup path once Phase
+    // D's registry mirror (§5) became available as a same-quality replacement — a deliberate,
+    // documented divergence from the literal plan text (see also
+    // ClosedModeBeanArchitectureGateTest's note on this same gap for §3-6 item 4). This is why
+    // liveRegistryClientsHaveNoLookupLiveMethod() below checks for classpath presence + no
+    // lookupLive method, rather than classpath absence.
     // ------------------------------------------------------------------------------------------
 
     @Test
@@ -117,9 +126,25 @@ class ClosedModeArchitectureGateTest {
     }
 
     @Test
-    void liveRegistryClientsHaveNoLookupLiveMethod() throws ClassNotFoundException {
+    void liveRegistryClientsHaveNoLookupLiveMethod() {
         for (String className : REGISTRY_CLIENT_CLASSES) {
-            Class<?> clazz = Class.forName(className);
+            Class<?> clazz;
+            try {
+                clazz = Class.forName(className);
+            } catch (ClassNotFoundException e) {
+                // B3 (item 193, docs/spec/closed-mode-plan.md §3-8) removed the live HTTP lookup
+                // *path* from all 10 registry clients, deliberately choosing not to delete the
+                // classes themselves — they stay as mirror-only PackageRegistryLookup
+                // implementations. So this class disappearing entirely is not "B3 progressing
+                // further", it's a coverage loss: this registry's Stage1 identification support
+                // is gone outright, not just its live-HTTP fallback. A bare
+                // ClassNotFoundException here gives no hint of that, so wrap it.
+                throw new AssertionError(className + " is missing from the classpath entirely. "
+                        + "B3 (item 193) removed the live lookup path, not the class — if this "
+                        + "class genuinely disappeared (e.g. via a master merge, §9-3), that means "
+                        + "Stage1 lost this registry's coverage entirely, not just its live-HTTP "
+                        + "fallback.", e);
+            }
             assertThat(hasMethodNamed(clazz, "lookupLive"))
                     .as("%s must not have a lookupLive method — its live HTTP lookup path was "
                             + "supposed to be removed outright in B3 (item 193), not just made "
