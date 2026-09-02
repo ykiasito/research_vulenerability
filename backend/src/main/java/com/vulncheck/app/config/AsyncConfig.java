@@ -117,6 +117,13 @@ public class AsyncConfig {
      * processing for no benefit either workload needs. Sized to exactly the ecosystem count (9,
      * see {@code RegistryMirrorSyncService#KNOWN_ECOSYSTEMS}) since {@code syncAll} never submits
      * more than 9 tasks to it at once; core == max, so no thread churn between runs.
+     *
+     * <p>This pool's 9 threads are the "9 concurrently-running sync workers" referenced by {@code
+     * spring.datasource.hikari.maximum-pool-size}'s comment in {@code application.yml} (senior
+     * review, PR #145 REVISE) — see that comment for why they are not simply added on top of
+     * {@code app.item-processing-pool-size} when sizing the HikariCP pool: each worker holds a DB
+     * connection only for a short per-chunk batch upsert, never while making its rate-limited HTTP
+     * calls, so the 9 of them don't need 9 concurrently-held connections' worth of headroom.
      */
     @Bean(name = "registryMirrorSyncExecutor")
     public Executor registryMirrorSyncExecutor() {

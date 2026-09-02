@@ -104,7 +104,7 @@ public class RegistryMirrorScheduledSync {
             SyncOutcome outcome = registryMirrorSyncService.syncAllAndRelease();
             long minutes = (System.currentTimeMillis() - startedAt) / 60000;
             log.warn("Scheduled weekly registry mirror resync finished in {} minutes: {} synced, {} unresolved, "
-                    + "observed name counts: {}", minutes, outcome.totalSynced(), outcome.totalUnresolved(),
+                    + "candidate name counts (after freshness filter): {}", minutes, outcome.totalSynced(), outcome.totalUnresolved(),
                     outcome.observedNameCountByEcosystem());
         } catch (Exception e) {
             log.error("Scheduled weekly registry mirror resync aborted", e);
