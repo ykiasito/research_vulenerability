@@ -21,8 +21,9 @@ import org.springframework.web.util.UriComponentsBuilder;
 /**
  * Populates/refreshes the {@code registry_package_mirror} table for {@code ecosystem = 'crates.io'}
  * from crates.io's public sparse index ({@code https://index.crates.io/}) — closed-mode backlog
- * item 176 pilot. {@link CratesIoRegistryClient} reads from that table when {@code
- * app.closed-mode.crates-io-mirror-enabled} is on; this service is the only writer.
+ * item 176 pilot. {@link CratesIoRegistryClient} reads unconditionally from that table (the {@code
+ * app.closed-mode.crates-io-mirror-enabled} flag that used to gate this has since been removed);
+ * this service is the only writer.
  *
  * <p><b>Sparse index shape</b> (confirmed live 2026-09-02, not assumed from documentation alone —
  * this project has previously been burned by an untested Go-registry API assumption): {@code GET

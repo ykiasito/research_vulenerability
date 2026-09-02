@@ -18,8 +18,9 @@ import org.springframework.web.client.RestClient;
  * Populates/refreshes the {@code registry_package_mirror} table for {@code ecosystem = 'rubygems'}
  * from RubyGems' public compact index ({@code https://index.rubygems.org/}) — closed-mode backlog
  * item 176, RubyGems rollout (same pattern as the crates.io pilot, see {@code
- * CratesIoMirrorSyncService}'s javadoc). {@link RubyGemsRegistryClient} reads from that table when
- * {@code app.closed-mode.rubygems-mirror-enabled} is on; this service is the only writer.
+ * CratesIoMirrorSyncService}'s javadoc). {@link RubyGemsRegistryClient} reads unconditionally from
+ * that table (the {@code app.closed-mode.rubygems-mirror-enabled} flag that used to gate this has
+ * since been removed); this service is the only writer.
  *
  * <p><b>Compact index shape</b> (confirmed live 2026-09-02 against real gems — rails/rake — rather
  * than assumed from documentation alone, per this project's own repeated "verify the actual API,

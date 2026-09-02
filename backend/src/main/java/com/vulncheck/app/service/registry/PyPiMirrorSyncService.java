@@ -21,8 +21,9 @@ import org.springframework.web.util.UriComponentsBuilder;
  * Populates/refreshes the {@code registry_package_mirror} table for {@code ecosystem = 'pypi'} from
  * PyPI's Simple API (PEP 691 JSON) — closed-mode backlog item 176 rollout (PyPI), same pattern as the
  * crates.io/RubyGems/Packagist/Hex mirrors (see {@code CratesIoMirrorSyncService}'s class javadoc).
- * {@link PyPiRegistryClient} reads from that table when {@code app.closed-mode.pypi-mirror-enabled}
- * is on; this service is the only writer.
+ * {@link PyPiRegistryClient} reads unconditionally from that table (the {@code
+ * app.closed-mode.pypi-mirror-enabled} flag that used to gate this has since been removed); this
+ * service is the only writer.
  *
  * <p><b>Simple API endpoint shape</b> (confirmed live 2026-09-02 against real packages — requests,
  * django-extensions — rather than assumed from {@code docs/spec/closed-mode-plan.md}'s §5-2 entry

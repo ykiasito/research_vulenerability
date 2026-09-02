@@ -21,8 +21,9 @@ import org.springframework.web.client.RestClient;
  * NuGet's public flat-container package-base-address API ({@code
  * https://api.nuget.org/v3-flatcontainer/{id}/index.json}) — closed-mode backlog item 176 rollout
  * (NuGet), same pattern as the crates.io/RubyGems/Packagist/Hex/npm/PyPI mirrors (see {@code
- * PackagistMirrorSyncService}'s javadoc). {@link NuGetRegistryClient} reads from that table when
- * {@code app.closed-mode.nuget-mirror-enabled} is on; this service is the only writer.
+ * PackagistMirrorSyncService}'s javadoc). {@link NuGetRegistryClient} reads unconditionally from
+ * that table (the {@code app.closed-mode.nuget-mirror-enabled} flag that used to gate this has since
+ * been removed); this service is the only writer.
  *
  * <p><b>Endpoint choice, confirmed live 2026-09-02</b> (not assumed from {@code
  * docs/spec/closed-mode-plan.md}'s §5-2 entry alone — this project has repeatedly been burned by

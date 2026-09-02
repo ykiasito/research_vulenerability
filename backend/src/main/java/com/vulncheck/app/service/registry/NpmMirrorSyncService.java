@@ -20,8 +20,9 @@ import org.springframework.web.client.RestClient;
  * Populates/refreshes the {@code registry_package_mirror} table for {@code ecosystem = 'npm'} from
  * npm's public per-package document endpoint ({@code https://registry.npmjs.org/{name}}) —
  * closed-mode backlog item 176 rollout (npm), same pattern as the crates.io/RubyGems/Packagist/Hex
- * mirrors (see {@code PackagistMirrorSyncService}'s javadoc). {@link NpmRegistryClient} reads from
- * that table when {@code app.closed-mode.npm-mirror-enabled} is on; this service is the only writer.
+ * mirrors (see {@code PackagistMirrorSyncService}'s javadoc). {@link NpmRegistryClient} reads
+ * unconditionally from that table (the {@code app.closed-mode.npm-mirror-enabled} flag that used to
+ * gate this has since been removed); this service is the only writer.
  *
  * <p><b>Endpoint choice, confirmed live 2026-09-02</b> (not assumed from {@code
  * docs/spec/closed-mode-plan.md}'s §5-2 entry alone — this project has repeatedly been burned by

@@ -20,8 +20,9 @@ import org.springframework.web.client.RestClient;
  * Hex.pm's public package API ({@code https://hex.pm/api/packages/{name}}) — closed-mode backlog
  * item 176 rollout (Hex), same pattern as the crates.io/RubyGems pilots (see {@link
  * CratesIoMirrorSyncService}/{@link RubyGemsMirrorSyncService}'s javadoc). {@link HexRegistryClient}
- * reads from that table when {@code app.closed-mode.hex-mirror-enabled} is on; this service is the
- * only writer.
+ * reads unconditionally from that table (the {@code app.closed-mode.hex-mirror-enabled} flag that
+ * used to gate this has since been removed — {@link HexRegistryClient#lookup} always calls {@code
+ * lookupViaMirror}); this service is the only writer.
  *
  * <p><b>Two Hex.pm endpoints exist; this service deliberately uses the simpler one</b> (confirmed
  * live 2026-09-02, not assumed from {@code docs/spec/closed-mode-plan.md}'s Web-research-based §5-2
