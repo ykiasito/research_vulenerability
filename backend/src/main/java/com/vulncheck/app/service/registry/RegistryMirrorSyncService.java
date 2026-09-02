@@ -2,17 +2,24 @@ package com.vulncheck.app.service.registry;
 
 import com.vulncheck.app.repository.IdentifiedProductRepository;
 import com.vulncheck.app.repository.RegistryMirrorSeedNameRepository;
+import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -138,6 +145,7 @@ public class RegistryMirrorSyncService {
 
     private final IdentifiedProductRepository identifiedProductRepository;
     private final RegistryMirrorSeedNameRepository registryMirrorSeedNameRepository;
+    private final RegistryPackageMirrorRepository registryPackageMirrorRepository;
     private final CratesIoMirrorSyncService cratesIoMirrorSyncService;
     private final RubyGemsMirrorSyncService rubyGemsMirrorSyncService;
     private final PackagistMirrorSyncService packagistMirrorSyncService;
@@ -148,9 +156,32 @@ public class RegistryMirrorSyncService {
     private final GoMirrorSyncService goMirrorSyncService;
     private final PubMirrorSyncService pubMirrorSyncService;
 
+    /** See {@code AsyncConfig#registryMirrorSyncExecutor}'s javadoc for why this fans the 9
+     *  per-ecosystem syncs out concurrently rather than reusing {@code registryLookupExecutor}. */
+    @Qualifier("registryMirrorSyncExecutor")
+    private final Executor registryMirrorSyncExecutor;
+
     /** Names per {@code syncPackages}/{@code syncModules} call — see the class javadoc. */
     @Value("${app.registry-mirror-sync-chunk-size:200}")
     private int chunkSize;
+
+    /**
+     * Closed-mode backlog item 186: a seed name whose {@code registry_package_mirror.
+     * last_synced_at} is already within this many days of "now" is skipped by {@link
+     * #collectSeedNames} rather than re-fetched — every weekly {@link #syncAllAndRelease} run
+     * previously re-fetched every observed name unconditionally, so cost grew monotonically with
+     * install-history size even though most names' published-version lists rarely change week to
+     * week. 7 days is the default: this sync's own schedule is weekly, so 7 days keeps a name that
+     * was actually refreshed on last week's run from being re-fetched again this run, while still
+     * re-fetching anything that was added, or that missed a run, since then. A name never synced
+     * before (no {@code registry_package_mirror} row at all) has no {@code last_synced_at} to
+     * compare and is therefore never filtered out by this, regardless of this value — see {@link
+     * #collectSeedNames}. A non-positive value disables the filter entirely (every observed name is
+     * always re-synced), same escape-hatch convention as {@link #chunkSize}'s own non-positive
+     * fallback.
+     */
+    @Value("${app.registry-mirror-sync-freshness-days:7}")
+    private int freshnessDays;
 
     /** Same convention as {@code NvdCpeSyncService#fullSyncRunning} — see that field's javadoc. */
     private final AtomicBoolean fullSyncRunning = new AtomicBoolean(false);
@@ -160,11 +191,13 @@ public class RegistryMirrorSyncService {
      * @param totalUnresolved sum of every ecosystem's unresolved count.
      * @param observedNameCountByEcosystem how many distinct seed package names ({@code
      *                                     identified_products} union {@code
-     *                                     registry_mirror_seed_name}, see {@link #collectSeedNames})
-     *                                     were pulled for each ecosystem, before syncing — kept
-     *                                     separate from {@code totalSynced} so a caller can tell
-     *                                     "nothing to sync yet" (0 observed) apart from "synced 0 of
-     *                                     N" (every observed name failed to resolve).
+     *                                     registry_mirror_seed_name}, minus any name {@link
+     *                                     #freshnessDays} skipped as recently synced — see {@link
+     *                                     #collectSeedNames}) were actually candidates to sync for
+     *                                     each ecosystem, before syncing — kept separate from {@code
+     *                                     totalSynced} so a caller can tell "nothing to sync yet" (0
+     *                                     observed) apart from "synced 0 of N" (every observed name
+     *                                     failed to resolve).
      */
     public record SyncOutcome(int totalSynced, int totalUnresolved, Map<String, Integer> observedNameCountByEcosystem) {
     }
@@ -310,11 +343,8 @@ public class RegistryMirrorSyncService {
     }
 
     /**
-     * Syncs all 9 mirrored ecosystems from their observed-name seed lists, sequentially (each
-     * ecosystem's own {@link com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter}
-     * pacing already serializes that ecosystem's own requests; running ecosystems one after another
-     * rather than concurrently keeps this service's own logic simple and avoids adding a new
-     * concurrency surface for what is, today, a background/off-hours operation). Callers must only
+     * Syncs all 9 mirrored ecosystems from their observed-name seed lists, concurrently — see
+     * {@link #syncAll}'s own javadoc for why running them in parallel is safe. Callers must only
      * invoke this after {@link #tryBeginFullSync} returned {@code true}; the slot is released here
      * unconditionally (success or exception) so a failed run doesn't permanently wedge the guard.
      */
@@ -326,84 +356,82 @@ public class RegistryMirrorSyncService {
         }
     }
 
+    /**
+     * One (ecosystem identifier, per-chunk sync function) pair — see {@link #syncEcosystem} for
+     * what the function itself does with it.
+     */
+    private record EcosystemSyncTask(String ecosystem, Function<List<String>, int[]> syncOneChunk) {
+    }
+
+    /**
+     * Closed-mode backlog item 186: fans the 9 per-ecosystem syncs out onto {@link
+     * #registryMirrorSyncExecutor} instead of running them one after another. Safe to parallelize
+     * because each ecosystem's own {@link com.vulncheck.app.service.ratelimit.
+     * ExternalRegistryRateLimiter} pacing is an independent gate keyed by ecosystem (see that
+     * class's javadoc) — running all 9 concurrently paces each one exactly as it would running
+     * alone, it just stops one slow ecosystem's run from serializing behind the other 8. Wall-clock
+     * cost for a full sync therefore drops from roughly the *sum* of every ecosystem's own sync time
+     * to roughly the *slowest single ecosystem's* sync time. {@link CompletableFuture#join} (not
+     * {@code get}) is used when collecting results so a per-ecosystem sync failure surfaces as an
+     * unchecked exception here, same as the previous sequential call would have thrown directly —
+     * {@link #syncAllAndRelease}'s {@code finally} still releases {@link #fullSyncRunning} either
+     * way.
+     */
     private SyncOutcome syncAll() {
+        List<EcosystemSyncTask> tasks = List.of(
+                new EcosystemSyncTask("crates.io", names -> {
+                    CratesIoMirrorSyncService.SyncOutcome o = cratesIoMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("rubygems", names -> {
+                    RubyGemsMirrorSyncService.SyncOutcome o = rubyGemsMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("packagist", names -> {
+                    PackagistMirrorSyncService.SyncOutcome o = packagistMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("hex", names -> {
+                    HexMirrorSyncService.SyncOutcome o = hexMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("npm", names -> {
+                    NpmMirrorSyncService.SyncOutcome o = npmMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("pypi", names -> {
+                    PyPiMirrorSyncService.SyncOutcome o = pyPiMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("nuget", names -> {
+                    NuGetMirrorSyncService.SyncOutcome o = nuGetMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("go", names -> {
+                    GoMirrorSyncService.SyncOutcome o = goMirrorSyncService.syncModules(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("pub", names -> {
+                    PubMirrorSyncService.SyncOutcome o = pubMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }));
+
+        List<CompletableFuture<int[]>> futures = tasks.stream()
+                .map(task -> CompletableFuture.supplyAsync(
+                        () -> syncEcosystem(task.ecosystem(), task.syncOneChunk()), registryMirrorSyncExecutor))
+                .toList();
+
         int totalSynced = 0;
         int totalUnresolved = 0;
         Map<String, Integer> observedNameCountByEcosystem = new LinkedHashMap<>();
-
-        int[] result;
-
-        result = syncEcosystem("crates.io", names -> {
-            CratesIoMirrorSyncService.SyncOutcome o = cratesIoMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("crates.io", result[2]);
-
-        result = syncEcosystem("rubygems", names -> {
-            RubyGemsMirrorSyncService.SyncOutcome o = rubyGemsMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("rubygems", result[2]);
-
-        result = syncEcosystem("packagist", names -> {
-            PackagistMirrorSyncService.SyncOutcome o = packagistMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("packagist", result[2]);
-
-        result = syncEcosystem("hex", names -> {
-            HexMirrorSyncService.SyncOutcome o = hexMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("hex", result[2]);
-
-        result = syncEcosystem("npm", names -> {
-            NpmMirrorSyncService.SyncOutcome o = npmMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("npm", result[2]);
-
-        result = syncEcosystem("pypi", names -> {
-            PyPiMirrorSyncService.SyncOutcome o = pyPiMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("pypi", result[2]);
-
-        result = syncEcosystem("nuget", names -> {
-            NuGetMirrorSyncService.SyncOutcome o = nuGetMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("nuget", result[2]);
-
-        result = syncEcosystem("go", names -> {
-            GoMirrorSyncService.SyncOutcome o = goMirrorSyncService.syncModules(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("go", result[2]);
-
-        result = syncEcosystem("pub", names -> {
-            PubMirrorSyncService.SyncOutcome o = pubMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("pub", result[2]);
+        for (int i = 0; i < tasks.size(); i++) {
+            // .join() (not .get()) surfaces a task failure as an unchecked exception directly,
+            // same as the previous sequential call to syncEcosystem would have thrown.
+            int[] result = futures.get(i).join();
+            totalSynced += result[0];
+            totalUnresolved += result[1];
+            observedNameCountByEcosystem.put(tasks.get(i).ecosystem(), result[2]);
+        }
 
         log.info("Registry mirror sync (all ecosystems): {} synced, {} unresolved, observed name counts: {}",
                 totalSynced, totalUnresolved, observedNameCountByEcosystem);
@@ -444,16 +472,35 @@ public class RegistryMirrorSyncService {
     }
 
     /**
-     * Union of this ecosystem's two seed sources — see the class javadoc's "Seed source" section.
-     * A {@link LinkedHashSet} both de-duplicates (a name present in both sources must not be synced
-     * twice) and keeps a stable, deterministic iteration order (identified_products names first,
-     * then any operator-uploaded names not already covered) rather than depending on whatever order
-     * two separate SQL queries happen to return rows in.
+     * Union of this ecosystem's two seed sources — see the class javadoc's "Seed source" section —
+     * minus any name {@link #freshnessDays} says was mirrored recently enough to skip (closed-mode
+     * backlog item 186). A {@link LinkedHashSet} both de-duplicates (a name present in both sources
+     * must not be synced twice) and keeps a stable, deterministic iteration order
+     * (identified_products names first, then any operator-uploaded names not already covered)
+     * rather than depending on whatever order two separate SQL queries happen to return rows in.
      */
     private List<String> collectSeedNames(String ecosystem) {
         Set<String> names = new LinkedHashSet<>(identifiedProductRepository.findDistinctPackageNamesByEcosystem(ecosystem));
         names.addAll(registryMirrorSeedNameRepository.findDistinctPackageNames(ecosystem));
-        return List.copyOf(names);
+        if (freshnessDays <= 0) {
+            // Non-positive disables the filter entirely — see freshnessDays' own javadoc.
+            return List.copyOf(names);
+        }
+        Instant cutoff = Instant.now().minus(freshnessDays, ChronoUnit.DAYS);
+        Set<String> freshNormalizedNames =
+                registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(ecosystem, cutoff);
+        if (freshNormalizedNames.isEmpty()) {
+            return List.copyOf(names);
+        }
+        List<String> stale = names.stream()
+                .filter(name -> !freshNormalizedNames.contains(OsvPackageNameNormalizer.normalize(ecosystem, name)))
+                .toList();
+        int skipped = names.size() - stale.size();
+        if (skipped > 0) {
+            log.info("Registry mirror sync ({}): skipping {} of {} observed names already synced within "
+                    + "the last {} day(s)", ecosystem, skipped, names.size(), freshnessDays);
+        }
+        return stale;
     }
 
     private static List<List<String>> chunk(List<String> names, int chunkSize) {
