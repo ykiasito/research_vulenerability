@@ -2,6 +2,8 @@ package com.vulncheck.app.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -146,5 +148,46 @@ class RegistryPackageMirrorRepositoryImplTest {
 
         // Now false: a fresh query sees the delete above.
         assertThat(registryPackageMirrorRepository.hasAnyEntries("crates.io")).isFalse();
+    }
+
+    /** Closed-mode backlog item 186: a row synced after {@code cutoff} must be reported as fresh. */
+    @Test
+    void findFreshlySyncedNormalizedPackageNamesIncludesARowSyncedAfterTheCutoff() {
+        registryPackageMirrorRepository.upsertBatch("crates.io", Map.of("serde", List.of("1.0.228")));
+
+        assertThat(registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(
+                "crates.io", Instant.now().minus(1, ChronoUnit.DAYS)))
+                .containsExactly("serde");
+    }
+
+    /** A row synced before {@code cutoff} must not be reported as fresh. */
+    @Test
+    void findFreshlySyncedNormalizedPackageNamesExcludesARowSyncedBeforeTheCutoff() {
+        jdbcTemplate.update(
+                "INSERT INTO registry_package_mirror (ecosystem, package_name, versions, last_synced_at) "
+                        + "VALUES (?, ?, ARRAY['1.0.228'], ?)",
+                "crates.io", "serde", java.sql.Timestamp.from(Instant.now().minus(30, ChronoUnit.DAYS)));
+
+        assertThat(registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(
+                "crates.io", Instant.now().minus(7, ChronoUnit.DAYS)))
+                .isEmpty();
+    }
+
+    /** A package name that was never synced at all has no row and is therefore never "fresh". */
+    @Test
+    void findFreshlySyncedNormalizedPackageNamesIsEmptyForAnEcosystemWithNoRowsAtAll() {
+        assertThat(registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(
+                "crates.io", Instant.now().minus(7, ChronoUnit.DAYS)))
+                .isEmpty();
+    }
+
+    /** Ecosystems are isolated for this query too, same as {@link #ecosystemsAreIsolatedFromEachOther}. */
+    @Test
+    void findFreshlySyncedNormalizedPackageNamesIsIsolatedPerEcosystem() {
+        registryPackageMirrorRepository.upsertBatch("crates.io", Map.of("serde", List.of("1.0.228")));
+
+        assertThat(registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(
+                "npm", Instant.now().minus(1, ChronoUnit.DAYS)))
+                .isEmpty();
     }
 }

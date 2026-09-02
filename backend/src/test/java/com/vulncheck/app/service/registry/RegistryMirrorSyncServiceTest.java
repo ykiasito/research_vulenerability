@@ -3,7 +3,9 @@ package com.vulncheck.app.service.registry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -13,8 +15,10 @@ import static org.mockito.Mockito.when;
 
 import com.vulncheck.app.repository.IdentifiedProductRepository;
 import com.vulncheck.app.repository.RegistryMirrorSeedNameRepository;
+import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +36,7 @@ class RegistryMirrorSyncServiceTest {
 
     private final IdentifiedProductRepository identifiedProductRepository = mock(IdentifiedProductRepository.class);
     private final RegistryMirrorSeedNameRepository registryMirrorSeedNameRepository = mock(RegistryMirrorSeedNameRepository.class);
+    private final RegistryPackageMirrorRepository registryPackageMirrorRepository = mock(RegistryPackageMirrorRepository.class);
     // Runs each ecosystem's sync synchronously on the calling (test) thread instead of a real pool
     // -- exercises the real CompletableFuture-based fan-out in syncAll without introducing timing
     // nondeterminism into these tests' verify()/assertThat() calls.
@@ -51,16 +56,21 @@ class RegistryMirrorSyncServiceTest {
     @BeforeEach
     void setUp() {
         service = new RegistryMirrorSyncService(identifiedProductRepository, registryMirrorSeedNameRepository,
-                cratesIoMirrorSyncService, rubyGemsMirrorSyncService, packagistMirrorSyncService,
-                hexMirrorSyncService, npmMirrorSyncService, pyPiMirrorSyncService, nuGetMirrorSyncService,
-                goMirrorSyncService, pubMirrorSyncService, directExecutor);
+                registryPackageMirrorRepository, cratesIoMirrorSyncService, rubyGemsMirrorSyncService,
+                packagistMirrorSyncService, hexMirrorSyncService, npmMirrorSyncService, pyPiMirrorSyncService,
+                nuGetMirrorSyncService, goMirrorSyncService, pubMirrorSyncService, directExecutor);
         ReflectionTestUtils.setField(service, "chunkSize", 200);
+        ReflectionTestUtils.setField(service, "freshnessDays", 7);
 
         // Every ecosystem defaults to "nothing observed yet" unless a test overrides it.
         when(identifiedProductRepository.findDistinctPackageNamesByEcosystem(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(List.of());
         when(registryMirrorSeedNameRepository.findDistinctPackageNames(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(List.of());
+        // No name is "freshly synced" by default -- every observed name in a test that doesn't
+        // override this is a sync candidate, matching this suite's pre-existing behavior/expectations.
+        when(registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(anyString(), any()))
+                .thenReturn(Set.of());
         when(cratesIoMirrorSyncService.syncPackages(anyList())).thenReturn(new CratesIoMirrorSyncService.SyncOutcome(0, 0));
         when(rubyGemsMirrorSyncService.syncPackages(anyList())).thenReturn(new RubyGemsMirrorSyncService.SyncOutcome(0, 0));
         when(packagistMirrorSyncService.syncPackages(anyList())).thenReturn(new PackagistMirrorSyncService.SyncOutcome(0, 0));
@@ -251,10 +261,11 @@ class RegistryMirrorSyncServiceTest {
     void syncAllAndReleaseRunsEveryEcosystemOnAGenuinelyConcurrentExecutor() {
         java.util.concurrent.ExecutorService realPool = java.util.concurrent.Executors.newFixedThreadPool(9);
         RegistryMirrorSyncService concurrentService = new RegistryMirrorSyncService(identifiedProductRepository,
-                registryMirrorSeedNameRepository, cratesIoMirrorSyncService, rubyGemsMirrorSyncService,
-                packagistMirrorSyncService, hexMirrorSyncService, npmMirrorSyncService, pyPiMirrorSyncService,
-                nuGetMirrorSyncService, goMirrorSyncService, pubMirrorSyncService, realPool);
+                registryMirrorSeedNameRepository, registryPackageMirrorRepository, cratesIoMirrorSyncService,
+                rubyGemsMirrorSyncService, packagistMirrorSyncService, hexMirrorSyncService, npmMirrorSyncService,
+                pyPiMirrorSyncService, nuGetMirrorSyncService, goMirrorSyncService, pubMirrorSyncService, realPool);
         ReflectionTestUtils.setField(concurrentService, "chunkSize", 200);
+        ReflectionTestUtils.setField(concurrentService, "freshnessDays", 7);
         when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("crates.io")).thenReturn(List.of("serde"));
         when(cratesIoMirrorSyncService.syncPackages(List.of("serde")))
                 .thenReturn(new CratesIoMirrorSyncService.SyncOutcome(1, 0));
@@ -270,6 +281,67 @@ class RegistryMirrorSyncServiceTest {
         } finally {
             realPool.shutdownNow();
         }
+    }
+
+    /**
+     * Closed-mode backlog item 186: a name whose {@code registry_package_mirror.last_synced_at} is
+     * already within the freshness window must be skipped rather than re-synced.
+     */
+    @Test
+    void syncAllAndReleaseSkipsANameAlreadySyncedWithinTheFreshnessWindow() {
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("npm"))
+                .thenReturn(List.of("lodash", "left-pad"));
+        when(registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(
+                org.mockito.ArgumentMatchers.eq("npm"), any()))
+                .thenReturn(Set.of("lodash"));
+        when(npmMirrorSyncService.syncPackages(List.of("left-pad")))
+                .thenReturn(new NpmMirrorSyncService.SyncOutcome(1, 0));
+
+        service.tryBeginFullSync();
+        RegistryMirrorSyncService.SyncOutcome outcome = service.syncAllAndRelease();
+
+        verify(npmMirrorSyncService).syncPackages(List.of("left-pad"));
+        verify(npmMirrorSyncService, never()).syncPackages(List.of("lodash", "left-pad"));
+        assertThat(outcome.observedNameCountByEcosystem()).containsEntry("npm", 1);
+    }
+
+    /**
+     * A name never synced before (no {@code registry_package_mirror} row) must never be filtered
+     * out by the freshness check, regardless of what the mirror repository reports as "fresh" for
+     * other names.
+     */
+    @Test
+    void syncAllAndReleaseNeverFiltersOutANameWithNoPriorMirrorRow() {
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("npm"))
+                .thenReturn(List.of("brand-new-package"));
+        when(registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(
+                org.mockito.ArgumentMatchers.eq("npm"), any()))
+                .thenReturn(Set.of("some-other-already-mirrored-package"));
+        when(npmMirrorSyncService.syncPackages(List.of("brand-new-package")))
+                .thenReturn(new NpmMirrorSyncService.SyncOutcome(1, 0));
+
+        service.tryBeginFullSync();
+        service.syncAllAndRelease();
+
+        verify(npmMirrorSyncService).syncPackages(List.of("brand-new-package"));
+    }
+
+    /**
+     * {@code app.registry-mirror-sync-freshness-days} <= 0 disables the filter entirely — same
+     * escape-hatch convention as {@code chunkSize}'s own non-positive fallback.
+     */
+    @Test
+    void syncAllAndReleaseDoesNotFilterAtAllWhenFreshnessDaysIsNonPositive() {
+        ReflectionTestUtils.setField(service, "freshnessDays", 0);
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("npm")).thenReturn(List.of("lodash"));
+        when(npmMirrorSyncService.syncPackages(List.of("lodash")))
+                .thenReturn(new NpmMirrorSyncService.SyncOutcome(1, 0));
+
+        service.tryBeginFullSync();
+        service.syncAllAndRelease();
+
+        verify(npmMirrorSyncService).syncPackages(List.of("lodash"));
+        verifyNoInteractions(registryPackageMirrorRepository);
     }
 
     @Test

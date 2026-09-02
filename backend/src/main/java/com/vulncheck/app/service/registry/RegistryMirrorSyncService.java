@@ -2,6 +2,10 @@ package com.vulncheck.app.service.registry;
 
 import com.vulncheck.app.repository.IdentifiedProductRepository;
 import com.vulncheck.app.repository.RegistryMirrorSeedNameRepository;
+import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -141,6 +145,7 @@ public class RegistryMirrorSyncService {
 
     private final IdentifiedProductRepository identifiedProductRepository;
     private final RegistryMirrorSeedNameRepository registryMirrorSeedNameRepository;
+    private final RegistryPackageMirrorRepository registryPackageMirrorRepository;
     private final CratesIoMirrorSyncService cratesIoMirrorSyncService;
     private final RubyGemsMirrorSyncService rubyGemsMirrorSyncService;
     private final PackagistMirrorSyncService packagistMirrorSyncService;
@@ -160,6 +165,24 @@ public class RegistryMirrorSyncService {
     @Value("${app.registry-mirror-sync-chunk-size:200}")
     private int chunkSize;
 
+    /**
+     * Closed-mode backlog item 186: a seed name whose {@code registry_package_mirror.
+     * last_synced_at} is already within this many days of "now" is skipped by {@link
+     * #collectSeedNames} rather than re-fetched — every weekly {@link #syncAllAndRelease} run
+     * previously re-fetched every observed name unconditionally, so cost grew monotonically with
+     * install-history size even though most names' published-version lists rarely change week to
+     * week. 7 days is the default: this sync's own schedule is weekly, so 7 days keeps a name that
+     * was actually refreshed on last week's run from being re-fetched again this run, while still
+     * re-fetching anything that was added, or that missed a run, since then. A name never synced
+     * before (no {@code registry_package_mirror} row at all) has no {@code last_synced_at} to
+     * compare and is therefore never filtered out by this, regardless of this value — see {@link
+     * #collectSeedNames}. A non-positive value disables the filter entirely (every observed name is
+     * always re-synced), same escape-hatch convention as {@link #chunkSize}'s own non-positive
+     * fallback.
+     */
+    @Value("${app.registry-mirror-sync-freshness-days:7}")
+    private int freshnessDays;
+
     /** Same convention as {@code NvdCpeSyncService#fullSyncRunning} — see that field's javadoc. */
     private final AtomicBoolean fullSyncRunning = new AtomicBoolean(false);
 
@@ -168,11 +191,13 @@ public class RegistryMirrorSyncService {
      * @param totalUnresolved sum of every ecosystem's unresolved count.
      * @param observedNameCountByEcosystem how many distinct seed package names ({@code
      *                                     identified_products} union {@code
-     *                                     registry_mirror_seed_name}, see {@link #collectSeedNames})
-     *                                     were pulled for each ecosystem, before syncing — kept
-     *                                     separate from {@code totalSynced} so a caller can tell
-     *                                     "nothing to sync yet" (0 observed) apart from "synced 0 of
-     *                                     N" (every observed name failed to resolve).
+     *                                     registry_mirror_seed_name}, minus any name {@link
+     *                                     #freshnessDays} skipped as recently synced — see {@link
+     *                                     #collectSeedNames}) were actually candidates to sync for
+     *                                     each ecosystem, before syncing — kept separate from {@code
+     *                                     totalSynced} so a caller can tell "nothing to sync yet" (0
+     *                                     observed) apart from "synced 0 of N" (every observed name
+     *                                     failed to resolve).
      */
     public record SyncOutcome(int totalSynced, int totalUnresolved, Map<String, Integer> observedNameCountByEcosystem) {
     }
@@ -447,16 +472,35 @@ public class RegistryMirrorSyncService {
     }
 
     /**
-     * Union of this ecosystem's two seed sources — see the class javadoc's "Seed source" section.
-     * A {@link LinkedHashSet} both de-duplicates (a name present in both sources must not be synced
-     * twice) and keeps a stable, deterministic iteration order (identified_products names first,
-     * then any operator-uploaded names not already covered) rather than depending on whatever order
-     * two separate SQL queries happen to return rows in.
+     * Union of this ecosystem's two seed sources — see the class javadoc's "Seed source" section —
+     * minus any name {@link #freshnessDays} says was mirrored recently enough to skip (closed-mode
+     * backlog item 186). A {@link LinkedHashSet} both de-duplicates (a name present in both sources
+     * must not be synced twice) and keeps a stable, deterministic iteration order
+     * (identified_products names first, then any operator-uploaded names not already covered)
+     * rather than depending on whatever order two separate SQL queries happen to return rows in.
      */
     private List<String> collectSeedNames(String ecosystem) {
         Set<String> names = new LinkedHashSet<>(identifiedProductRepository.findDistinctPackageNamesByEcosystem(ecosystem));
         names.addAll(registryMirrorSeedNameRepository.findDistinctPackageNames(ecosystem));
-        return List.copyOf(names);
+        if (freshnessDays <= 0) {
+            // Non-positive disables the filter entirely — see freshnessDays' own javadoc.
+            return List.copyOf(names);
+        }
+        Instant cutoff = Instant.now().minus(freshnessDays, ChronoUnit.DAYS);
+        Set<String> freshNormalizedNames =
+                registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(ecosystem, cutoff);
+        if (freshNormalizedNames.isEmpty()) {
+            return List.copyOf(names);
+        }
+        List<String> stale = names.stream()
+                .filter(name -> !freshNormalizedNames.contains(OsvPackageNameNormalizer.normalize(ecosystem, name)))
+                .toList();
+        int skipped = names.size() - stale.size();
+        if (skipped > 0) {
+            log.info("Registry mirror sync ({}): skipping {} of {} observed names already synced within "
+                    + "the last {} day(s)", ecosystem, skipped, names.size(), freshnessDays);
+        }
+        return stale;
     }
 
     private static List<List<String>> chunk(List<String> names, int chunkSize) {
