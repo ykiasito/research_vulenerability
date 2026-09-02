@@ -88,4 +88,52 @@ class IdentifiedProductRepositoryTest {
         assertThat(reloaded.getCpeCandidateCount()).isNull();
         assertThat(reloaded.getCpeCandidateVariantDerived()).isNull();
     }
+
+    /** Closed-mode backlog item 183 — {@code RegistryMirrorSyncService}'s observed-name seed
+     *  source query. */
+    @Test
+    void findDistinctPackageNamesByEcosystemReturnsOnlyDistinctNonNullNamesForThatEcosystem() {
+        IdentifiedProduct npmLodash = new IdentifiedProduct();
+        npmLodash.setJobItemId(newJobItem());
+        npmLodash.setMethod(IdentifiedProduct.METHOD_STATIC);
+        npmLodash.setEcosystem("npm");
+        npmLodash.setPackageName("lodash");
+        identifiedProductRepository.save(npmLodash);
+
+        // A second row for the same (ecosystem, package_name) — must be folded into one entry.
+        IdentifiedProduct npmLodashAgain = new IdentifiedProduct();
+        npmLodashAgain.setJobItemId(newJobItem());
+        npmLodashAgain.setMethod(IdentifiedProduct.METHOD_STATIC);
+        npmLodashAgain.setEcosystem("npm");
+        npmLodashAgain.setPackageName("lodash");
+        identifiedProductRepository.save(npmLodashAgain);
+
+        IdentifiedProduct npmReact = new IdentifiedProduct();
+        npmReact.setJobItemId(newJobItem());
+        npmReact.setMethod(IdentifiedProduct.METHOD_STATIC);
+        npmReact.setEcosystem("npm");
+        npmReact.setPackageName("react");
+        identifiedProductRepository.save(npmReact);
+
+        // A different ecosystem — must not leak into the npm result.
+        IdentifiedProduct pypiRequests = new IdentifiedProduct();
+        pypiRequests.setJobItemId(newJobItem());
+        pypiRequests.setMethod(IdentifiedProduct.METHOD_STATIC);
+        pypiRequests.setEcosystem("pypi");
+        pypiRequests.setPackageName("requests");
+        identifiedProductRepository.save(pypiRequests);
+
+        // A CPE-only match (no registry ecosystem/package name at all) — must not produce a null entry.
+        IdentifiedProduct cpeOnly = new IdentifiedProduct();
+        cpeOnly.setJobItemId(newJobItem());
+        cpeOnly.setMethod(IdentifiedProduct.METHOD_STATIC);
+        cpeOnly.setCpe("cpe:2.3:a:acme:widget:1.0.0:*:*:*:*:*:*:*");
+        identifiedProductRepository.save(cpeOnly);
+
+        assertThat(identifiedProductRepository.findDistinctPackageNamesByEcosystem("npm"))
+                .containsExactlyInAnyOrder("lodash", "react");
+        assertThat(identifiedProductRepository.findDistinctPackageNamesByEcosystem("pypi"))
+                .containsExactly("requests");
+        assertThat(identifiedProductRepository.findDistinctPackageNamesByEcosystem("go")).isEmpty();
+    }
 }
