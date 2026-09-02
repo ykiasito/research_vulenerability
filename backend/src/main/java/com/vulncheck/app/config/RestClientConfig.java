@@ -356,6 +356,28 @@ public class RestClientConfig {
     }
 
     /**
+     * For the pub.dev per-package document sync (closed-mode backlog item 176 rollout, pub.dev,
+     * {@code PubMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient},
+     * same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient}/
+     * {@link #packagistSyncRestClient}/{@link #hexSyncRestClient}/{@link #npmSyncRestClient}/{@link
+     * #pypiSyncRestClient}/{@link #nugetSyncRestClient} and the other {@code *SyncRestClient} beans
+     * above. {@code pub.dev/api/packages/{name}} is served with no redirect chain observed against a
+     * real package lookup (confirmed live 2026-09-02 against {@code http}) and, unlike {@code
+     * /api/package-names}, does not require a specific {@code Accept-Encoding} header, so a plain
+     * {@link #simpleRequestFactory} (auto-follow redirects) is enough here.
+     */
+    @Bean
+    public RestClient pubSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (pub.dev mirror sync)")
+                .build();
+    }
+
+    /**
      * Points at the Python LLM microservice (Stage1 Tier2/Tier3, Stage4). Longer read timeout
      * than the external-API client — a web_search-enabled Claude call can take well over 10s.
      */
