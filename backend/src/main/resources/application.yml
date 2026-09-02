@@ -72,11 +72,12 @@ app:
   # CpeDictionaryScheduledResync#resyncWeekly's javadoc for the PR #75 REVISE history.
   cpe-scheduled-resync-cron: ${CPE_SCHEDULED_RESYNC_CRON:0 30 1 * * SUN}
   # Closed-mode registry mirror (backlog item 176): when true, CratesIoRegistryClient / RubyGemsRegistryClient /
-  # PackagistRegistryClient / HexRegistryClient / NpmRegistryClient answer their Tier1 lookups from the local
-  # registry_package_mirror table (populated by CratesIoMirrorSyncService / RubyGemsMirrorSyncService /
-  # PackagistMirrorSyncService / HexMirrorSyncService / NpmMirrorSyncService respectively) instead of a live
-  # HTTP call. Off by default, same safety-first convention as the CPE flags above — enabling any of these
-  # flags before ever running that ecosystem's mirror sync degrades transparently to the live path (see each
+  # PackagistRegistryClient / HexRegistryClient / NpmRegistryClient / PyPiRegistryClient answer their Tier1
+  # lookups from the local registry_package_mirror table (populated by CratesIoMirrorSyncService /
+  # RubyGemsMirrorSyncService / PackagistMirrorSyncService / HexMirrorSyncService / NpmMirrorSyncService /
+  # PyPiMirrorSyncService respectively) instead of a live HTTP call. Off by default, same safety-first
+  # convention as the CPE flags above — enabling any of these flags before ever running that ecosystem's
+  # mirror sync degrades transparently to the live path (see each
   # registry client's own javadoc), it does not break lookups.
   closed-mode:
     crates-io-mirror-enabled: ${CLOSED_MODE_CRATES_IO_MIRROR_ENABLED:false}
@@ -84,6 +85,7 @@ app:
     packagist-mirror-enabled: ${CLOSED_MODE_PACKAGIST_MIRROR_ENABLED:false}
     hex-mirror-enabled: ${CLOSED_MODE_HEX_MIRROR_ENABLED:false}
     npm-mirror-enabled: ${CLOSED_MODE_NPM_MIRROR_ENABLED:false}
+    pypi-mirror-enabled: ${CLOSED_MODE_PYPI_MIRROR_ENABLED:false}
   # High-confidence AI verification backstop (see HighConfidenceVerificationService) — an extra
   # AI+web_search check for Stage1 items that reached a high-confidence CPE match purely via static
   # (Tier1) logic, never reviewed by Tier2/Tier3's AI disambiguation. Off by default so this never
