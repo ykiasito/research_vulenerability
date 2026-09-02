@@ -157,6 +157,24 @@ class CratesIoMirrorSyncServiceTest {
     }
 
     @Test
+    void neverConsumesARateLimitSlotForAnInvalidPackageName() {
+        // Closed-mode backlog item 184 REVISE: the name-grammar check must run before
+        // rateLimiter.awaitTurn, not just before the HTTP call -- otherwise a name that's going to
+        // be rejected anyway still delays the next name in the batch by crates.io's ~1100ms pacing.
+        ExternalRegistryRateLimiter mockRateLimiter = Mockito.mock(ExternalRegistryRateLimiter.class);
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer mockServer = MockRestServiceServer.bindTo(builder).build();
+        CratesIoMirrorSyncService serviceWithMockedLimiter = new CratesIoMirrorSyncService(
+                builder.build(), mockRateLimiter, registryPackageMirrorRepository, new ObjectMapper());
+
+        SyncOutcome outcome = serviceWithMockedLimiter.syncPackages(List.of(".."));
+
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        mockServer.verify();
+        Mockito.verify(mockRateLimiter, Mockito.never()).awaitTurn(Mockito.anyString());
+    }
+
+    @Test
     void sparseIndexPathFollowsTheConfirmedLiveConvention() {
         assertThat(CratesIoMirrorSyncService.sparseIndexPath("x")).isEqualTo("1/x");
         assertThat(CratesIoMirrorSyncService.sparseIndexPath("io")).isEqualTo("2/io");
