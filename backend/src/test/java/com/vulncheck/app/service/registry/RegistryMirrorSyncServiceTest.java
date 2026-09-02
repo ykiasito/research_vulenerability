@@ -15,6 +15,7 @@ import com.vulncheck.app.repository.IdentifiedProductRepository;
 import com.vulncheck.app.repository.RegistryMirrorSeedNameRepository;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.Executor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -31,6 +32,10 @@ class RegistryMirrorSyncServiceTest {
 
     private final IdentifiedProductRepository identifiedProductRepository = mock(IdentifiedProductRepository.class);
     private final RegistryMirrorSeedNameRepository registryMirrorSeedNameRepository = mock(RegistryMirrorSeedNameRepository.class);
+    // Runs each ecosystem's sync synchronously on the calling (test) thread instead of a real pool
+    // -- exercises the real CompletableFuture-based fan-out in syncAll without introducing timing
+    // nondeterminism into these tests' verify()/assertThat() calls.
+    private final Executor directExecutor = Runnable::run;
     private final CratesIoMirrorSyncService cratesIoMirrorSyncService = mock(CratesIoMirrorSyncService.class);
     private final RubyGemsMirrorSyncService rubyGemsMirrorSyncService = mock(RubyGemsMirrorSyncService.class);
     private final PackagistMirrorSyncService packagistMirrorSyncService = mock(PackagistMirrorSyncService.class);
@@ -48,7 +53,7 @@ class RegistryMirrorSyncServiceTest {
         service = new RegistryMirrorSyncService(identifiedProductRepository, registryMirrorSeedNameRepository,
                 cratesIoMirrorSyncService, rubyGemsMirrorSyncService, packagistMirrorSyncService,
                 hexMirrorSyncService, npmMirrorSyncService, pyPiMirrorSyncService, nuGetMirrorSyncService,
-                goMirrorSyncService, pubMirrorSyncService);
+                goMirrorSyncService, pubMirrorSyncService, directExecutor);
         ReflectionTestUtils.setField(service, "chunkSize", 200);
 
         // Every ecosystem defaults to "nothing observed yet" unless a test overrides it.
@@ -234,6 +239,37 @@ class RegistryMirrorSyncServiceTest {
 
         verify(npmMirrorSyncService, times(1)).syncPackages(List.of("lodash"));
         assertThat(outcome.observedNameCountByEcosystem()).containsEntry("npm", 1);
+    }
+
+    /**
+     * Closed-mode backlog item 186: every one of the 9 per-ecosystem syncs must still run when
+     * fanned out onto a real (not synchronous) {@link Executor} — the point of parallelizing
+     * {@code syncAll} is that all 9 can genuinely be in flight at once, not just that the
+     * synchronous test double used elsewhere in this suite happens to work.
+     */
+    @Test
+    void syncAllAndReleaseRunsEveryEcosystemOnAGenuinelyConcurrentExecutor() {
+        java.util.concurrent.ExecutorService realPool = java.util.concurrent.Executors.newFixedThreadPool(9);
+        RegistryMirrorSyncService concurrentService = new RegistryMirrorSyncService(identifiedProductRepository,
+                registryMirrorSeedNameRepository, cratesIoMirrorSyncService, rubyGemsMirrorSyncService,
+                packagistMirrorSyncService, hexMirrorSyncService, npmMirrorSyncService, pyPiMirrorSyncService,
+                nuGetMirrorSyncService, goMirrorSyncService, pubMirrorSyncService, realPool);
+        ReflectionTestUtils.setField(concurrentService, "chunkSize", 200);
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("crates.io")).thenReturn(List.of("serde"));
+        when(cratesIoMirrorSyncService.syncPackages(List.of("serde")))
+                .thenReturn(new CratesIoMirrorSyncService.SyncOutcome(1, 0));
+
+        try {
+            assertThat(concurrentService.tryBeginFullSync()).isTrue();
+            RegistryMirrorSyncService.SyncOutcome outcome = assertTimeoutPreemptively(Duration.ofSeconds(10),
+                    concurrentService::syncAllAndRelease);
+
+            assertThat(outcome.totalSynced()).isEqualTo(1);
+            verify(cratesIoMirrorSyncService).syncPackages(List.of("serde"));
+            verify(npmMirrorSyncService, never()).syncPackages(anyList());
+        } finally {
+            realPool.shutdownNow();
+        }
     }
 
     @Test

@@ -8,11 +8,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -147,6 +150,11 @@ public class RegistryMirrorSyncService {
     private final NuGetMirrorSyncService nuGetMirrorSyncService;
     private final GoMirrorSyncService goMirrorSyncService;
     private final PubMirrorSyncService pubMirrorSyncService;
+
+    /** See {@code AsyncConfig#registryMirrorSyncExecutor}'s javadoc for why this fans the 9
+     *  per-ecosystem syncs out concurrently rather than reusing {@code registryLookupExecutor}. */
+    @Qualifier("registryMirrorSyncExecutor")
+    private final Executor registryMirrorSyncExecutor;
 
     /** Names per {@code syncPackages}/{@code syncModules} call — see the class javadoc. */
     @Value("${app.registry-mirror-sync-chunk-size:200}")
@@ -310,11 +318,8 @@ public class RegistryMirrorSyncService {
     }
 
     /**
-     * Syncs all 9 mirrored ecosystems from their observed-name seed lists, sequentially (each
-     * ecosystem's own {@link com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter}
-     * pacing already serializes that ecosystem's own requests; running ecosystems one after another
-     * rather than concurrently keeps this service's own logic simple and avoids adding a new
-     * concurrency surface for what is, today, a background/off-hours operation). Callers must only
+     * Syncs all 9 mirrored ecosystems from their observed-name seed lists, concurrently — see
+     * {@link #syncAll}'s own javadoc for why running them in parallel is safe. Callers must only
      * invoke this after {@link #tryBeginFullSync} returned {@code true}; the slot is released here
      * unconditionally (success or exception) so a failed run doesn't permanently wedge the guard.
      */
@@ -326,84 +331,82 @@ public class RegistryMirrorSyncService {
         }
     }
 
+    /**
+     * One (ecosystem identifier, per-chunk sync function) pair — see {@link #syncEcosystem} for
+     * what the function itself does with it.
+     */
+    private record EcosystemSyncTask(String ecosystem, Function<List<String>, int[]> syncOneChunk) {
+    }
+
+    /**
+     * Closed-mode backlog item 186: fans the 9 per-ecosystem syncs out onto {@link
+     * #registryMirrorSyncExecutor} instead of running them one after another. Safe to parallelize
+     * because each ecosystem's own {@link com.vulncheck.app.service.ratelimit.
+     * ExternalRegistryRateLimiter} pacing is an independent gate keyed by ecosystem (see that
+     * class's javadoc) — running all 9 concurrently paces each one exactly as it would running
+     * alone, it just stops one slow ecosystem's run from serializing behind the other 8. Wall-clock
+     * cost for a full sync therefore drops from roughly the *sum* of every ecosystem's own sync time
+     * to roughly the *slowest single ecosystem's* sync time. {@link CompletableFuture#join} (not
+     * {@code get}) is used when collecting results so a per-ecosystem sync failure surfaces as an
+     * unchecked exception here, same as the previous sequential call would have thrown directly —
+     * {@link #syncAllAndRelease}'s {@code finally} still releases {@link #fullSyncRunning} either
+     * way.
+     */
     private SyncOutcome syncAll() {
+        List<EcosystemSyncTask> tasks = List.of(
+                new EcosystemSyncTask("crates.io", names -> {
+                    CratesIoMirrorSyncService.SyncOutcome o = cratesIoMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("rubygems", names -> {
+                    RubyGemsMirrorSyncService.SyncOutcome o = rubyGemsMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("packagist", names -> {
+                    PackagistMirrorSyncService.SyncOutcome o = packagistMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("hex", names -> {
+                    HexMirrorSyncService.SyncOutcome o = hexMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("npm", names -> {
+                    NpmMirrorSyncService.SyncOutcome o = npmMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("pypi", names -> {
+                    PyPiMirrorSyncService.SyncOutcome o = pyPiMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("nuget", names -> {
+                    NuGetMirrorSyncService.SyncOutcome o = nuGetMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("go", names -> {
+                    GoMirrorSyncService.SyncOutcome o = goMirrorSyncService.syncModules(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }),
+                new EcosystemSyncTask("pub", names -> {
+                    PubMirrorSyncService.SyncOutcome o = pubMirrorSyncService.syncPackages(names);
+                    return new int[] {o.synced(), o.unresolved()};
+                }));
+
+        List<CompletableFuture<int[]>> futures = tasks.stream()
+                .map(task -> CompletableFuture.supplyAsync(
+                        () -> syncEcosystem(task.ecosystem(), task.syncOneChunk()), registryMirrorSyncExecutor))
+                .toList();
+
         int totalSynced = 0;
         int totalUnresolved = 0;
         Map<String, Integer> observedNameCountByEcosystem = new LinkedHashMap<>();
-
-        int[] result;
-
-        result = syncEcosystem("crates.io", names -> {
-            CratesIoMirrorSyncService.SyncOutcome o = cratesIoMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("crates.io", result[2]);
-
-        result = syncEcosystem("rubygems", names -> {
-            RubyGemsMirrorSyncService.SyncOutcome o = rubyGemsMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("rubygems", result[2]);
-
-        result = syncEcosystem("packagist", names -> {
-            PackagistMirrorSyncService.SyncOutcome o = packagistMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("packagist", result[2]);
-
-        result = syncEcosystem("hex", names -> {
-            HexMirrorSyncService.SyncOutcome o = hexMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("hex", result[2]);
-
-        result = syncEcosystem("npm", names -> {
-            NpmMirrorSyncService.SyncOutcome o = npmMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("npm", result[2]);
-
-        result = syncEcosystem("pypi", names -> {
-            PyPiMirrorSyncService.SyncOutcome o = pyPiMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("pypi", result[2]);
-
-        result = syncEcosystem("nuget", names -> {
-            NuGetMirrorSyncService.SyncOutcome o = nuGetMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("nuget", result[2]);
-
-        result = syncEcosystem("go", names -> {
-            GoMirrorSyncService.SyncOutcome o = goMirrorSyncService.syncModules(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("go", result[2]);
-
-        result = syncEcosystem("pub", names -> {
-            PubMirrorSyncService.SyncOutcome o = pubMirrorSyncService.syncPackages(names);
-            return new int[] {o.synced(), o.unresolved()};
-        });
-        totalSynced += result[0];
-        totalUnresolved += result[1];
-        observedNameCountByEcosystem.put("pub", result[2]);
+        for (int i = 0; i < tasks.size(); i++) {
+            // .join() (not .get()) surfaces a task failure as an unchecked exception directly,
+            // same as the previous sequential call to syncEcosystem would have thrown.
+            int[] result = futures.get(i).join();
+            totalSynced += result[0];
+            totalUnresolved += result[1];
+            observedNameCountByEcosystem.put(tasks.get(i).ecosystem(), result[2]);
+        }
 
         log.info("Registry mirror sync (all ecosystems): {} synced, {} unresolved, observed name counts: {}",
                 totalSynced, totalUnresolved, observedNameCountByEcosystem);
