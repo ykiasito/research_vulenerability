@@ -16,6 +16,19 @@ spring:
       # network waits) becomes the item-processing bottleneck. Default value unchanged for now;
       # keep this comfortably ahead of app.item-processing-pool-size plus any concurrently-running
       # sync workers and the web layer's own connection needs.
+      #
+      # Registry mirror sync (closed-mode backlog item 186, RegistryMirrorSyncService) runs up to 9
+      # ecosystem workers concurrently on AsyncConfig#registryMirrorSyncExecutor, but this is
+      # deliberately NOT counted the same way as app.item-processing-pool-size above (senior review,
+      # PR #145 REVISE): unlike item processing, a sync worker's per-name work is almost entirely
+      # rate-limited HTTP calls to an external registry (ExternalRegistryRateLimiter#awaitTurn),
+      # made without holding any DB connection at all — each *MirrorSyncService#syncPackages/
+      # #syncModules only borrows a connection once per chunk, for a single batch upsert after the
+      # whole chunk's HTTP round trips are already done (see RegistryMirrorSyncService's class
+      # javadoc). So the 9 workers' actual DB usage is a handful of short, staggered upsert bursts,
+      # not 9 connections held for the sync's full (HTTP-bound) duration — 10 stays comfortably
+      # ahead of app.item-processing-pool-size's 8 plus this bursty load. Re-measure before raising
+      # app.item-processing-pool-size on its own without also revisiting this value.
       maximum-pool-size: ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:10}
 
   jpa:
