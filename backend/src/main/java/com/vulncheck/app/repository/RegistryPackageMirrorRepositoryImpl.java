@@ -6,6 +6,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -17,15 +18,56 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorRepository {
 
+    /**
+     * TTL for the {@link #hasAnyEntries} in-memory cache (closed-mode backlog item 179 -- flagged by
+     * senior-reviewer during the PR#112 batch review). Every {@code *RegistryClient#lookup} call
+     * checks {@code mirrorEnabled && hasAnyEntries(ecosystem)} before falling back to a live HTTP
+     * call; without caching, that is one DB round trip per CSV item per registry once a mirror flag
+     * is turned on -- an N+1 pattern across all 9 registries at CSV-job scale, for a value that only
+     * ever changes when a sync job actually writes rows (see {@link #upsertBatch}, which proactively
+     * refreshes this cache the moment that happens -- the primary invalidation path). This TTL is a
+     * safety net for the one case that bypasses that proactive path: rows appearing or disappearing
+     * out-of-band (e.g. a direct DB fix) rather than through this repository's own write method.
+     */
+    private static final long HAS_ANY_ENTRIES_CACHE_TTL_MILLIS = 5 * 60 * 1000L;
+
+    private record HasAnyEntriesCacheEntry(boolean value, long expiresAtMillis) {
+    }
+
     private final JdbcTemplate jdbcTemplate;
 
+    // ConcurrentHashMap, not a Spring-cache abstraction: same reasoning as RegistryLookupCache /
+    // NvdResponseCache in service.registry / service.vuln -- a handful of ecosystem keys, read by up
+    // to itemProcessingExecutor's 8 parallel threads, doesn't need anything heavier.
+    private final Map<String, HasAnyEntriesCacheEntry> hasAnyEntriesCache = new ConcurrentHashMap<>();
+
     @Override
-    @Transactional(readOnly = true)
     public boolean hasAnyEntries(String ecosystem) {
+        long now = System.currentTimeMillis();
+        HasAnyEntriesCacheEntry cached = hasAnyEntriesCache.get(ecosystem);
+        if (cached != null && cached.expiresAtMillis() > now) {
+            return cached.value();
+        }
+        // Deliberately no @Transactional here (unlike findVersions/upsertBatch below): this is a
+        // single JdbcTemplate statement, which runs correctly on a plain pooled connection without an
+        // explicit transaction boundary, and skipping it means a cache hit above never pays even the
+        // cost of a transaction manager borrowing a connection just to no-op.
         Boolean exists = jdbcTemplate.queryForObject(
                 "SELECT EXISTS(SELECT 1 FROM registry_package_mirror WHERE ecosystem = ?)",
                 Boolean.class, ecosystem);
-        return Boolean.TRUE.equals(exists);
+        boolean result = Boolean.TRUE.equals(exists);
+        hasAnyEntriesCache.put(ecosystem, new HasAnyEntriesCacheEntry(result, now + HAS_ANY_ENTRIES_CACHE_TTL_MILLIS));
+        return result;
+    }
+
+    /**
+     * Test-only hook (package-private, used by {@code RegistryPackageMirrorRepositoryImplTest}): the
+     * {@link #hasAnyEntriesCache} field lives on this Spring-managed singleton bean, which {@code
+     * @DataJpaTest} reuses across every test method in a class run -- unlike this bean's DB writes,
+     * a per-test transaction rollback does not reset a plain JVM-heap field on its own.
+     */
+    void clearHasAnyEntriesCacheForTesting() {
+        hasAnyEntriesCache.clear();
     }
 
     @Override
@@ -73,6 +115,16 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
                 return entries.size();
             }
         });
+        // Proactive refresh (closed-mode backlog item 179): a non-empty batch just wrote at least one
+        // row for this ecosystem, so hasAnyEntries is unconditionally true for it from this point on
+        // -- reflect that immediately instead of leaving a caller to wait out
+        // HAS_ANY_ENTRIES_CACHE_TTL_MILLIS. (This runs before the enclosing @Transactional commits;
+        // on the rare rollback of this whole batch, the cache would say true for up to that TTL
+        // before self-correcting on a later query -- the same bounded staleness this cache already
+        // accepts for out-of-band DB changes, so not worth the extra complexity of an after-commit
+        // hook for it.)
+        hasAnyEntriesCache.put(ecosystem,
+                new HasAnyEntriesCacheEntry(true, System.currentTimeMillis() + HAS_ANY_ENTRIES_CACHE_TTL_MILLIS));
     }
 
     private List<String> toStringList(Array sqlArray) throws SQLException {

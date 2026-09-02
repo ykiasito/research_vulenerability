@@ -4,11 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * Exercises {@link RegistryPackageMirrorRepositoryImpl} against a real Postgres instance — the
@@ -32,6 +34,24 @@ class RegistryPackageMirrorRepositoryImplTest {
 
     @Autowired
     private RegistryPackageMirrorRepository registryPackageMirrorRepository;
+
+    // Concrete type (not just the interface above), so tests below can reach the package-private
+    // clearHasAnyEntriesCacheForTesting() hook -- same bean, autowired twice by different declared
+    // types is fine for a singleton.
+    @Autowired
+    private RegistryPackageMirrorRepositoryImpl registryPackageMirrorRepositoryImpl;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // closed-mode backlog item 179: hasAnyEntries is now cached in-process (see that method's
+    // javadoc), and that cache lives on the singleton bean Spring reuses across every test method in
+    // this class run -- reset it before each test so tests stay independent of execution order and
+    // of what an earlier test cached, same as the DB itself being rolled back between tests.
+    @BeforeEach
+    void clearHasAnyEntriesCache() {
+        registryPackageMirrorRepositoryImpl.clearHasAnyEntriesCacheForTesting();
+    }
 
     @Test
     void hasAnyEntriesIsFalseForAnEcosystemWithNoRowsAtAll() {
@@ -76,5 +96,36 @@ class RegistryPackageMirrorRepositoryImplTest {
         registryPackageMirrorRepository.upsertBatch("crates.io", Map.of());
 
         assertThat(registryPackageMirrorRepository.hasAnyEntries("crates.io")).isFalse();
+    }
+
+    @Test
+    void upsertBatchImmediatelyRefreshesTheHasAnyEntriesCacheWithoutWaitingForTtl() {
+        // Prime the cache with a negative result -- exactly the value a sync-not-run-yet ecosystem
+        // would cache -- so the assertion below can only pass if upsertBatch actively refreshes it.
+        assertThat(registryPackageMirrorRepository.hasAnyEntries("crates.io")).isFalse();
+
+        registryPackageMirrorRepository.upsertBatch("crates.io", Map.of("serde", List.of("1.0.228")));
+
+        assertThat(registryPackageMirrorRepository.hasAnyEntries("crates.io")).isTrue();
+    }
+
+    @Test
+    void hasAnyEntriesServesTheCachedValueUntilExplicitlyCleared() {
+        assertThat(registryPackageMirrorRepository.hasAnyEntries("crates.io")).isFalse();
+
+        // Write a row directly, bypassing upsertBatch's own proactive cache refresh -- the only way
+        // left for the cached "false" above to go stale without this repository knowing.
+        jdbcTemplate.update(
+                "INSERT INTO registry_package_mirror (ecosystem, package_name, versions, last_synced_at) "
+                        + "VALUES (?, ?, ARRAY['1.0.228'], now())",
+                "crates.io", "serde");
+
+        // Still false: proves the cached value, not a fresh query, answered this call.
+        assertThat(registryPackageMirrorRepository.hasAnyEntries("crates.io")).isFalse();
+
+        registryPackageMirrorRepositoryImpl.clearHasAnyEntriesCacheForTesting();
+
+        // Now true: a fresh query sees the row inserted above.
+        assertThat(registryPackageMirrorRepository.hasAnyEntries("crates.io")).isTrue();
     }
 }
