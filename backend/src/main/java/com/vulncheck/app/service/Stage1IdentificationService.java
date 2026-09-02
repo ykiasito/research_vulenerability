@@ -5,7 +5,6 @@ import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
-import com.vulncheck.app.service.Stage1AiArbitration.CandidateDto;
 import com.vulncheck.app.service.Stage1AiArbitration.DisambiguateResponse;
 import com.vulncheck.app.service.nvd.CpeNameVariantCache;
 import com.vulncheck.app.service.nvd.CpeUtils;
@@ -290,10 +289,11 @@ public class Stage1IdentificationService {
             // apiKey-presence + job-budget short-circuit before ever calling the LLM, returning
             // empty for either failure reason — which this method already treats identically to an
             // LLM call that itself came back empty (both degrade to the same fallback below).
-            List<CandidateDto> candidateDtos = cpeCandidates.stream()
-                    .map(entry -> new CandidateDto(null, entry.getProduct(), maskCpeVersion(entry.getCpeString()), null, "cpe_dictionary"))
+            List<Stage1AiArbitration.CpeDisambiguationCandidate> disambiguationCandidates = cpeCandidates.stream()
+                    .map(entry -> new Stage1AiArbitration.CpeDisambiguationCandidate(
+                            entry.getProduct(), MaskedCpeString.ofRawCpeString(entry.getCpeString())))
                     .toList();
-            Optional<DisambiguateResponse> result = aiArbitration.disambiguateCpeCandidates(item, userId, candidateDtos);
+            Optional<DisambiguateResponse> result = aiArbitration.disambiguateCpeCandidates(item, userId, disambiguationCandidates);
 
             if (result.isEmpty()) {
                 // No AI verdict available at all (no key, exhausted budget, or the LLM call itself
@@ -702,7 +702,7 @@ public class Stage1IdentificationService {
             return Optional.of(new ChosenCpe(candidate, null));
         }
         Optional<DisambiguateResponse> verdict = aiArbitration.verifyVariantDerivedCpeMatchWithAi(
-                item, userId, candidate, maskCpeVersion(candidate.getCpeString()));
+                item, userId, candidate, MaskedCpeString.ofRawCpeString(candidate.getCpeString()));
         if (verdict.isEmpty()) {
             log.info("No AI verification available for name-variant-derived CPE candidate on item {} ({}) — "
                     + "dropping it rather than trusting an unverified guess", item.getId(), candidate.getCpeString());
@@ -715,22 +715,6 @@ public class Stage1IdentificationService {
         }
         log.info("AI confirmed name-variant-derived CPE candidate for item {} ({})", item.getId(), candidate.getCpeString());
         return Optional.of(new ChosenCpe(candidate, BigDecimal.valueOf(verdict.get().confidence())));
-    }
-
-    /**
-     * Masks the version field (5th colon-separated segment) of a CPE 2.3 string with {@code *}
-     * before showing it to the LLM for Tier2 disambiguation. The specific historical version
-     * baked into a dictionary candidate is irrelevant to vendor/product identity — Stage2
-     * substitutes the item's real version when it queries NVD anyway (see {@code CpeUtils.buildCpe}).
-     * Leaving the real version in was observed to make the LLM falsely reject correct vendor/
-     * product matches purely because the candidate's cataloged version differed from the item's.
-     */
-    private String maskCpeVersion(String cpeString) {
-        String[] parts = cpeString.split(":", -1);
-        if (parts.length > 5) {
-            parts[5] = "*";
-        }
-        return String.join(":", parts);
     }
 
     /**
