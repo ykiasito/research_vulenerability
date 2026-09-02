@@ -10,12 +10,20 @@ spring:
     password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: org.postgresql.Driver
     hikari:
-      # Previously unset (Spring Boot/HikariCP's own default, 10) — pinned explicitly and
-      # externalized (item 167, 2026-09-01, docs/spec/closed-mode-plan.md §3-3 A4/§7 P2) so a
-      # closed-mode deployment can raise it once DB connection contention (rather than external
-      # network waits) becomes the item-processing bottleneck. Default value unchanged for now;
-      # keep this comfortably ahead of app.item-processing-pool-size plus any concurrently-running
-      # sync workers and the web layer's own connection needs.
+      # Previously unset (Spring Boot/HikariCP's own default, 10), then pinned explicitly at that
+      # same value (item 167, 2026-09-01, docs/spec/closed-mode-plan.md §3-3 A4/§7 P2). Raised to 20
+      # (item 198, 2026-09-03, §7 P2's recommended initial value): closed-mode's Stage1 trigram
+      # search + Stage2's 4 local mirror sources keep an item-processing thread in near-constant DB
+      # contention instead of blocked on external network I/O, so at the old maximum-pool-size=10
+      # only ~2 connections were left for a concurrently-running sync worker plus the web layer. A
+      # live connections.acquire p95 measurement against the real dev DB
+      # (HikariPoolAcquireP95Measurement: static 1,000-item job + one concurrent
+      # RegistryMirrorSyncService#syncAllAndRelease run) is still pending as of this change — see
+      # that class's own javadoc for the intended method; re-run it (by hand, per its own
+      # instructions) to confirm 20 is enough headroom before relying on this value, and before
+      # raising item-processing-pool-size itself (§7 P4) or adding another always-on sync-style
+      # consumer. Keep this comfortably ahead of app.item-processing-pool-size plus any
+      # concurrently-running sync workers and the web layer's own connection needs.
       #
       # Registry mirror sync (closed-mode backlog item 186, RegistryMirrorSyncService) runs up to 9
       # ecosystem workers concurrently on AsyncConfig#registryMirrorSyncExecutor, but this is
@@ -26,10 +34,8 @@ spring:
       # #syncModules only borrows a connection once per chunk, for a single batch upsert after the
       # whole chunk's HTTP round trips are already done (see RegistryMirrorSyncService's class
       # javadoc). So the 9 workers' actual DB usage is a handful of short, staggered upsert bursts,
-      # not 9 connections held for the sync's full (HTTP-bound) duration — 10 stays comfortably
-      # ahead of app.item-processing-pool-size's 8 plus this bursty load. Re-measure before raising
-      # app.item-processing-pool-size on its own without also revisiting this value.
-      maximum-pool-size: ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:10}
+      # not 9 connections held for the sync's full (HTTP-bound) duration.
+      maximum-pool-size: ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:20}
 
   jpa:
     hibernate:
@@ -135,11 +141,16 @@ app:
   # Keep spring.datasource.hikari.maximum-pool-size comfortably above this value plus any
   # concurrently-running sync workers and the web layer's own connection needs.
   item-processing-pool-size: ${ITEM_PROCESSING_POOL_SIZE:8}
-  # Weekly automatic sync of the 9 registry mirrors (see the closed-mode.*-mirror-enabled flags
-  # above) from every package name this app has ever resolved via a live registry lookup — closed-
-  # mode backlog item 183, RegistryMirrorSyncService/RegistryMirrorScheduledSync. Off by default,
-  # same safety-first convention as the CPE weekly resync flags above; can also be triggered
-  # manually via /admin/registry-mirror.
+  # Weekly automatic sync of the 9 registry mirrors from every package name this app has ever
+  # resolved via a live registry lookup — closed-mode backlog item 183,
+  # RegistryMirrorSyncService/RegistryMirrorScheduledSync. This is the WRITE path: it makes live
+  # outbound HTTP calls to each ecosystem's registry to populate registry_package_mirror. It is
+  # independent of the closed-mode.*-mirror-enabled flags above, which are the separate READ path
+  # (whether Tier1 lookups consult the mirror table instead of a live call) — neither flag group
+  # gates the other. Turning this sync on still reaches out to every registry over the network
+  # even if all 9 closed-mode.*-mirror-enabled flags are false, and turning all 9 of those off
+  # does not disable or pause this sync. Off by default, same safety-first convention as the CPE
+  # weekly resync flags above; can also be triggered manually via /admin/registry-mirror.
   registry-mirror-scheduled-sync-enabled: ${REGISTRY_MIRROR_SCHEDULED_SYNC_ENABLED:false}
   # Sunday 02:00 UTC by default — see RegistryMirrorScheduledSync#resyncWeekly's javadoc for why
   # this slot was chosen relative to the other weekly/daily sync jobs.
