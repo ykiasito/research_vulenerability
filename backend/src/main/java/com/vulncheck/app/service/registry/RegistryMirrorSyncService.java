@@ -1,10 +1,13 @@
 package com.vulncheck.app.service.registry;
 
 import com.vulncheck.app.repository.IdentifiedProductRepository;
+import com.vulncheck.app.repository.RegistryMirrorSeedNameRepository;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import lombok.RequiredArgsConstructor;
@@ -19,25 +22,40 @@ import org.springframework.stereotype.Service;
  * docs/spec/closed-mode-plan.md}§5-4) added by the closed-mode registry-mirror rollout (backlog
  * item 176). Before this class, every one of those methods was only ever invoked from a test.
  *
- * <p><b>Seed source (the design decision this item flagged as needing a choice)</b>: the distinct
- * (ecosystem, package_name) pairs already recorded in {@code identified_products} — i.e. every
- * package this app has previously resolved via a live registry lookup, across every job any user
- * has ever run. This was chosen over implementing a true full-registry bulk crawl (e.g. npm's
- * {@code _changes} feed, PyPI's Simple API index, NuGet's Catalog) for three reasons: (1) each
- * {@code *MirrorSyncService} was already built, deliberately, as a per-name fetcher — see e.g.
- * {@link CratesIoMirrorSyncService}'s own class javadoc, which explicitly names "names actually
- * seen in real job CSVs" as the intended seed source for anything beyond its hand-picked pilot
- * list — not a bulk-enumeration consumer, so this reuses the existing per-service contract exactly
- * as designed rather than rewriting all 9 of them; (2) it requires no new schema or new external
- * calls — {@code identified_products.ecosystem}/{@code package_name} are populated for every
- * registry-trusted match today (see {@code Stage1IdentificationService#resolveCandidates}); and
- * (3) it grows the mirror exactly where it matters most for this app's own workload (packages real
- * users have actually asked about) rather than paying the multi-GB/multi-day bulk-crawl cost of
- * §5-6 for ecosystems/packages nobody here has ever queried. The tradeoff: a package this app has
- * never resolved live stays unmirrored until it's looked up live at least once — acceptable while
- * the live registry paths still exist (today), but something Phase B3 (removing those live paths)
- * must account for when it lands (see the closed-mode-backlog item 183 entry for the current
- * status of that follow-up).
+ * <p><b>Seed source (the design decision this item flagged as needing a choice)</b>: the union of
+ * two sources, both plain distinct-name lists rather than a bulk registry crawl — see {@link
+ * #collectSeedNames}:
+ *
+ * <ol>
+ *   <li>the distinct (ecosystem, package_name) pairs already recorded in {@code
+ *       identified_products} — i.e. every package this app has previously resolved via a live
+ *       registry lookup, across every job any user has ever run;
+ *   <li>{@code registry_mirror_seed_name} (closed-mode backlog item 185) — package names an admin
+ *       has explicitly uploaded via {@link #addOperatorSuppliedNames}/{@code
+ *       AdminController#registryMirrorAddSeedNames}, the (2) growth path chosen for the problem
+ *       (1) alone doesn't solve: once Phase B3 removes the live {@code *RegistryClient} lookups,
+ *       every future {@code RegistryMatch} comes from {@code lookupViaMirror} itself, so (1) alone
+ *       becomes a closed loop — a package never resolved live before B3 lands would otherwise stay
+ *       unmirrored forever, with no path back into the seed set.
+ * </ol>
+ *
+ * <p>Both sources were chosen over implementing a true full-registry bulk crawl (e.g. npm's {@code
+ * _changes} feed, PyPI's Simple API index, NuGet's Catalog) for three reasons: (1) each {@code
+ * *MirrorSyncService} was already built, deliberately, as a per-name fetcher — see e.g. {@link
+ * CratesIoMirrorSyncService}'s own class javadoc, which explicitly names "names actually seen in
+ * real job CSVs" as the intended seed source for anything beyond its hand-picked pilot list — not a
+ * bulk-enumeration consumer, so this reuses the existing per-service contract exactly as designed
+ * rather than rewriting all 9 of them; (2) it requires no new external calls of any kind (only
+ * {@code registry_mirror_seed_name} is new schema, a plain admin-write table — no bulk-index
+ * fetcher was added); and (3) it grows the mirror exactly where it matters most for this app's own
+ * workload (packages real users have actually asked about, or that an operator already knows are
+ * relevant) rather than paying the multi-GB/multi-day bulk-crawl cost of §5-6 for ecosystems/
+ * packages nobody here has ever queried — for some ecosystems (NuGet Catalog ~100–200GB, npm ~
+ * hundreds of GB, per §5-6's initial-ingest table) that cost would itself conflict with closed
+ * mode's "minimize new external communication" posture. The tradeoff that remains: a package
+ * nobody has resolved live *and* no admin has uploaded stays unmirrored — acceptable, since an
+ * operator who cares about a specific package's post-B3 coverage now has a direct way to add it,
+ * rather than being stuck waiting for a live lookup that Phase B3 has removed.
  *
  * <p>Chunks each ecosystem's seed list (see {@link #chunkSize}) before calling into the
  * per-ecosystem sync method — every {@code *MirrorSyncService#syncPackages} accumulates its whole
@@ -68,7 +86,20 @@ public class RegistryMirrorSyncService {
      */
     private static final int DEFAULT_CHUNK_SIZE = 200;
 
+    /**
+     * The 9 mirrored ecosystem identifiers, exactly as used as the literal {@code syncEcosystem}
+     * argument in {@link #syncAll}. Kept as one set here (rather than re-deriving it from {@link
+     * #syncAll}'s call sites) purely so {@link #addOperatorSuppliedNames} can reject an unknown/
+     * mistyped ecosystem string at upload time instead of silently storing a row nothing will ever
+     * pick up. This is a second place these 9 strings are listed — see closed-mode-backlog item 187
+     * (already-tracked, low-priority) for the broader "ecosystem identifiers aren't a single shared
+     * constant anywhere in this class" debt; not fixed here since it's out of this item's scope.
+     */
+    private static final Set<String> KNOWN_ECOSYSTEMS = Set.of(
+            "crates.io", "rubygems", "packagist", "hex", "npm", "pypi", "nuget", "go", "pub");
+
     private final IdentifiedProductRepository identifiedProductRepository;
+    private final RegistryMirrorSeedNameRepository registryMirrorSeedNameRepository;
     private final CratesIoMirrorSyncService cratesIoMirrorSyncService;
     private final RubyGemsMirrorSyncService rubyGemsMirrorSyncService;
     private final PackagistMirrorSyncService packagistMirrorSyncService;
@@ -89,11 +120,13 @@ public class RegistryMirrorSyncService {
     /**
      * @param totalSynced sum of every ecosystem's synced count.
      * @param totalUnresolved sum of every ecosystem's unresolved count.
-     * @param observedNameCountByEcosystem how many distinct package names were pulled from {@code
-     *                                     identified_products} for each ecosystem, before syncing —
-     *                                     kept separate from {@code totalSynced} so a caller can
-     *                                     tell "nothing to sync yet" (0 observed) apart from "synced
-     *                                     0 of N" (every observed name failed to resolve).
+     * @param observedNameCountByEcosystem how many distinct seed package names ({@code
+     *                                     identified_products} union {@code
+     *                                     registry_mirror_seed_name}, see {@link #collectSeedNames})
+     *                                     were pulled for each ecosystem, before syncing — kept
+     *                                     separate from {@code totalSynced} so a caller can tell
+     *                                     "nothing to sync yet" (0 observed) apart from "synced 0 of
+     *                                     N" (every observed name failed to resolve).
      */
     public record SyncOutcome(int totalSynced, int totalUnresolved, Map<String, Integer> observedNameCountByEcosystem) {
     }
@@ -115,6 +148,39 @@ public class RegistryMirrorSyncService {
      */
     public void releaseFullSyncGuard() {
         fullSyncRunning.set(false);
+    }
+
+    /**
+     * Closed-mode backlog item 185: records an operator-supplied package name list as a seed for
+     * this ecosystem — see the class javadoc's "Seed source" section for why this exists alongside
+     * {@code identified_products}. Does not itself trigger a sync; the names are picked up by the
+     * next {@link #syncAllAndRelease} (admin-triggered or scheduled), same as any other seed name.
+     *
+     * @return the number of names actually submitted for insertion (after trimming/blank-filtering/
+     *         de-duplicating {@code names} itself) — not the number of genuinely new rows, since a
+     *         name already present (from a prior upload, or already promoted into {@code
+     *         registry_mirror_seed_name} by some other means) is a silent no-op at the DB level (see
+     *         {@link RegistryMirrorSeedNameRepository#insertBatch}) and this method has no cheap way
+     *         to tell the two cases apart without an extra round trip nothing here needs.
+     * @throws IllegalArgumentException if {@code ecosystem} isn't one of the 9 mirrored ecosystems
+     *         (see {@link #KNOWN_ECOSYSTEMS}) — catches a typo at upload time rather than silently
+     *         storing a row {@link #syncAll} will never query for.
+     */
+    public int addOperatorSuppliedNames(String ecosystem, List<String> names) {
+        if (!KNOWN_ECOSYSTEMS.contains(ecosystem)) {
+            throw new IllegalArgumentException("Unknown registry mirror ecosystem: " + ecosystem);
+        }
+        List<String> cleaned = names.stream()
+                .map(String::trim)
+                .filter(name -> !name.isEmpty())
+                .distinct()
+                .toList();
+        if (cleaned.isEmpty()) {
+            return 0;
+        }
+        registryMirrorSeedNameRepository.insertBatch(ecosystem, cleaned);
+        log.info("Registry mirror seed names added ({}): {} names submitted", ecosystem, cleaned.size());
+        return cleaned.size();
     }
 
     /**
@@ -219,16 +285,16 @@ public class RegistryMirrorSyncService {
     }
 
     /**
-     * Pulls this ecosystem's observed-name seed list from {@code identified_products}, chunks it,
-     * and hands each chunk to {@code syncOneChunk}, accumulating the {@code (synced, unresolved)}
-     * totals a {@code *MirrorSyncService}'s own {@code SyncOutcome} record carries (each ecosystem
-     * has its own distinct nested record type, so this method takes a plain {@code int[]} rather
-     * than trying to unify them behind a shared interface those 9 classes never declared).
+     * Pulls this ecosystem's seed list (see {@link #collectSeedNames}), chunks it, and hands each
+     * chunk to {@code syncOneChunk}, accumulating the {@code (synced, unresolved)} totals a {@code
+     * *MirrorSyncService}'s own {@code SyncOutcome} record carries (each ecosystem has its own
+     * distinct nested record type, so this method takes a plain {@code int[]} rather than trying to
+     * unify them behind a shared interface those 9 classes never declared).
      *
      * @return {@code [synced, unresolved, observedNameCount]}
      */
     private int[] syncEcosystem(String ecosystem, Function<List<String>, int[]> syncOneChunk) {
-        List<String> observedNames = identifiedProductRepository.findDistinctPackageNamesByEcosystem(ecosystem);
+        List<String> observedNames = collectSeedNames(ecosystem);
         int synced = 0;
         int unresolved = 0;
         // Deliberately not validated at @Value-injection time (e.g. @PostConstruct) — that would
@@ -246,9 +312,22 @@ public class RegistryMirrorSyncService {
             synced += batchOutcome[0];
             unresolved += batchOutcome[1];
         }
-        log.info("Registry mirror sync ({}): {} package names observed in identified_products, {} synced, "
-                + "{} unresolved", ecosystem, observedNames.size(), synced, unresolved);
+        log.info("Registry mirror sync ({}): {} seed package names ({} synced, {} unresolved)",
+                ecosystem, observedNames.size(), synced, unresolved);
         return new int[] {synced, unresolved, observedNames.size()};
+    }
+
+    /**
+     * Union of this ecosystem's two seed sources — see the class javadoc's "Seed source" section.
+     * A {@link LinkedHashSet} both de-duplicates (a name present in both sources must not be synced
+     * twice) and keeps a stable, deterministic iteration order (identified_products names first,
+     * then any operator-uploaded names not already covered) rather than depending on whatever order
+     * two separate SQL queries happen to return rows in.
+     */
+    private List<String> collectSeedNames(String ecosystem) {
+        Set<String> names = new LinkedHashSet<>(identifiedProductRepository.findDistinctPackageNamesByEcosystem(ecosystem));
+        names.addAll(registryMirrorSeedNameRepository.findDistinctPackageNames(ecosystem));
+        return List.copyOf(names);
     }
 
     private static List<List<String>> chunk(List<String> names, int chunkSize) {

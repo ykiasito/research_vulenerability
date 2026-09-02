@@ -27,6 +27,7 @@ import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.osv.OsvSyncService;
 import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
@@ -262,5 +263,32 @@ class AdminControllerTest {
         verify(registryMirrorSyncService, times(1)).syncAllAndRelease();
 
         release.countDown();
+    }
+
+    @Test
+    void registryMirrorAddSeedNamesSplitsOnNewlinesAndCommasAndReportsTheSubmittedCount() {
+        when(registryMirrorSyncService.addOperatorSuppliedNames("npm", List.of("left-pad", "is-odd", "chalk")))
+                .thenReturn(3);
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.registryMirrorAddSeedNames("npm", "left-pad\nis-odd,chalk", model);
+
+        assertThat(view).isEqualTo("admin/registry-mirror");
+        assertThat(model.getAttribute("result")).asString().contains("3件");
+        verify(registryMirrorSyncService).addOperatorSuppliedNames("npm", List.of("left-pad", "is-odd", "chalk"));
+    }
+
+    @Test
+    void registryMirrorAddSeedNamesReportsAnErrorForAnUnknownEcosystemRatherThanPropagating() {
+        when(registryMirrorSyncService.addOperatorSuppliedNames("maven", List.of("com.example:widget")))
+                .thenThrow(new IllegalArgumentException("Unknown registry mirror ecosystem: maven"));
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.registryMirrorAddSeedNames("maven", "com.example:widget", model);
+
+        assertThat(view).isEqualTo("admin/registry-mirror");
+        assertThat(model.getAttribute("result")).asString().contains("不正");
     }
 }

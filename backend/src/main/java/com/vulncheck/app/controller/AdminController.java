@@ -17,6 +17,8 @@ import com.vulncheck.app.service.cveorg.CveOrgSyncService;
 import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.osv.OsvSyncService;
 import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -333,5 +335,27 @@ public class AdminController {
         }, "registry-mirror-sync-admin");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    /**
+     * Closed-mode backlog item 185: lets an admin add package names to a given ecosystem's mirror
+     * seed set directly, alongside {@code identified_products} — see {@link
+     * RegistryMirrorSyncService}'s class javadoc for why this exists. Synchronous (unlike {@link
+     * #registryMirrorFullSync}): this only writes {@code registry_mirror_seed_name} rows, it doesn't
+     * itself call any registry, so there's no long-running work to background here. The names take
+     * effect the next time a sync (admin-triggered or scheduled) runs.
+     */
+    @PostMapping("/admin/registry-mirror/seed-names")
+    public String registryMirrorAddSeedNames(@RequestParam("ecosystem") String ecosystem,
+            @RequestParam("names") String namesText, Model model) {
+        List<String> names = Arrays.stream(namesText.split("[\\r\\n,]+")).toList();
+        try {
+            int submitted = registryMirrorSyncService.addOperatorSuppliedNames(ecosystem, names);
+            model.addAttribute("result", submitted + "件の名前をシード一覧に追加しました（" + ecosystem
+                    + "）。既に登録済みの名前は無視されます。反映するには「同期を開始」を実行してください。");
+        } catch (IllegalArgumentException e) {
+            model.addAttribute("result", "エコシステムの指定が不正です: " + ecosystem);
+        }
+        return "admin/registry-mirror";
     }
 }
