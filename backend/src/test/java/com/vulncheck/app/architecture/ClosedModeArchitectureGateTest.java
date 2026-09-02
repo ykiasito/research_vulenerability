@@ -9,9 +9,13 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -19,6 +23,7 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.io.FileSystemResource;
@@ -415,6 +420,129 @@ class ClosedModeArchitectureGateTest {
             "V37__registry_package_mirror.sql",
             "V38__registry_mirror_seed_name.sql");
 
+    /**
+     * SHA-256 (hex-encoded) of every file in {@link #MASTER_MIGRATION_BASELINE}, taken from the
+     * same {@code origin/master} snapshot (2026-09-02, item 196) as that filename set.
+     *
+     * <p>Closed-mode backlog item 205: {@link #migrationSetMatchesMasterBaseline()} only compares
+     * the *set of filenames* under {@code db/migration} — it is blind to an existing {@code V*__}
+     * file's SQL body being edited in place while its filename stays the same. Flyway migrations
+     * are checksum-validated against {@code flyway_schema_history} at application startup, so a
+     * content edit to an already-applied migration doesn't show up as a test failure anywhere
+     * else in this suite; it shows up as a {@code FlywayValidateException} the next time an
+     * environment that already ran the original content starts up — i.e. only in whichever
+     * deployment happens to hit it first, potentially production. This map + {@link
+     * #migrationContentMatchesMasterBaseline()} close that gap the same way the filename set
+     * closes the "extra/missing file" gap.
+     *
+     * <p><b>Maintenance</b>: same discipline as {@link #MASTER_MIGRATION_BASELINE} — update both
+     * together, in the same commit that merges a {@code master} sync bringing in new {@code V*__}
+     * files (§9-3). Flyway migrations that have already shipped are not supposed to have their
+     * body edited on master, either, after the fact — so if this fails WITHOUT a preceding
+     * master-sync merge that plausibly explains it, treat it as a real content-drift bug on
+     * closed-mode (§3-2 violation) to investigate and revert, not as a baseline to casually
+     * update.
+     */
+    private static final Map<String, String> MASTER_MIGRATION_CONTENT_SHA256 = new LinkedHashMap<>();
+
+    static {
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V1__init.sql", "984ede87065068877d3f7ec73c8d011171642d38e097236e4f7098a811e09d68");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V2__stage1_support.sql", "ab943d9cfaea0a65a3bd58d3c647c6bd2862455562894542b6166d9dc91a6991");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V3__ecosystem_registries.sql", "bd62191c6e214464c88f5df69287a6284368de97ebdb6c7ab0cbb5404b807097");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V4__identification_hint.sql", "b48077a76460ecf504d61e88253055591b9b659dca0c022a907c1902c1d60793");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V5__version_confirmed.sql", "573217955bad4862c088e83d2a30fa294014e3d4b58429db561512ed8e139de9");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V6__hint_investigation_fields.sql", "cc8eddb58b0a3cce3367609b92234fb4a7926bb5348bb303bed3ac1907ea7947");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V7__fixed_version.sql", "029f1c02491eef85ad5073cabc17171b94536e09c84469c23bb6d837afc1efdd");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V8__cve_org.sql", "8ed76db12cf0c8d01cb1c57f2561e03b1a5661bf6ac3d75f020d900f25ff2ef6");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V9__trgm_query_performance.sql", "27cfb51139eb0c451f5adae151a0c5f332a7e754a0692d3a4abdd6e41669a5cb");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V10__more_ecosystems.sql", "55f84f92c7495ec06ecb4e690a8bd0ef7303fcbebe5da403288649f06b4a2b2a");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V11__vulnerability_research_incomplete.sql",
+                "de2165ca702a62ecd47ce9db6a4e58a87dd0f7e31daa2c0cc58bef03fc58bc99");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V12__research_incomplete_reason.sql", "85a184d00c306f9224a4e769597cc2791d2eca1b5c34b2a8168eb0e71d05932d");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V13__backfill_corrupted_cpe_vendor_product.sql",
+                "c0de09f618a4660fb554802773daf9d267f0811f8c994c358b45e6610bd15b86");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V14__chocolatey_ecosystem.sql", "ee85a5e7566d3e2626df01058c048ea2e72ffc6e33de4fdd2b8777a46624895a");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V15__version_plausibility_warning.sql",
+                "2318493eb246ac3fd751db95128a10cf1e1bb1c67450e762fbc2c30cb698b550");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V16__bundled_component_detection.sql",
+                "d7ea9d55eb9931d780eabc36c42f155559d0e649629bfa5e69a3294c7289b531");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V17__csaf_vendor_advisories.sql", "f37f5fed12d3f80cc759baaa0b442016f71f0c3f15d86f22c67ed0ef7d4c6dab");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V18__csaf_product_status_unique.sql",
+                "e4ca69297ccca27c37a0741af6d2df50a88d0513dedc4dc8ce11681bc445c51b");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V19__ghsa_advisories.sql", "9aca92c39d6548d04a983bbad39588dcae4b3dc904d210ab2d7d15103c29a0ef");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V20__csaf_redhat_support.sql", "81f8d0b25a0e74245d12a11a2d4084cb5e0ff30f7b09ff352eda4b84ba26f711");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V21__csaf_redhat_revise_fixes.sql", "16a7cfff7ae570dd47ba5d62f82d9784f85482ce3ec4eafbdcd35d1c14bff6c3");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V22__csaf_redhat_revise_followup.sql",
+                "32ee435a05c934bc8ca3e425c584a5567b695d12e3f646dc2a05326ca061e6be");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V23__job_cost_ledger.sql", "4a45a3937508987108d817070fe26995bab5113cd352c8aef4eb67367d0f3d67");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V24__job_cost_ledger_item_index.sql",
+                "2525f4ba786a2aba39aba1685fb4b9b68ff8218dbbbb71c06ae310b0e453cb94");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V25__osv_advisories.sql", "f4cde9d4a9f6b875dab6e3e4576cf542752149f9a6816a29c2c97c0e206e4c39");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V26__research_job_items_raw_product_name.sql",
+                "04c3f638ace5fb206b2fe566a82c7f5e8db56408bb2482b10aea090267478a05");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V27__job_cost_ledger_breakdown.sql",
+                "735cabd29e42e7d6a9556542d4c6ace418d4e630be2e2900a47f10c0e38d99bd");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V28__high_confidence_verification.sql",
+                "9b981fcc50dea00226ec6e731119976fef86efe2ff5da6d3a120c22ffefa0e6e");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V29__verification_ledger.sql", "6867ca4c327aa1051239024cf455bad40b0afd569e7943dcd7664920b8f6783c");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V30__cpe_candidate_provenance.sql",
+                "157c82627066f6790e5499af223e0bee3b35a81a933fdde9001e2bb5a165d07b");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V31__cpe_dictionary_vendor_product_index.sql",
+                "caebe751e049dd7862b473a817ebb022437f048c2edfa927c7ca9eb3e6d8cd61");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V32__remove_chocolatey_ecosystem.sql",
+                "b289d27c7bb06615dddc43c5b14cd584e8dd30a1e73c11db9eaa128a7b076f11");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V33__research_incomplete_reason_ai_gaps.sql",
+                "50c0bb55164be06c4d17f7e858c9e9efe9ed010af68e629088437a28b973bad8");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V34__research_incomplete_reason_ai_call_failed.sql",
+                "464f920799b68292423bd54aefb49476676e00940f66bce103b37173fadb807e");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V35__users_email_lower_unique_index.sql",
+                "433d74aec28aef7d94828604518e141309735e6f6e56ee149f5d4d17b346da67");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V36__normalize_users_email_lowercase.sql",
+                "f663ce2f6febb9f7ed02e1fe6335965ea6863955cb83e6353cfba2519089e51b");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V37__registry_package_mirror.sql",
+                "fd075f977f6439f12910119b4a8eee2d69a6020fe7927ee4596301554e16a703");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V38__registry_mirror_seed_name.sql",
+                "a31d70a275e6556c73e77b7747eb914d619ec9f6e0f36bbba7fbf924c0695736");
+    }
+
     private static final Pattern VERSIONED_MIGRATION = Pattern.compile("V\\d+__.*\\.sql");
 
     @Test
@@ -450,6 +578,99 @@ class ClosedModeArchitectureGateTest {
                             + "or closed-mode added/removed a migration in violation of §3-2",
                             unexpected, missing)
                     .isEqualTo(MASTER_MIGRATION_BASELINE);
+        }
+    }
+
+    /**
+     * Item 205: {@link #migrationSetMatchesMasterBaseline()} above only detects filename drift
+     * (a {@code V*__} file added or removed). This detects the complementary case — an existing
+     * {@code V*__} file whose filename is unchanged but whose SQL body was edited — by comparing
+     * each file's SHA-256 against {@link #MASTER_MIGRATION_CONTENT_SHA256}. Only files present in
+     * both the baseline and the actual directory are hashed here; a missing/extra filename is
+     * already reported (with a more specific message) by {@link #migrationSetMatchesMasterBaseline()},
+     * so this test doesn't re-report that case as a spurious "no baseline hash for this file" or
+     * "file present in baseline but absent on disk" failure.
+     */
+    @Test
+    void migrationContentMatchesMasterBaseline() throws IOException {
+        Path migrationDir = Path.of("src/main/resources/db/migration");
+        assertThat(Files.isDirectory(migrationDir))
+                .as("expected %s to exist relative to the backend module root", migrationDir)
+                .isTrue();
+
+        List<String> mismatches = new ArrayList<>();
+        for (Map.Entry<String, String> baselineEntry : MASTER_MIGRATION_CONTENT_SHA256.entrySet()) {
+            String fileName = baselineEntry.getKey();
+            Path file = migrationDir.resolve(fileName);
+            if (!Files.exists(file)) {
+                // A missing baseline file is migrationSetMatchesMasterBaseline()'s invariant, not
+                // this one — skip it here rather than duplicate that failure less specifically.
+                continue;
+            }
+            String expectedSha256 = baselineEntry.getValue();
+            String actualSha256 = sha256Hex(file);
+            if (!expectedSha256.equals(actualSha256)) {
+                mismatches.add(fileName + " (expected sha256 " + expectedSha256 + ", actual "
+                        + actualSha256 + ")");
+            }
+        }
+
+        assertThat(mismatches)
+                .as("these already-applied V*__ migration files have content that no longer "
+                        + "matches the master baseline (§3-2's \"byte-for-byte identical to master\" "
+                        + "Flyway invariant) — this is exactly the kind of drift that stays invisible "
+                        + "until Flyway's checksum validation fails at startup against an environment "
+                        + "that already ran the original content, so it must be caught here instead. "
+                        + "Refresh MASTER_MIGRATION_CONTENT_SHA256 only if this is a legitimate "
+                        + "master-sync merge (§9-3); otherwise revert the content edit")
+                .isEmpty();
+    }
+
+    /**
+     * Self-test for {@link #migrationContentMatchesMasterBaseline()}'s detection mechanism (item
+     * 205): proves {@link #sha256Hex(Path)} actually changes when a migration file's content is
+     * mutated, using a tampered copy in a throwaway {@code @TempDir} rather than touching a real
+     * {@code V*__} file — mutating a real migration file, even temporarily inside a test, is
+     * exactly the kind of drift §3-2 exists to prevent and would be a strange thing for a
+     * permanent, always-green test to do on every run.
+     */
+    @Test
+    void sha256HexDetectsContentDrift(@TempDir Path tempDir) throws IOException {
+        Map.Entry<String, String> sample = MASTER_MIGRATION_CONTENT_SHA256.entrySet().iterator().next();
+        Path realFile = Path.of("src/main/resources/db/migration").resolve(sample.getKey());
+
+        // Sanity check first: today's real file content must actually match the recorded
+        // baseline (this is also covered by migrationContentMatchesMasterBaseline(), but
+        // asserting it here too means a failure of *this* test always points at sha256Hex()
+        // itself or the tampering below, never at an unrelated baseline-vs-disk mismatch).
+        assertThat(sha256Hex(realFile)).isEqualTo(sample.getValue());
+
+        byte[] originalBytes = Files.readAllBytes(realFile);
+        byte[] tamperedBytes = Arrays.copyOf(originalBytes, originalBytes.length + 1);
+        tamperedBytes[originalBytes.length] = (byte) '\n'; // append a trailing byte
+        Path tamperedCopy = tempDir.resolve(sample.getKey());
+        Files.write(tamperedCopy, tamperedBytes);
+
+        assertThat(sha256Hex(tamperedCopy))
+                .as("appending a single byte to %s's content must change its SHA-256 — this is "
+                        + "the exact mechanism migrationContentMatchesMasterBaseline() relies on to "
+                        + "catch checksum drift (item 205)", sample.getKey())
+                .isNotEqualTo(sample.getValue());
+    }
+
+    private static String sha256Hex(Path file) throws IOException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(Files.readAllBytes(file));
+            StringBuilder hex = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                hex.append(String.format("%02x", b));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is a mandatory JDK algorithm (JCA standard names) — this cannot happen in
+            // practice, but MessageDigest.getInstance declares it as checked.
+            throw new AssertionError("SHA-256 MessageDigest not available", e);
         }
     }
 
