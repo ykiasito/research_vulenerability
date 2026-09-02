@@ -56,9 +56,28 @@ import java.util.regex.Pattern;
  * GoMirrorSyncService}, {@code HexMirrorSyncService}, {@code NuGetMirrorSyncService}, {@code
  * PubMirrorSyncService}, {@code RubyGemsMirrorSyncService}) all pass the package name through a
  * {@code {name}}/{@code {id}}/{@code {module}} URI-template placeholder instead of raw path
- * concatenation, and {@code RestClient} percent-encodes {@code "/"} (and therefore any {@code ../}
- * shape) inside a single template substitution, so those six are structurally safe regardless of the
- * name's content.
+ * concatenation, and {@code RestClient} percent-encodes {@code "/"} inside a single template
+ * substitution, so a name containing {@code /} can never split into more than one path segment there
+ * — a multi-segment traversal (e.g. {@code ../../etc/passwd}) is therefore structurally impossible
+ * for those six.
+ *
+ * <p><b>That does not make those six mirrors immune to a single-segment traversal</b> (closed-mode
+ * backlog item 184 REVISE round 3, senior review measured against {@link
+ * org.springframework.web.util.DefaultUriBuilderFactory}, the {@code UriTemplateHandler} {@code
+ * RestClient} uses by default): {@code .} is itself an RFC 3986 <i>unreserved</i> character, so it is
+ * never percent-encoded, including inside a template substitution — only {@code /} is. A name that is
+ * exactly {@code .} or {@code ..} therefore still substitutes verbatim into a single {@code {name}}/
+ * {@code {id}}/{@code {module}} placeholder and resolves to the <i>parent</i> path segment, not a
+ * literal {@code .}/{@code ..}-named resource (confirmed live: name {@code ..} against the npm
+ * template yields request URL {@code https://registry.npmjs.org/..}; against the Go module template,
+ * {@code https://proxy.golang.org/../@v/list}. Contrast a name containing a slash, e.g. {@code a/b},
+ * which does percent-encode to {@code a%2Fb} and stays a single segment, as expected). The practical
+ * impact is limited to one wasted GET against the same fixed host's parent path per occurrence — the
+ * response shape there never matches what these services parse, so it is discarded and counted as
+ * {@code unresolved} the same as any other unresolvable name, and the fixed host means this still
+ * cannot become SSRF. Adding a {@code .}/{@code ..}-whole-name check for these six template-based
+ * mirrors is tracked as a separate, lower-priority closed-mode backlog follow-up rather than folded
+ * into this item's scope.
  */
 final class RegistryMirrorPackageNameValidator {
 
