@@ -90,9 +90,15 @@ public class Stage1AiArbitration {
      * "no AI verdict available" on a name-variant-derived CPE candidate — that candidate is dropped
      * rather than trusted unconditionally now (see that method's own javadoc for why this is the
      * intentionally asymmetric case, unlike the registry-match fallback above).
+     *
+     * <p>Takes {@link MaskedCpeString} rather than a plain {@code String} (closed-mode backlog items
+     * 169/170, senior review 2026-09-01) so "the CPE shown to the LLM is always version-masked" is
+     * enforced by the type system instead of caller discipline — kept even though this class never
+     * actually sends anything to an LLM anymore, so the signature stays aligned with the mainline
+     * (non-closed-mode) branch this class was forked from.
      */
     public Optional<DisambiguateResponse> verifyVariantDerivedCpeMatchWithAi(
-            ResearchJobItem item, Long userId, CpeDictionaryEntry candidate, String maskedCpeString) {
+            ResearchJobItem item, Long userId, CpeDictionaryEntry candidate, MaskedCpeString maskedCpe) {
         return Optional.empty();
     }
 
@@ -100,9 +106,25 @@ public class Stage1AiArbitration {
      * Same fallback {@link Stage1IdentificationService#resolveCandidates} already used for "no AI
      * verdict available" among several CPE candidates — that method's own
      * degrade-to-first-candidate-unless-relaxed-containment-derived rule takes over unconditionally.
+     *
+     * <p>Takes {@link CpeDisambiguationCandidate} (which itself wraps a {@link MaskedCpeString})
+     * rather than a raw {@code List<CandidateDto>} (closed-mode backlog items 169/170, senior review
+     * 2026-09-01), same rationale as {@link #verifyVariantDerivedCpeMatchWithAi} above.
      */
     public Optional<DisambiguateResponse> disambiguateCpeCandidates(
-            ResearchJobItem item, Long userId, List<CandidateDto> candidateDtos) {
+            ResearchJobItem item, Long userId, List<CpeDisambiguationCandidate> candidates) {
         return Optional.empty();
+    }
+
+    /**
+     * One candidate for {@link #disambiguateCpeCandidates}: a CPE-dictionary product name paired
+     * with its version-masked CPE string. Every real caller today (see {@link
+     * Stage1IdentificationService#resolveCandidates}) fills in exactly this — dictionary-derived
+     * {@code ecosystem=null}/{@code purl=null}/{@code source="cpe_dictionary"} — so bundling those
+     * fixed fields here rather than exposing full {@link CandidateDto} construction to callers is
+     * both simpler and (per this class's own note above) forces the CPE through {@link
+     * MaskedCpeString}.
+     */
+    public record CpeDisambiguationCandidate(String product, MaskedCpeString cpe) {
     }
 }

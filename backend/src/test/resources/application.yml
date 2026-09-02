@@ -46,6 +46,10 @@ app:
   cpe-full-sync-on-startup: false
   cpe-scheduled-resync-enabled: false
   cpe-scheduled-resync-cron: "0 30 1 * * SUN"
+  closed-mode:
+    crates-io-mirror-enabled: false
+    rubygems-mirror-enabled: false
+    packagist-mirror-enabled: false
 
 server:
   port: 8080
