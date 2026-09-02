@@ -122,6 +122,21 @@ app:
   # Keep spring.datasource.hikari.maximum-pool-size comfortably above this value plus any
   # concurrently-running sync workers and the web layer's own connection needs.
   item-processing-pool-size: ${ITEM_PROCESSING_POOL_SIZE:8}
+  # Weekly automatic sync of the 9 registry mirrors (see the closed-mode.*-mirror-enabled flags
+  # above) from every package name this app has ever resolved via a live registry lookup — closed-
+  # mode backlog item 183, RegistryMirrorSyncService/RegistryMirrorScheduledSync. Off by default,
+  # same safety-first convention as the CPE weekly resync flags above; can also be triggered
+  # manually via /admin/registry-mirror.
+  registry-mirror-scheduled-sync-enabled: ${REGISTRY_MIRROR_SCHEDULED_SYNC_ENABLED:false}
+  # Sunday 02:00 UTC by default — see RegistryMirrorScheduledSync#resyncWeekly's javadoc for why
+  # this slot was chosen relative to the other weekly/daily sync jobs.
+  registry-mirror-scheduled-sync-cron: ${REGISTRY_MIRROR_SCHEDULED_SYNC_CRON:0 0 2 * * SUN}
+  # How many package names RegistryMirrorSyncService hands to each ecosystem's
+  # *MirrorSyncService#syncPackages/#syncModules per call — bounds memory and gives incremental
+  # progress in the logs for a large observed-name seed list. See that class's own javadoc. Must be
+  # a positive (>= 1) value — 0 or negative falls back to RegistryMirrorSyncService's own
+  # DEFAULT_CHUNK_SIZE (200), logging a warning, rather than hanging/throwing (PR #122 REVISE).
+  registry-mirror-sync-chunk-size: ${REGISTRY_MIRROR_SYNC_CHUNK_SIZE:200}
 
 server:
   port: 8080

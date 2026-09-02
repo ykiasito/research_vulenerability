@@ -26,6 +26,8 @@ import com.vulncheck.app.service.cveorg.CveOrgSyncService;
 import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.osv.OsvSyncService;
+import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -72,12 +74,14 @@ class AdminControllerTest {
     private OsvSyncStateRepository osvSyncStateRepository;
     @Mock
     private OsvSyncFailureRepository osvSyncFailureRepository;
+    @Mock
+    private RegistryMirrorSyncService registryMirrorSyncService;
 
     private AdminController newController() {
         return new AdminController(nvdCpeSyncService, userApiKeyService, userRepository, cveOrgSyncService,
                 siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository, ghsaSyncService,
                 ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService, osvSyncStateRepository,
-                osvSyncFailureRepository);
+                osvSyncFailureRepository, registryMirrorSyncService);
     }
 
     @Test
@@ -179,7 +183,7 @@ class AdminControllerTest {
         AdminController controller = new AdminController(sharedService, userApiKeyService, userRepository,
                 cveOrgSyncService, siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository,
                 ghsaSyncService, ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService,
-                osvSyncStateRepository, osvSyncFailureRepository);
+                osvSyncStateRepository, osvSyncFailureRepository, registryMirrorSyncService);
         Model model = new ExtendedModelMap();
 
         String view = controller.cpeFullSync(model);
@@ -189,5 +193,74 @@ class AdminControllerTest {
         // The controller's attempt must never have reached syncAllAndRelease at all, let alone
         // made a network call or touched the repository, once the slot was denied.
         verifyNoInteractions(sharedRepository);
+    }
+
+    @Test
+    void registryMirrorFullSyncStartsABackgroundSyncAndReturnsImmediately() throws InterruptedException {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(registryMirrorSyncService.tryBeginFullSync()).thenReturn(true);
+        when(registryMirrorSyncService.syncAllAndRelease()).thenAnswer(invocation -> {
+            started.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return new RegistryMirrorSyncService.SyncOutcome(10, 2, Map.of("npm", 12));
+        });
+
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.registryMirrorFullSync(model);
+
+        // The controller call itself must return right away, without waiting for the sync to finish.
+        assertThat(view).isEqualTo("admin/registry-mirror");
+        assertThat(model.getAttribute("result")).asString().contains("開始しました");
+        assertThat(started.await(2, TimeUnit.SECONDS))
+                .as("background thread should have invoked syncAllAndRelease() by now")
+                .isTrue();
+        verify(registryMirrorSyncService).syncAllAndRelease();
+
+        release.countDown();
+    }
+
+    @Test
+    void registryMirrorFullSyncReleasesTheGuardWhenTheWorkerThreadFailsToStart() {
+        when(registryMirrorSyncService.tryBeginFullSync()).thenReturn(true);
+        AdminController controller = spy(newController());
+        doThrow(new RuntimeException("unable to create native thread")).when(controller).startRegistryMirrorSyncWorker();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.registryMirrorFullSync(model);
+
+        assertThat(view).isEqualTo("admin/registry-mirror");
+        assertThat(model.getAttribute("result")).asString().contains("失敗しました");
+        verify(registryMirrorSyncService, times(1)).releaseFullSyncGuard();
+        verify(registryMirrorSyncService, never()).syncAllAndRelease();
+    }
+
+    @Test
+    void registryMirrorFullSyncRejectsASecondStartWhileOneIsAlreadyRunning() throws InterruptedException {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(registryMirrorSyncService.tryBeginFullSync()).thenReturn(true, false);
+        when(registryMirrorSyncService.syncAllAndRelease()).thenAnswer(invocation -> {
+            started.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return new RegistryMirrorSyncService.SyncOutcome(1, 0, Map.of());
+        });
+
+        AdminController controller = newController();
+        controller.registryMirrorFullSync(new ExtendedModelMap());
+        assertThat(started.await(2, TimeUnit.SECONDS))
+                .as("first call's background thread should have entered syncAllAndRelease by now")
+                .isTrue();
+
+        Model secondModel = new ExtendedModelMap();
+        String secondView = controller.registryMirrorFullSync(secondModel);
+
+        assertThat(secondView).isEqualTo("admin/registry-mirror");
+        assertThat(secondModel.getAttribute("result")).asString().contains("既に実行中");
+        verify(registryMirrorSyncService, times(1)).syncAllAndRelease();
+
+        release.countDown();
     }
 }
