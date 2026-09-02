@@ -15,11 +15,8 @@ import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 /**
@@ -110,8 +107,8 @@ public class Stage1IdentificationService {
      * trigram pg_trgm's GIN index can extract from the generated regex at all — measured live
      * 2026-08-25 via {@code EXPLAIN ANALYZE} against the real 1.8M-row dictionary: a 1-2 character
      * anchor still nominally "uses" the index but degrades into a 230ms-1.4s bitmap scan that has
-     * to recheck tens of thousands of rows, run synchronously on a {@code registryLookupExecutor}
-     * thread — a real throughput risk. A 3+ character anchor stayed at ~13ms in the same test.
+     * to recheck tens of thousands of rows, run synchronously on the calling thread — a real
+     * throughput risk. A 3+ character anchor stayed at ~13ms in the same test.
      */
     private static final int MIN_ANCHOR_LENGTH_FOR_INITIALISM_EXPANSION = 3;
     /**
@@ -188,8 +185,6 @@ public class Stage1IdentificationService {
     // later phase that removes this class's registry/AI paths outright.
     private final Stage1RegistryIdentification registryIdentification;
     private final Stage1AiArbitration aiArbitration;
-    @Qualifier("registryLookupExecutor")
-    private final Executor registryLookupExecutor;
 
     /**
      * Attempts identification for a single job item and persists the result.
@@ -198,17 +193,17 @@ public class Stage1IdentificationService {
      * @return the saved {@link IdentifiedProduct}, or empty if nothing could be identified
      */
     public Optional<IdentifiedProduct> identify(ResearchJobItem item, Long userId) {
-        // The local CPE dictionary check (DB-only, no network) and the external registry fan-out
-        // are independent of each other's *local* result — only the decision of whether to fall
-        // back to a *live* NVD call (below) needs to know whether a registry matched. Previously
-        // these ran strictly sequentially (registry fan-out fully resolved before the local check
-        // even started), which meant every item paid the full registry latency — up to Maven
-        // Central's 20s circuit-breaker worst case — before a usually-much-faster local dictionary
-        // hit ever got a chance to shortcut anything. Kicking the local lookup off concurrently
-        // doesn't skip either signal (both are still always gathered, same coverage as before),
-        // it just removes the pure waiting-on-nothing between them.
-        CompletableFuture<LocalCpeMatches> localCpeFuture = CompletableFuture.supplyAsync(
-                () -> localCpeLookup(item.getVendor(), item.getProductName(), item.getVersion()), registryLookupExecutor);
+        // Closed-mode backlog item 193 (B3, docs/spec/closed-mode-plan.md §7 P1): the local CPE
+        // dictionary check used to be kicked off onto registryLookupExecutor to run concurrently
+        // with the external registry fan-out below, since that fan-out was, before B3, up to 10
+        // independent several-second network round trips (up to Maven Central's 20s circuit-breaker
+        // worst case) — worth overlapping with the usually-much-faster local dictionary lookup
+        // rather than paying both costs strictly sequentially. Every registry lookup is now a local
+        // registry_package_mirror DB read (see Stage1RegistryIdentification's own javadoc), so
+        // there's no longer a slow network wait to hide the local lookup behind — this simply calls
+        // it directly on the calling thread. Both signals are still always gathered, same coverage
+        // as before.
+        LocalCpeMatches localCpeMatches = localCpeLookup(item.getVendor(), item.getProductName(), item.getVersion());
 
         Stage1RegistryIdentification.RegistryResolution registryResolution =
                 registryIdentification.resolveRegistryMatch(item, userId, item.getProductName(), item.getVersion());
@@ -219,7 +214,7 @@ public class Stage1IdentificationService {
         Optional<String> registryEcosystem = registryResolution.match().map(RegistryMatch::ecosystem);
         Optional<String> registryPackageName = registryResolution.match().map(RegistryMatch::packageName);
         CpeCandidateResult cpeCandidateResult = resolveCpeCandidates(item.getVendor(), item.getProductName(), userId,
-                registryEcosystem, registryPackageName, localCpeFuture.join(), item.getVersion());
+                registryEcosystem, registryPackageName, localCpeMatches, item.getVersion());
 
         Optional<IdentifiedProduct> result = (registryResolution.match().isEmpty() && cpeCandidateResult.candidates().isEmpty())
                 ? aiArbitration.tryTier3(item, userId, this::fuzzyMatchCpe, this::resolveCandidates)
@@ -601,10 +596,8 @@ public class Stage1IdentificationService {
      * Reduces a registry package name to its one meaningful identifying segment before it's used as
      * a containment query — e.g. a Maven coordinate ({@code "com.google.guava:guava"}) or a Go
      * module path ({@code "github.com/gin-gonic/gin"}) is mostly non-identity-bearing groupId/host
-     * scaffolding (see {@link RegistryRoutingPolicy#stripHostPrefix} and {@link
-     * com.vulncheck.app.service.registry.MavenCentralRegistryClient}'s own groupId/artifactId split
-     * for the same reasoning applied elsewhere), and running the *whole* coordinate through
-     * containment would spuriously fail on
+     * scaffolding (see {@link RegistryRoutingPolicy#stripHostPrefix} for the same reasoning applied
+     * elsewhere), and running the *whole* coordinate through containment would spuriously fail on
      * that scaffolding the same way Fix 1/3 had to correct for it on the query side.
      */
     private String lastMeaningfulPackageSegment(String packageName) {
@@ -795,11 +788,13 @@ public class Stage1IdentificationService {
 
     /** Just the local-dictionary half of {@link #fuzzyMatchCpe} — DB-only, no network, literal
      *  matches only (the name-variant search is a separate, later-stage last resort — see {@link
-     *  #resolveCpeCandidates}) — split out so {@link #identify} can run it concurrently with the
-     *  registry fan-out instead of only starting it after the registry fan-out (and thus the {@code
-     *  registryEcosystem} this method's caller needs) has already fully resolved. Ranked here with
-     *  no target_sw preference (that context genuinely isn't known yet on the concurrent path) and,
-     *  critically, ranked but NOT truncated down to {@value #CPE_CANDIDATE_LIMIT} yet — {@code limit}
+     *  #resolveCpeCandidates}) — split out so {@link #identify} can call it before the registry
+     *  fan-out has run (and thus before the {@code registryEcosystem} this method's caller needs is
+     *  known — see {@code identify}'s own javadoc for why the two used to run concurrently for
+     *  exactly this reason, before closed-mode backlog item 193/B3 removed the network round trip
+     *  that made overlapping them worthwhile). Ranked here with no target_sw preference (that
+     *  context genuinely isn't known yet at this point) and, critically, ranked but NOT truncated
+     *  down to {@value #CPE_CANDIDATE_LIMIT} yet — {@code limit}
      *  is passed as {@value #CPE_CANDIDATE_POOL} here, not {@value #CPE_CANDIDATE_LIMIT}. {@link
      *  #resolveCpeCandidates} re-ranks/gates with the real ecosystem once it's known via {@link
      *  #rankAndGate}, and THAT is the one place allowed to cut down to the final {@value
@@ -1466,8 +1461,9 @@ public class Stage1IdentificationService {
 
     /**
      * The rest of {@link #fuzzyMatchCpe} once the local (literal-only) lookup's result is already in
-     * hand (whether computed just now or, in {@link #identify}'s case, concurrently with the
-     * registry fan-out) — decides whether a live NVD fallback is warranted at all, and only as a
+     * hand (whether computed just now or, in {@link #identify}'s case, before the registry fan-out
+     * — see {@link #localCpeLookup}'s own javadoc) — decides whether a live NVD fallback is
+     * warranted at all, and only as a
      * genuine last resort (after that live fallback has itself been attempted and failed) tries the
      * name-variant search ({@link #findByNameVariants}).
      *

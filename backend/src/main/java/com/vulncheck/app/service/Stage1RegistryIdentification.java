@@ -11,12 +11,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
 import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 /**
@@ -89,8 +86,6 @@ public class Stage1RegistryIdentification {
     private final List<PackageRegistryLookup> registryLookups;
     private final RegistryRoutingPolicy registryRoutingPolicy;
     private final RegistryLookupCache registryLookupCache;
-    @Qualifier("registryLookupExecutor")
-    private final Executor registryLookupExecutor;
 
     /**
      * Outcome of {@link #resolveRegistryMatch}: {@code aiVerified} is always {@code false} now (AI
@@ -109,23 +104,21 @@ public class Stage1RegistryIdentification {
      */
     public RegistryResolution resolveRegistryMatch(ResearchJobItem item, Long userId, String productName, String version) {
         // Narrowed by RegistryRoutingPolicy *before* any request is issued: each registry's own
-        // naming grammar (npm's @scope/name, Maven's groupId:artifactId, a Go module's host.tld/path,
-        // Composer's vendor/package, ...) can already rule out most registries for a given name with
-        // zero network calls — measured live (job 35): Stage1 spent ~99% of its time on rate-limiter
-        // waits, with Maven Central alone accounting for 32 minutes, much of it on names that could
-        // never have been a Maven coordinate in the first place. Falls back to asking everyone when
-        // the routing rule can't narrow anything down (see RegistryRoutingPolicy's own javadoc).
+        // naming grammar (npm's @scope/name, a Go module's host.tld/path, Composer's
+        // vendor/package, ...) can already rule out most registries for a given name with zero
+        // lookups. Falls back to asking everyone when the routing rule can't narrow anything down
+        // (see RegistryRoutingPolicy's own javadoc).
         List<PackageRegistryLookup> routedLookups = registryRoutingPolicy.route(productName, registryLookups);
 
-        // Dispatched concurrently, not via a sequential stream: each registry is an independent
-        // several-second network round trip, so scanning them one at a time serializes the
-        // slowest registry's latency behind every other one. Measured live: this was the single
-        // largest contributor to per-item processing time (see registryLookupExecutor's javadoc).
-        List<CompletableFuture<Optional<RegistryMatch>>> futures = routedLookups.stream()
-                .map(lookup -> CompletableFuture.supplyAsync(() -> safeLookup(lookup, productName, version), registryLookupExecutor))
-                .toList();
-        List<RegistryMatch> matches = futures.stream()
-                .map(CompletableFuture::join)
+        // Closed-mode backlog item 193 (B3, docs/spec/closed-mode-plan.md §7 P1): this used to fan
+        // these out concurrently onto a dedicated registryLookupExecutor pool, because each registry
+        // was an independent several-second network round trip and scanning them one at a time
+        // serialized the slowest one behind every other. Every registry lookup is now a local
+        // registry_package_mirror DB read (see each *RegistryClient's own javadoc) — no network
+        // round trip left to hide behind concurrency — so this simply walks the routed list in
+        // order.
+        List<RegistryMatch> matches = routedLookups.stream()
+                .map(lookup -> safeLookup(lookup, productName, version))
                 .flatMap(Optional::stream)
                 .toList();
 

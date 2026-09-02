@@ -90,11 +90,11 @@ class Stage1IdentificationServiceTest {
         // gutted to an unconditional AI-unavailable fallback — see their own javadoc.
         HighConfidenceVerificationService highConfidenceVerificationService = new HighConfidenceVerificationService();
         Stage1RegistryIdentification registryIdentification = new Stage1RegistryIdentification(
-                lookups, registryRoutingPolicy, new RegistryLookupCache(), Runnable::run);
+                lookups, registryRoutingPolicy, new RegistryLookupCache());
         Stage1AiArbitration aiArbitration = new Stage1AiArbitration();
         return new Stage1IdentificationService(
                 cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService,
-                nvdCpeSyncService, highConfidenceVerificationService, registryIdentification, aiArbitration, Runnable::run);
+                nvdCpeSyncService, highConfidenceVerificationService, registryIdentification, aiArbitration);
     }
 
     private void stubSaveReturnsArgument() {

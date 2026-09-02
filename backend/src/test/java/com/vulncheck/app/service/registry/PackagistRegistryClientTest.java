@@ -1,44 +1,35 @@
 package com.vulncheck.app.service.registry;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
-import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
-import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
-import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.test.web.client.MockRestServiceServer;
-import org.springframework.web.client.RestClient;
 
+/**
+ * Closed-mode B3 (backlog item 193, {@code docs/spec/closed-mode-plan.md} §3-2): the live-HTTP
+ * tests this file used to have (MockRestServiceServer against the real Packagist API) tested a
+ * fallback path that no longer exists — {@link PackagistRegistryClient#lookup} now always answers
+ * from {@link RegistryPackageMirrorRepository}. What remains is that mirror-only contract.
+ */
 class PackagistRegistryClientTest {
 
-    private MockRestServiceServer server;
     private PackagistRegistryClient client;
+    private RegistryPackageMirrorRepository registryPackageMirrorRepository;
 
     @BeforeEach
     void setUp() {
-        RestClient.Builder builder = RestClient.builder();
-        server = MockRestServiceServer.bindTo(builder).build();
-        // mirrorEnabled defaults to false (this @Value field is never injected outside a Spring
-        // context), so every test below exercises the pre-existing live path, same as before the
-        // mirror wiring was added -- no need to stub the mock's hasAnyEntries/findVersions.
-        RegistryPackageMirrorRepository mirrorRepository = Mockito.mock(RegistryPackageMirrorRepository.class);
-        client = new PackagistRegistryClient(
-                builder.build(), ExternalRegistryRateLimiter.disabledForTesting(), mirrorRepository);
+        registryPackageMirrorRepository = Mockito.mock(RegistryPackageMirrorRepository.class);
+        client = new PackagistRegistryClient(registryPackageMirrorRepository);
     }
 
     @Test
-    void confirmsWhenTheExactVersionIsPublished() {
-        server.expect(method(HttpMethod.GET))
-                .andRespond(withSuccess(
-                        "{\"package\":{\"versions\":{\"3.5.0\":{},\"3.4.0\":{}}}}", MediaType.APPLICATION_JSON));
+    void confirmsAnExactVersionFromTheMirror() {
+        Mockito.when(registryPackageMirrorRepository.findVersions("packagist", "monolog/monolog"))
+                .thenReturn(List.of("3.5.0", "3.4.0"));
 
         Optional<RegistryMatch> result = client.lookup("monolog/monolog", "3.5.0");
 
@@ -47,39 +38,37 @@ class PackagistRegistryClientTest {
         assertThat(result.get().exactVersionConfirmed()).isTrue();
         assertThat(result.get().confidence()).isEqualByComparingTo("0.95");
         assertThat(result.get().versions()).containsExactlyInAnyOrder("3.5.0", "3.4.0");
-        server.verify();
     }
 
     @Test
-    void packageExistsButRequestedVersionDoesNot() {
-        server.expect(method(HttpMethod.GET))
-                .andRespond(withSuccess("{\"package\":{\"versions\":{\"0.1.0\":{}}}}", MediaType.APPLICATION_JSON));
+    void mirrorHasThePackageButNotTheRequestedVersion() {
+        Mockito.when(registryPackageMirrorRepository.findVersions("packagist", "monolog/monolog"))
+                .thenReturn(List.of("0.1.0"));
 
         Optional<RegistryMatch> result = client.lookup("monolog/monolog", "3.5.0");
 
         assertThat(result).isPresent();
         assertThat(result.get().exactVersionConfirmed()).isFalse();
         assertThat(result.get().confidence()).isEqualByComparingTo("0.5");
-        server.verify();
     }
 
     @Test
-    void returnsEmptyWhenThePackageDoesNotExist() {
-        server.expect(method(HttpMethod.GET)).andRespond(withStatus(HttpStatus.NOT_FOUND));
+    void returnsEmptyWhenTheMirrorHasNoEntryForThisPackage() {
+        Mockito.when(registryPackageMirrorRepository.findVersions("packagist", "totally/unknown-package"))
+                .thenReturn(List.of());
 
         Optional<RegistryMatch> result = client.lookup("totally/unknown-package", "1.0.0");
 
         assertThat(result).isEmpty();
-        server.verify();
     }
 
     @Test
-    void returnsEmptyWithoutAnyHttpCallWhenProductNameHasNoVendorSlash() {
+    void returnsEmptyWithoutConsultingTheMirrorWhenProductNameHasNoVendorSlash() {
         // Packagist has no lookup-by-bare-name endpoint — "monolog" alone (not "monolog/monolog")
         // has nothing to query. A real, structural limitation of this ecosystem, not a bug.
         Optional<RegistryMatch> result = client.lookup("monolog", "3.5.0");
 
         assertThat(result).isEmpty();
-        server.verify();
+        Mockito.verifyNoInteractions(registryPackageMirrorRepository);
     }
 }
