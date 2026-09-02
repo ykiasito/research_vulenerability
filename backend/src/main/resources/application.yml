@@ -133,7 +133,9 @@ app:
   registry-mirror-scheduled-sync-cron: ${REGISTRY_MIRROR_SCHEDULED_SYNC_CRON:0 0 2 * * SUN}
   # How many package names RegistryMirrorSyncService hands to each ecosystem's
   # *MirrorSyncService#syncPackages/#syncModules per call — bounds memory and gives incremental
-  # progress in the logs for a large observed-name seed list. See that class's own javadoc.
+  # progress in the logs for a large observed-name seed list. See that class's own javadoc. Must be
+  # a positive (>= 1) value — 0 or negative falls back to RegistryMirrorSyncService's own
+  # DEFAULT_CHUNK_SIZE (200), logging a warning, rather than hanging/throwing (PR #122 REVISE).
   registry-mirror-sync-chunk-size: ${REGISTRY_MIRROR_SYNC_CHUNK_SIZE:200}
 
 server:

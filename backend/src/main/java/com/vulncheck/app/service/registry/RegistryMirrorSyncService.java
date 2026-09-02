@@ -56,6 +56,18 @@ import org.springframework.stereotype.Service;
 @Slf4j
 public class RegistryMirrorSyncService {
 
+    /**
+     * Fallback used by {@link #syncEcosystem} whenever {@link #chunkSize} is not a positive value
+     * (senior review, PR #122 REVISE) — {@code app.registry-mirror-sync-chunk-size=0} would
+     * otherwise turn {@link #chunk}'s {@code i += chunkSize} into an infinite loop (unbounded
+     * empty-sublist accumulation, eventual OOM, and — since this happens inside {@link #syncAll},
+     * called from {@link #syncAllAndRelease}'s {@code try} block before its {@code finally} is ever
+     * reached because the loop never returns — the {@link #fullSyncRunning} guard leaks
+     * permanently). A negative value throws {@link IndexOutOfBoundsException} from {@code
+     * List#subList} instead of hanging, but is equally not a value this class should ever act on.
+     */
+    private static final int DEFAULT_CHUNK_SIZE = 200;
+
     private final IdentifiedProductRepository identifiedProductRepository;
     private final CratesIoMirrorSyncService cratesIoMirrorSyncService;
     private final RubyGemsMirrorSyncService rubyGemsMirrorSyncService;
@@ -219,7 +231,17 @@ public class RegistryMirrorSyncService {
         List<String> observedNames = identifiedProductRepository.findDistinctPackageNamesByEcosystem(ecosystem);
         int synced = 0;
         int unresolved = 0;
-        for (List<String> batch : chunk(observedNames, chunkSize)) {
+        // Deliberately not validated at @Value-injection time (e.g. @PostConstruct) — that would
+        // only catch a bad value when Spring itself constructs this bean, not a plain `new
+        // RegistryMirrorSyncService(...)` (every unit test), so the guard must live here, at the
+        // one call site that actually uses chunkSize as a divisor of loop progress. See
+        // DEFAULT_CHUNK_SIZE's own javadoc for what a non-positive value would otherwise do.
+        int effectiveChunkSize = chunkSize > 0 ? chunkSize : DEFAULT_CHUNK_SIZE;
+        if (effectiveChunkSize != chunkSize) {
+            log.warn("app.registry-mirror-sync-chunk-size={} is not a positive value — falling back to {}",
+                    chunkSize, DEFAULT_CHUNK_SIZE);
+        }
+        for (List<String> batch : chunk(observedNames, effectiveChunkSize)) {
             int[] batchOutcome = syncOneChunk.apply(batch);
             synced += batchOutcome[0];
             unresolved += batchOutcome[1];
