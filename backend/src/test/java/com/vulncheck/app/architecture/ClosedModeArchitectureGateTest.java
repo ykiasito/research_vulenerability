@@ -4,9 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
@@ -171,6 +174,87 @@ class ClosedModeArchitectureGateTest {
         assertThrows(
                 ClassNotFoundException.class,
                 () -> Class.forName("com.vulncheck.app.service.vuln.OsvLiveQueryClient"));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // §3-6 item 4 (classpath-only half): registry clients must hold no field/constructor
+    // parameter capable of making a network call.
+    //
+    // Duplicated (not moved, 2026-09-02 REVISE R8) from ClosedModeBeanArchitectureGateTest's
+    // registryLookupListIsFullyPopulatedAndMirrorOnly(): that scan is plain java.lang.reflect over
+    // a fixed class roster (REGISTRY_CLIENT_CLASSES above) and needs neither Spring nor a running
+    // postgres, so parking it exclusively in the @SpringBootTest sibling meant CI (which only runs
+    // this class, see the class javadoc) never exercised it. ClosedModeBeanArchitectureGateTest's
+    // DI-based scan over List<PackageRegistryLookup> is kept as-is (not deleted): it additionally
+    // catches a future PackageRegistryLookup implementation that isn't on REGISTRY_CLIENT_CLASSES
+    // but *is* wired into the Spring context, which this classpath-only check cannot see.
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Types that give a class the physical ability to make an outbound HTTP(S)/network call.
+     * Shared with {@link ClosedModeBeanArchitectureGateTest}, which reuses this set and {@link
+     * #findEgressCapableMembers(Class)} for its DI-based scan — see that class's javadoc for why
+     * the two checks both exist.
+     */
+    static final Set<String> EGRESS_CAPABLE_TYPES = Set.of(
+            "org.springframework.web.client.RestClient",
+            "org.springframework.web.client.RestTemplate",
+            "org.springframework.web.reactive.function.client.WebClient",
+            "java.net.http.HttpClient",
+            "java.net.URL",
+            "java.net.URLConnection");
+
+    @Test
+    void registryClientsHaveNoEgressCapableMembers() {
+        List<String> egressCapableFindings = new ArrayList<>();
+        for (String className : REGISTRY_CLIENT_CLASSES) {
+            egressCapableFindings.addAll(findEgressCapableMembers(loadRegistryClientOrFail(className)));
+        }
+
+        assertThat(egressCapableFindings)
+                .as("these registry clients hold a field or constructor argument typed as one of "
+                        + "%s — B3 (item 193) was supposed to remove the *capability* to make a "
+                        + "live HTTP call from every registry client, not just rename or hide the "
+                        + "method that used it", EGRESS_CAPABLE_TYPES)
+                .isEmpty();
+    }
+
+    private static Class<?> loadRegistryClientOrFail(String className) {
+        try {
+            return Class.forName(className);
+        } catch (ClassNotFoundException e) {
+            throw new AssertionError(className + " is missing from the classpath entirely. "
+                    + "B3 (item 193) removed the live lookup path, not the class — if this "
+                    + "class genuinely disappeared (e.g. via a master merge, §9-3), that means "
+                    + "Stage1 lost this registry's coverage entirely, not just its live-HTTP "
+                    + "fallback.", e);
+        }
+    }
+
+    /**
+     * Scans {@code clazz}'s own declared fields and every declared constructor's parameter types
+     * for anything in {@link #EGRESS_CAPABLE_TYPES}, returning one human-readable description per
+     * hit (class + field/parameter name + offending type) so a failure names exactly what to
+     * remove.
+     */
+    static List<String> findEgressCapableMembers(Class<?> clazz) {
+        List<String> findings = new ArrayList<>();
+        for (Field field : clazz.getDeclaredFields()) {
+            if (EGRESS_CAPABLE_TYPES.contains(field.getType().getName())) {
+                findings.add(clazz.getName() + "#" + field.getName() + " (field type "
+                        + field.getType().getName() + ")");
+            }
+        }
+        for (Constructor<?> constructor : clazz.getDeclaredConstructors()) {
+            Class<?>[] parameterTypes = constructor.getParameterTypes();
+            for (int i = 0; i < parameterTypes.length; i++) {
+                if (EGRESS_CAPABLE_TYPES.contains(parameterTypes[i].getName())) {
+                    findings.add(clazz.getName() + " constructor parameter #" + i + " (type "
+                            + parameterTypes[i].getName() + ")");
+                }
+            }
+        }
+        return findings;
     }
 
     // ------------------------------------------------------------------------------------------
