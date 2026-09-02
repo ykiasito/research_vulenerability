@@ -441,7 +441,11 @@ class ClosedModeArchitectureGateTest {
      * body edited on master, either, after the fact — so if this fails WITHOUT a preceding
      * master-sync merge that plausibly explains it, treat it as a real content-drift bug on
      * closed-mode (§3-2 violation) to investigate and revert, not as a baseline to casually
-     * update.
+     * update. Updating only one of the two (e.g. adding a filename to {@link
+     * #MASTER_MIGRATION_BASELINE} without adding its hash here) fails {@link
+     * #migrationContentBaselineCoversEveryBaselineFile()}, since {@link
+     * #migrationContentMatchesMasterBaseline()} only hashes files that already have an entry in
+     * this map and would otherwise stay silently unchecked.
      */
     private static final Map<String, String> MASTER_MIGRATION_CONTENT_SHA256 = new LinkedHashMap<>();
 
@@ -579,6 +583,27 @@ class ClosedModeArchitectureGateTest {
                             unexpected, missing)
                     .isEqualTo(MASTER_MIGRATION_BASELINE);
         }
+    }
+
+    /**
+     * Item 205 REVISE (PR#151): {@link #migrationContentMatchesMasterBaseline()} iterates {@link
+     * #MASTER_MIGRATION_CONTENT_SHA256}'s entries, not {@link #MASTER_MIGRATION_BASELINE}'s — so a
+     * file present in the filename baseline but missing from the hash map is simply never hashed,
+     * and both tests stay green while that file's content verification is silently disabled. This
+     * asserts the two baselines name exactly the same files, so a future master-sync (§9-3) that
+     * updates {@link #MASTER_MIGRATION_BASELINE} but forgets {@link
+     * #MASTER_MIGRATION_CONTENT_SHA256} fails loudly here instead of leaving a permanent, invisible
+     * gap in content-drift detection.
+     */
+    @Test
+    void migrationContentBaselineCoversEveryBaselineFile() {
+        assertThat(MASTER_MIGRATION_CONTENT_SHA256.keySet())
+                .as("MASTER_MIGRATION_CONTENT_SHA256 must hold exactly one hash entry per file in "
+                        + "MASTER_MIGRATION_BASELINE — migrationContentMatchesMasterBaseline() iterates "
+                        + "the hash map, so a file added to the filename baseline during a master-sync "
+                        + "refresh (§9-3) but not to the hash map would silently go un-hashed forever "
+                        + "instead of failing")
+                .isEqualTo(MASTER_MIGRATION_BASELINE);
     }
 
     /**
