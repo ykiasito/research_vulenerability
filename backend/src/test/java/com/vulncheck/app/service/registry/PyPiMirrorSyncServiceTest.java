@@ -108,4 +108,33 @@ class PyPiMirrorSyncServiceTest {
         assertThat(outcome.unresolved()).isEqualTo(0);
         server.verify();
     }
+
+    // Regression coverage for closed-mode backlog item 184's REVISE round 3: a raw ".." never
+    // survives OsvPackageNameNormalizer's PEP 503 folding (every run of "."/"-"/"_" collapses into a
+    // single "-"), so the request path can never contain a ".." traversal token. This is the actual
+    // basis for RegistryMirrorPackageNameValidator's class javadoc excluding pypi from its checks.
+
+    @Test
+    void foldsABareDoubleDotIntoASingleHyphenRatherThanATraversalToken() {
+        server.expect(requestTo("https://pypi.org/simple/-/"))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND));
+
+        SyncOutcome outcome = service.syncPackages(List.of(".."));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+    }
+
+    @Test
+    void foldsAnEmbeddedDoubleDotIntoASingleHyphenRatherThanATraversalToken() {
+        server.expect(requestTo("https://pypi.org/simple/a-b/"))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND));
+
+        SyncOutcome outcome = service.syncPackages(List.of("a..b"));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+    }
 }

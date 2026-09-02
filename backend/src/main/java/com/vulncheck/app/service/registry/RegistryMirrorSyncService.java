@@ -287,8 +287,9 @@ public class RegistryMirrorSyncService {
      * <p>The last three rules exist specifically to keep a traversal-shaped name (e.g. {@code ../
      * ../etc/passwd} or a bare {@code ..}) out of {@code registry_mirror_seed_name} at the point of
      * entry — the outbound URL-assembly hardening for the same risk (closed-mode backlog item 184) is
-     * a separate, still-open concern in {@code CratesIoMirrorSyncService}/{@code
-     * PackagistMirrorSyncService}.
+     * a separate concern, handled by {@code RegistryMirrorPackageNameValidator} at the point {@code
+     * CratesIoMirrorSyncService}/{@code PackagistMirrorSyncService} build their outbound request URL
+     * (see that class's javadoc).
      */
     private static boolean isValidSeedName(String name) {
         if (name.length() > MAX_SEED_NAME_LENGTH) {
