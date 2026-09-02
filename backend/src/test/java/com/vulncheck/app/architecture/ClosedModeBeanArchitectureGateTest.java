@@ -3,13 +3,9 @@ package com.vulncheck.app.architecture;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.vulncheck.app.service.registry.PackageRegistryLookup;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Set;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
@@ -43,25 +39,6 @@ class ClosedModeBeanArchitectureGateTest {
 
     @Autowired
     private List<PackageRegistryLookup> registryLookups;
-
-    /**
-     * Types that give a class the physical ability to make an outbound HTTP(S)/network call.
-     * Checked against every injected {@link PackageRegistryLookup} implementation's declared
-     * field types and constructor parameter types (see {@link
-     * #registryLookupListIsFullyPopulatedAndMirrorOnly()}) — this is the primary defense for
-     * §3-6 item 4, not the {@code lookupLive}-method-name check below. A method-name check only
-     * catches a live lookup path that kept that exact name; it says nothing about a future
-     * {@code master} merge (§9-3) adding a differently-named live lookup to a class this suite
-     * doesn't otherwise touch. Testing for the underlying egress *capability* — "does this class
-     * even hold a reference to something that can talk to the network" — closes that gap.
-     */
-    private static final Set<String> EGRESS_CAPABLE_TYPES = Set.of(
-            "org.springframework.web.client.RestClient",
-            "org.springframework.web.client.RestTemplate",
-            "org.springframework.web.reactive.function.client.WebClient",
-            "java.net.http.HttpClient",
-            "java.net.URL",
-            "java.net.URLConnection");
 
     // ------------------------------------------------------------------------------------------
     // §3-6 item 2: Spring context must not define externalApiRestClient / llmServiceRestClient.
@@ -99,9 +76,17 @@ class ClosedModeBeanArchitectureGateTest {
     // made after the original §3-6 text was written, once Phase D's registry mirror (§5) became
     // available as a same-quality replacement for the live path. That is a deliberate, documented
     // divergence from the literal plan text, not a bug in either the plan or this test. The
-    // resulting stronger invariant, and what this test (plus EGRESS_CAPABLE_TYPES above) actually
-    // enforces post-B3, is: all 10 clients are present AND none of them has the physical
-    // capability to make a live network call.
+    // resulting stronger invariant, and what this test (plus
+    // ClosedModeArchitectureGateTest#EGRESS_CAPABLE_TYPES, reused below) actually enforces
+    // post-B3, is: all 10 clients are present AND none of them has the physical capability to
+    // make a live network call.
+    //
+    // 2026-09-02 (REVISE R8/R9): the egress-capable-type set and the field/constructor scan now
+    // live in ClosedModeArchitectureGateTest (duplicated there as its own classpath-only @Test,
+    // see that class), and this test reuses that single implementation rather than keeping its
+    // own copy — so an EGRESS_CAPABLE_TYPES fix (e.g. R9's RestClient.Builder/HttpURLConnection/
+    // Socket additions) only needs to happen in one place. This test's own DI-based traversal
+    // (registryLookups, from Spring) is unchanged and stays here — see the class javadoc for why.
     // ------------------------------------------------------------------------------------------
 
     @Test
@@ -123,43 +108,21 @@ class ClosedModeBeanArchitectureGateTest {
                         + "was supposed to remove the live HTTP path from every registry client outright")
                 .isEmpty();
 
+        // Reuses ClosedModeArchitectureGateTest's EGRESS_CAPABLE_TYPES set and
+        // findEgressCapableMembers scan (package-visible, same package) rather than keeping a
+        // second copy here — see the note above this test method.
         List<String> egressCapableFindings = registryLookups.stream()
                 .map(AopUtils::getTargetClass)
-                .flatMap(clazz -> findEgressCapableMembers(clazz).stream())
+                .flatMap(clazz -> ClosedModeArchitectureGateTest.findEgressCapableMembers(clazz).stream())
                 .collect(Collectors.toList());
 
         assertThat(egressCapableFindings)
                 .as("these PackageRegistryLookup beans hold a field or constructor argument typed as "
-                        + "one of %s — B3 (item 193) was supposed to remove the *capability* to make a "
-                        + "live HTTP call from every registry client, not just rename or hide the method "
-                        + "that used it", EGRESS_CAPABLE_TYPES)
+                        + "one of (or a subtype of) %s — B3 (item 193) was supposed to remove the "
+                        + "*capability* to make a live HTTP call from every registry client, not just "
+                        + "rename or hide the method that used it",
+                        ClosedModeArchitectureGateTest.EGRESS_CAPABLE_TYPES)
                 .isEmpty();
-    }
-
-    /**
-     * Scans {@code clazz}'s own declared fields and every declared constructor's parameter types
-     * for anything in {@link #EGRESS_CAPABLE_TYPES}, returning one human-readable description per
-     * hit (class + field/parameter name + offending type) so a failure names exactly what to
-     * remove.
-     */
-    private static List<String> findEgressCapableMembers(Class<?> clazz) {
-        List<String> findings = new ArrayList<>();
-        for (Field field : clazz.getDeclaredFields()) {
-            if (EGRESS_CAPABLE_TYPES.contains(field.getType().getName())) {
-                findings.add(clazz.getName() + "#" + field.getName() + " (field type "
-                        + field.getType().getName() + ")");
-            }
-        }
-        for (Constructor<?> constructor : clazz.getDeclaredConstructors()) {
-            Class<?>[] parameterTypes = constructor.getParameterTypes();
-            for (int i = 0; i < parameterTypes.length; i++) {
-                if (EGRESS_CAPABLE_TYPES.contains(parameterTypes[i].getName())) {
-                    findings.add(clazz.getName() + " constructor parameter #" + i + " (type "
-                            + parameterTypes[i].getName() + ")");
-                }
-            }
-        }
-        return findings;
     }
 
     private static boolean hasMethodNamed(Class<?> clazz, String methodName) {

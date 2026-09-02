@@ -195,14 +195,27 @@ class ClosedModeArchitectureGateTest {
      * Shared with {@link ClosedModeBeanArchitectureGateTest}, which reuses this set and {@link
      * #findEgressCapableMembers(Class)} for its DI-based scan — see that class's javadoc for why
      * the two checks both exist.
+     *
+     * <p>2026-09-02 (REVISE R9): the original list matched by exact type name only, which missed
+     * two real cases — {@code RestClient.Builder} (type name {@code
+     * org.springframework.web.client.RestClient$Builder}, the idiomatic Spring Boot injection
+     * point for building a {@code RestClient} lazily) and {@code HttpURLConnection} (what code
+     * actually declares; bare {@code URLConnection} is a supertype nobody writes as a field type,
+     * so it was effectively a dead entry) — and was missing {@code java.net.Socket} outright.
+     * {@link #isEgressCapableType(Class)} below also now walks the type hierarchy (superclasses
+     * and interfaces), so a subtype/implementor of any of these is caught even when it isn't
+     * itself in this set.
      */
     static final Set<String> EGRESS_CAPABLE_TYPES = Set.of(
             "org.springframework.web.client.RestClient",
+            "org.springframework.web.client.RestClient$Builder",
             "org.springframework.web.client.RestTemplate",
             "org.springframework.web.reactive.function.client.WebClient",
             "java.net.http.HttpClient",
             "java.net.URL",
-            "java.net.URLConnection");
+            "java.net.URLConnection",
+            "java.net.HttpURLConnection",
+            "java.net.Socket");
 
     @Test
     void registryClientsHaveNoEgressCapableMembers() {
@@ -233,14 +246,14 @@ class ClosedModeArchitectureGateTest {
 
     /**
      * Scans {@code clazz}'s own declared fields and every declared constructor's parameter types
-     * for anything in {@link #EGRESS_CAPABLE_TYPES}, returning one human-readable description per
-     * hit (class + field/parameter name + offending type) so a failure names exactly what to
-     * remove.
+     * for anything {@link #isEgressCapableType(Class) egress-capable}, returning one
+     * human-readable description per hit (class + field/parameter name + offending type) so a
+     * failure names exactly what to remove.
      */
     static List<String> findEgressCapableMembers(Class<?> clazz) {
         List<String> findings = new ArrayList<>();
         for (Field field : clazz.getDeclaredFields()) {
-            if (EGRESS_CAPABLE_TYPES.contains(field.getType().getName())) {
+            if (isEgressCapableType(field.getType())) {
                 findings.add(clazz.getName() + "#" + field.getName() + " (field type "
                         + field.getType().getName() + ")");
             }
@@ -248,13 +261,38 @@ class ClosedModeArchitectureGateTest {
         for (Constructor<?> constructor : clazz.getDeclaredConstructors()) {
             Class<?>[] parameterTypes = constructor.getParameterTypes();
             for (int i = 0; i < parameterTypes.length; i++) {
-                if (EGRESS_CAPABLE_TYPES.contains(parameterTypes[i].getName())) {
+                if (isEgressCapableType(parameterTypes[i])) {
                     findings.add(clazz.getName() + " constructor parameter #" + i + " (type "
                             + parameterTypes[i].getName() + ")");
                 }
             }
         }
         return findings;
+    }
+
+    /**
+     * Whether {@code type} is one of {@link #EGRESS_CAPABLE_TYPES}, or (recursively, via
+     * superclasses and implemented/extended interfaces) a subtype of one. 2026-09-02 (REVISE
+     * R9): recursing rather than a single {@code EGRESS_CAPABLE_TYPES.contains(type.getName())}
+     * check means a future subtype we haven't explicitly enumerated (e.g. a wrapper class
+     * extending {@code RestTemplate}) is still caught.
+     */
+    static boolean isEgressCapableType(Class<?> type) {
+        if (type == null || type == Object.class) {
+            return false;
+        }
+        if (EGRESS_CAPABLE_TYPES.contains(type.getName())) {
+            return true;
+        }
+        if (isEgressCapableType(type.getSuperclass())) {
+            return true;
+        }
+        for (Class<?> iface : type.getInterfaces()) {
+            if (isEgressCapableType(iface)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------------------------------
