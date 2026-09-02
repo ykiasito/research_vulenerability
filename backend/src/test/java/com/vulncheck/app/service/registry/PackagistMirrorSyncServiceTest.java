@@ -111,4 +111,42 @@ class PackagistMirrorSyncServiceTest {
         Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("packagist"), batchCaptor.capture());
         assertThat(batchCaptor.getValue()).isEmpty();
     }
+
+    @Test
+    void rejectsATraversalShapedVendorSegmentWithoutAnyHttpCallAndCountsItAsUnresolved() {
+        // Closed-mode backlog item 184: contains exactly one "/" (so it passes syncPackages' own
+        // coarse precheck above) but the vendor side is a ".." traversal segment.
+        SyncOutcome outcome = service.syncPackages(List.of("../monolog"));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("packagist"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
+
+    @Test
+    void rejectsAPackageNameWithMoreThanOneSlashWithoutAnyHttpCallAndCountsItAsUnresolved() {
+        SyncOutcome outcome = service.syncPackages(List.of("monolog/monolog/extra"));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("packagist"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
+
+    @Test
+    void rejectsAPackageNameWithDisallowedCharactersWithoutAnyHttpCallAndCountsItAsUnresolved() {
+        SyncOutcome outcome = service.syncPackages(List.of("mono$log/monolog"));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("packagist"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
 }
