@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -98,6 +99,43 @@ public class RegistryMirrorSyncService {
     private static final Set<String> KNOWN_ECOSYSTEMS = Set.of(
             "crates.io", "rubygems", "packagist", "hex", "npm", "pypi", "nuget", "go", "pub");
 
+    /**
+     * Single, conservative, registry-agnostic character allowlist for {@link
+     * #addOperatorSuppliedNames} (senior review, PR #126 REVISE, closed-mode backlog item 185).
+     * Deliberately not per-ecosystem — a per-registry grammar (e.g. Packagist's exactly-one-slash
+     * rule) is closed-mode backlog item 184's concern on the URL-assembly side ({@code
+     * CratesIoMirrorSyncService}/{@code PackagistMirrorSyncService}), not this input-side gate. This
+     * set is chosen wide enough to admit every legitimate name shape across all 9 mirrored
+     * ecosystems — Go module paths ({@code github.com/foo/bar}), npm scoped packages ({@code
+     * @scope/pkg}), Packagist vendor/package pairs ({@code vendor/pkg}), and NuGet's dotted IDs
+     * ({@code Newtonsoft.Json}) — while still excluding the traversal-shaped inputs {@link
+     * #isValidSeedName} rejects.
+     */
+    private static final Pattern SEED_NAME_ALLOWED_CHARS = Pattern.compile("[A-Za-z0-9._@/~+-]+");
+
+    /** {@link #isValidSeedName} rejects any name longer than this. */
+    private static final int MAX_SEED_NAME_LENGTH = 200;
+
+    /**
+     * Hard cap on the number of *distinct, valid* names {@link #addOperatorSuppliedNames} will
+     * accept in a single submission (senior review, PR #126 REVISE, closed-mode backlog item 185).
+     * Every name recorded in {@code registry_mirror_seed_name} is picked up by every future
+     * {@link #syncAllAndRelease} run (scheduled weekly) for as long as it stays in the table — see
+     * {@code RegistryMirrorSeedNameRepository} — and each occurrence costs one rate-limited external
+     * request to that ecosystem's registry. An operator submitting an oversized list (e.g. an entire
+     * lockfile pasted by mistake) would therefore not just cost one sync run; it would permanently
+     * degrade every subsequent weekly sync's cost and duration, with no delete path yet available
+     * (see closed-mode backlog item 185's "no delete path" follow-up). Rejecting the whole
+     * submission — rather than accepting the first {@code MAX_SEED_NAMES_PER_SUBMISSION} names —
+     * forces the operator to notice and deliberately split the list, instead of silently truncating
+     * it. Because this cap exists, {@link #syncEcosystem}'s per-sync chunking is still needed (an
+     * ecosystem's seed list also includes {@code identified_products}, which isn't capped here), but
+     * {@code RegistryMirrorSeedNameRepositoryImpl#insertBatch} itself does not need its own chunking
+     * — a single {@code JdbcTemplate#batchUpdate} call for up to {@code
+     * MAX_SEED_NAMES_PER_SUBMISSION} rows is bounded and sufficient.
+     */
+    private static final int MAX_SEED_NAMES_PER_SUBMISSION = 10_000;
+
     private final IdentifiedProductRepository identifiedProductRepository;
     private final RegistryMirrorSeedNameRepository registryMirrorSeedNameRepository;
     private final CratesIoMirrorSyncService cratesIoMirrorSyncService;
@@ -151,36 +189,123 @@ public class RegistryMirrorSyncService {
     }
 
     /**
+     * @param accepted the number of distinct, valid names actually submitted for insertion (after
+     *                 trimming/blank-filtering/validating/de-duplicating {@code names} itself) — not
+     *                 the number of genuinely new rows, since a name already present (from a prior
+     *                 upload, or already promoted into {@code registry_mirror_seed_name} by some
+     *                 other means) is a silent no-op at the DB level (see {@link
+     *                 RegistryMirrorSeedNameRepository#insertBatch}) and this method has no cheap way
+     *                 to tell the two cases apart without an extra round trip nothing here needs.
+     * @param rejected how many trimmed, non-blank names failed {@link #isValidSeedName} and were
+     *                 skipped rather than inserted (senior review, PR #126 REVISE) — counted once per
+     *                 rejected occurrence in the caller's original list (before de-duplication), so a
+     *                 caller can tell "nothing wrong, just an empty submission" (0/0) apart from
+     *                 "N names silently dropped" (0/N or accepted&gt;0, rejected&gt;0).
+     */
+    public record SeedNameSubmissionOutcome(int accepted, int rejected) {
+    }
+
+    /**
+     * Thrown by {@link #addOperatorSuppliedNames} when the post-cleanup (trimmed, validated,
+     * de-duplicated) name count exceeds {@link #MAX_SEED_NAMES_PER_SUBMISSION} — see that constant's
+     * javadoc for why the whole submission is rejected outright rather than partially inserted.
+     */
+    public static class SeedNameBatchTooLargeException extends IllegalArgumentException {
+        public SeedNameBatchTooLargeException(String message) {
+            super(message);
+        }
+    }
+
+    /**
      * Closed-mode backlog item 185: records an operator-supplied package name list as a seed for
      * this ecosystem — see the class javadoc's "Seed source" section for why this exists alongside
      * {@code identified_products}. Does not itself trigger a sync; the names are picked up by the
      * next {@link #syncAllAndRelease} (admin-triggered or scheduled), same as any other seed name.
      *
-     * @return the number of names actually submitted for insertion (after trimming/blank-filtering/
-     *         de-duplicating {@code names} itself) — not the number of genuinely new rows, since a
-     *         name already present (from a prior upload, or already promoted into {@code
-     *         registry_mirror_seed_name} by some other means) is a silent no-op at the DB level (see
-     *         {@link RegistryMirrorSeedNameRepository#insertBatch}) and this method has no cheap way
-     *         to tell the two cases apart without an extra round trip nothing here needs.
+     * <p>Per-name validation ({@link #isValidSeedName}) runs after trimming/blank-filtering but
+     * before de-duplication (senior review, PR #126 REVISE) — an invalid name never reaches {@link
+     * RegistryMirrorSeedNameRepository#insertBatch} and never throws (this app has no {@code
+     * @ControllerAdvice}/{@code @ExceptionHandler}, so an unhandled exception here would surface as a
+     * bare 500 and silently lose the entire submission, valid names included); it is only counted in
+     * {@link SeedNameSubmissionOutcome#rejected()} so the caller can report both counts to the
+     * operator instead of leaving a rejected name indistinguishable from one that simply never made
+     * it into the request.
+     *
      * @throws IllegalArgumentException if {@code ecosystem} isn't one of the 9 mirrored ecosystems
      *         (see {@link #KNOWN_ECOSYSTEMS}) — catches a typo at upload time rather than silently
      *         storing a row {@link #syncAll} will never query for.
+     * @throws SeedNameBatchTooLargeException if the post-cleanup name count exceeds {@link
+     *         #MAX_SEED_NAMES_PER_SUBMISSION} — see that constant's javadoc.
      */
-    public int addOperatorSuppliedNames(String ecosystem, List<String> names) {
+    public SeedNameSubmissionOutcome addOperatorSuppliedNames(String ecosystem, List<String> names) {
         if (!KNOWN_ECOSYSTEMS.contains(ecosystem)) {
             throw new IllegalArgumentException("Unknown registry mirror ecosystem: " + ecosystem);
         }
-        List<String> cleaned = names.stream()
+        List<String> trimmedNonBlank = names.stream()
                 .map(String::trim)
                 .filter(name -> !name.isEmpty())
-                .distinct()
                 .toList();
+
+        int rejected = 0;
+        List<String> valid = new ArrayList<>();
+        for (String name : trimmedNonBlank) {
+            if (isValidSeedName(name)) {
+                valid.add(name);
+            } else {
+                rejected++;
+            }
+        }
+        List<String> cleaned = valid.stream().distinct().toList();
+
+        if (cleaned.size() > MAX_SEED_NAMES_PER_SUBMISSION) {
+            throw new SeedNameBatchTooLargeException("シード名の投稿を却下しました（" + ecosystem + "）: クリーンアップ後 "
+                    + cleaned.size() + " 件が上限（" + MAX_SEED_NAMES_PER_SUBMISSION + "件）を超えています。"
+                    + "リストを分割して投稿し直してください。");
+        }
         if (cleaned.isEmpty()) {
-            return 0;
+            return new SeedNameSubmissionOutcome(0, rejected);
         }
         registryMirrorSeedNameRepository.insertBatch(ecosystem, cleaned);
-        log.info("Registry mirror seed names added ({}): {} names submitted", ecosystem, cleaned.size());
-        return cleaned.size();
+        log.info("Registry mirror seed names added ({}): {} names submitted, {} rejected as invalid",
+                ecosystem, cleaned.size(), rejected);
+        return new SeedNameSubmissionOutcome(cleaned.size(), rejected);
+    }
+
+    /**
+     * Registry-agnostic validity gate for {@link #addOperatorSuppliedNames} (senior review, PR #126
+     * REVISE, closed-mode backlog item 185) — see {@link #SEED_NAME_ALLOWED_CHARS}'s javadoc for why
+     * this is one conservative rule rather than 9 per-ecosystem grammars. Rejects a name that:
+     *
+     * <ul>
+     *   <li>is longer than {@link #MAX_SEED_NAME_LENGTH} characters;
+     *   <li>contains any character outside {@link #SEED_NAME_ALLOWED_CHARS};
+     *   <li>starts or ends with {@code /}, or contains {@code //};
+     *   <li>has any {@code /}-separated segment equal to {@code .} or {@code ..} (including the
+     *       whole name itself, for a name with no {@code /} at all).
+     * </ul>
+     *
+     * <p>The last three rules exist specifically to keep a traversal-shaped name (e.g. {@code ../
+     * ../etc/passwd} or a bare {@code ..}) out of {@code registry_mirror_seed_name} at the point of
+     * entry — the outbound URL-assembly hardening for the same risk (closed-mode backlog item 184) is
+     * a separate, still-open concern in {@code CratesIoMirrorSyncService}/{@code
+     * PackagistMirrorSyncService}.
+     */
+    private static boolean isValidSeedName(String name) {
+        if (name.length() > MAX_SEED_NAME_LENGTH) {
+            return false;
+        }
+        if (!SEED_NAME_ALLOWED_CHARS.matcher(name).matches()) {
+            return false;
+        }
+        if (name.startsWith("/") || name.endsWith("/") || name.contains("//")) {
+            return false;
+        }
+        for (String segment : name.split("/", -1)) {
+            if (segment.equals(".") || segment.equals("..")) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
