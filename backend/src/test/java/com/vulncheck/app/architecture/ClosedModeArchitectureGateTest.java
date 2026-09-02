@@ -179,7 +179,8 @@ class ClosedModeArchitectureGateTest {
     }
 
     // ------------------------------------------------------------------------------------------
-    // §3-6 item 5: db/migration must contain no V*__ file that isn't also on master.
+    // §3-6 item 5: db/migration's V*__ file set must be byte-for-byte identical to master's
+    // (checked both ways: no extra file, and no missing file).
     // ------------------------------------------------------------------------------------------
 
     /**
@@ -240,7 +241,7 @@ class ClosedModeArchitectureGateTest {
     private static final Pattern VERSIONED_MIGRATION = Pattern.compile("V\\d+__.*\\.sql");
 
     @Test
-    void migrationDirectoryHasNoVersionedFileBeyondTheMasterBaseline() throws IOException {
+    void migrationSetMatchesMasterBaseline() throws IOException {
         Path migrationDir = Path.of("src/main/resources/db/migration");
         assertThat(Files.isDirectory(migrationDir))
                 .as("expected %s to exist relative to the backend module root", migrationDir)
@@ -252,15 +253,26 @@ class ClosedModeArchitectureGateTest {
                     .filter(name -> VERSIONED_MIGRATION.matcher(name).matches())
                     .collect(Collectors.toSet());
 
+            // Compute both directions up front (not just for the failure message, but so the
+            // assertion below reports which side of the mismatch it is) — an unexpected addition
+            // (§3-2 violation) and a missing baseline file (silently dropped a migration, which
+            // this suite must also catch — an isSubsetOf-style check on "unexpected" alone would
+            // have missed a deletion entirely) are different problems and shouldn't be conflated
+            // into one undifferentiated "not equal" message.
             Set<String> unexpected = actualVersionedFiles.stream()
                     .filter(name -> !MASTER_MIGRATION_BASELINE.contains(name))
                     .collect(Collectors.toSet());
+            Set<String> missing = MASTER_MIGRATION_BASELINE.stream()
+                    .filter(name -> !actualVersionedFiles.contains(name))
+                    .collect(Collectors.toSet());
 
-            assertThat(unexpected)
-                    .as("db/migration has V*__ file(s) not in the master baseline — either the "
-                            + "baseline needs refreshing after a master-sync merge (§9-3) or "
-                            + "closed-mode grew its own migration in violation of §3-2")
-                    .isEmpty();
+            assertThat(actualVersionedFiles)
+                    .as("db/migration's V*__ file set must match the master baseline exactly "
+                            + "(extra, not on master: %s | missing, on master but not here: %s) — "
+                            + "either the baseline needs refreshing after a master-sync merge (§9-3), "
+                            + "or closed-mode added/removed a migration in violation of §3-2",
+                            unexpected, missing)
+                    .isEqualTo(MASTER_MIGRATION_BASELINE);
         }
     }
 
