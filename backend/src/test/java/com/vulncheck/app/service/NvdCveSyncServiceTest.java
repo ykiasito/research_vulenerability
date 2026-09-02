@@ -499,6 +499,8 @@ class NvdCveSyncServiceTest {
         NvdCveSyncState state = freshState();
         state.setBaselineCompleted(true);
         when(stateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        when(chunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED))
+                .thenReturn(List.of());
         syncServer.expect(method(HttpMethod.GET))
                 .andRespond(withSuccess(pageJson(0, "[]"), MediaType.APPLICATION_JSON));
 
@@ -526,6 +528,8 @@ class NvdCveSyncServiceTest {
         state.setBaselineStartedAt(baselineStartedAt);
         // lastDeltaSyncedAt is intentionally left null -- this is the first delta tick ever.
         when(stateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        when(chunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED))
+                .thenReturn(List.of());
         syncServer.expect(method(HttpMethod.GET))
                 .andRespond(withSuccess(pageJson(0, "[]"), MediaType.APPLICATION_JSON));
 
@@ -556,6 +560,8 @@ class NvdCveSyncServiceTest {
         OffsetDateTime baselineStartedAt = now.minusDays(200);
         state.setBaselineStartedAt(baselineStartedAt);
         when(stateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        when(chunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED))
+                .thenReturn(List.of());
         syncServer.expect(method(HttpMethod.GET))
                 .andRespond(withSuccess(pageJson(0, "[]"), MediaType.APPLICATION_JSON));
 
@@ -578,5 +584,70 @@ class NvdCveSyncServiceTest {
                         + "way to now -- otherwise the clamped-off tail of the range is silently "
                         + "never synced")
                 .isEqualTo(expectedWindowEnd);
+    }
+
+    /** Closed-mode backlog item 202, REVISE round 2, point C: when the delta window's first page
+     *  triggers an adaptive split (routine once point B lets a delta window span multiple days), the
+     *  high-water mark must NOT advance -- the split window's own two halves are left {@code
+     *  PENDING} with nothing beyond their first page ingested, and advancing {@code
+     *  last_delta_synced_at} anyway would make every future tick believe everything up through now
+     *  had already synced, silently dropping everything but this window's first 2,000-record page. */
+    @Test
+    void deltaTickDoesNotAdvanceTheHighWaterMarkWhenTheWindowGetsSplit() {
+        NvdCveSyncState state = freshState();
+        state.setBaselineCompleted(true);
+        OffsetDateTime previousHighWaterMark = OffsetDateTime.now(ZoneOffset.UTC).minusDays(33);
+        state.setLastDeltaSyncedAt(previousHighWaterMark);
+        when(stateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        when(chunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED))
+                .thenReturn(List.of());
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(pageJson(25_000, oneVulnerabilityJson("CVE-2023-0099")), MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.runDeltaTickAndRelease(Optional.empty(), new RunBudget(5, Duration.ofMinutes(5)));
+
+        syncServer.verify();
+        assertThat(outcome.completed())
+                .as("a split must not be reported as this delta tick having finished")
+                .isFalse();
+        assertThat(state.getLastDeltaSyncedAt())
+                .as("the high-water mark must stay put -- the split window's two halves haven't "
+                        + "been synced yet")
+                .isEqualTo(previousHighWaterMark);
+        verify(stateRepository, never()).save(state);
+    }
+
+    /** Closed-mode backlog item 202, REVISE round 2, point D: a delta tick must resume whatever
+     *  chunk a previous tick left unfinished (budget-exhausted mid-page, or one half of an
+     *  adaptively-split window) instead of always enqueueing a brand-new chunk -- otherwise a delta
+     *  window too large to finish inside one run's budget would never complete, and {@code
+     *  nvd_cve_sync_chunk} would grow one new row every tick forever. */
+    @Test
+    void deltaTickResumesAnExistingUnfinishedChunkInsteadOfCreatingANewOne() {
+        NvdCveSyncState state = freshState();
+        state.setBaselineCompleted(true);
+        when(stateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        OffsetDateTime existingStart = OffsetDateTime.of(2026, 8, 20, 0, 0, 0, 0, ZoneOffset.UTC);
+        OffsetDateTime existingEnd = existingStart.plusDays(5);
+        NvdCveSyncChunk carriedOverChunk = pendingChunk(existingStart, existingEnd);
+        carriedOverChunk.setStatus(NvdCveSyncChunkStatus.IN_PROGRESS);
+        carriedOverChunk.setNextStartIndex(2000);
+        when(chunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED))
+                .thenReturn(List.of(carriedOverChunk));
+        syncServer.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(containsString("startIndex=2000")))
+                .andRespond(withSuccess(pageJson(2000, "[]"), MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.runDeltaTickAndRelease(Optional.empty(), new RunBudget(5, Duration.ofMinutes(5)));
+
+        syncServer.verify();
+        assertThat(outcome.completed()).isTrue();
+        assertThat(carriedOverChunk.getStatus()).isEqualTo(NvdCveSyncChunkStatus.COMPLETED);
+        assertThat(state.getLastDeltaSyncedAt())
+                .as("the high-water mark advances to the resumed chunk's own window_end")
+                .isEqualTo(existingEnd);
+        // No brand-new chunk (a fresh window_start unrelated to the carried-over one) was ever
+        // created -- every save() call on chunkRepository is against this exact same instance.
+        verify(chunkRepository, never()).save(argThat((NvdCveSyncChunk c) -> c != carriedOverChunk));
     }
 }
