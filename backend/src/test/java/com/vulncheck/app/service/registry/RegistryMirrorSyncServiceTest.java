@@ -1,15 +1,18 @@
 package com.vulncheck.app.service.registry;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.vulncheck.app.repository.IdentifiedProductRepository;
+import com.vulncheck.app.repository.RegistryMirrorSeedNameRepository;
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,15 +20,17 @@ import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
 /**
- * Unit coverage for {@link RegistryMirrorSyncService} — the observed-name seed source (closed-mode
- * backlog item 183), the per-ecosystem chunking, the aggregate totals, and the concurrency guard.
- * Every {@code *MirrorSyncService} is mocked: its own sync/parse behavior is covered by its own
- * dedicated test (e.g. {@code CratesIoMirrorSyncServiceTest}), so this class only needs to verify
- * that the orchestrator calls each one correctly and aggregates what it returns.
+ * Unit coverage for {@link RegistryMirrorSyncService} — the seed source union (closed-mode backlog
+ * items 183/185: {@code identified_products} and {@code registry_mirror_seed_name}), the
+ * per-ecosystem chunking, the aggregate totals, and the concurrency guard. Every {@code
+ * *MirrorSyncService} is mocked: its own sync/parse behavior is covered by its own dedicated test
+ * (e.g. {@code CratesIoMirrorSyncServiceTest}), so this class only needs to verify that the
+ * orchestrator calls each one correctly and aggregates what it returns.
  */
 class RegistryMirrorSyncServiceTest {
 
     private final IdentifiedProductRepository identifiedProductRepository = mock(IdentifiedProductRepository.class);
+    private final RegistryMirrorSeedNameRepository registryMirrorSeedNameRepository = mock(RegistryMirrorSeedNameRepository.class);
     private final CratesIoMirrorSyncService cratesIoMirrorSyncService = mock(CratesIoMirrorSyncService.class);
     private final RubyGemsMirrorSyncService rubyGemsMirrorSyncService = mock(RubyGemsMirrorSyncService.class);
     private final PackagistMirrorSyncService packagistMirrorSyncService = mock(PackagistMirrorSyncService.class);
@@ -40,13 +45,16 @@ class RegistryMirrorSyncServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new RegistryMirrorSyncService(identifiedProductRepository, cratesIoMirrorSyncService,
-                rubyGemsMirrorSyncService, packagistMirrorSyncService, hexMirrorSyncService, npmMirrorSyncService,
-                pyPiMirrorSyncService, nuGetMirrorSyncService, goMirrorSyncService, pubMirrorSyncService);
+        service = new RegistryMirrorSyncService(identifiedProductRepository, registryMirrorSeedNameRepository,
+                cratesIoMirrorSyncService, rubyGemsMirrorSyncService, packagistMirrorSyncService,
+                hexMirrorSyncService, npmMirrorSyncService, pyPiMirrorSyncService, nuGetMirrorSyncService,
+                goMirrorSyncService, pubMirrorSyncService);
         ReflectionTestUtils.setField(service, "chunkSize", 200);
 
         // Every ecosystem defaults to "nothing observed yet" unless a test overrides it.
         when(identifiedProductRepository.findDistinctPackageNamesByEcosystem(org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(List.of());
+        when(registryMirrorSeedNameRepository.findDistinctPackageNames(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(List.of());
         when(cratesIoMirrorSyncService.syncPackages(anyList())).thenReturn(new CratesIoMirrorSyncService.SyncOutcome(0, 0));
         when(rubyGemsMirrorSyncService.syncPackages(anyList())).thenReturn(new RubyGemsMirrorSyncService.SyncOutcome(0, 0));
@@ -190,5 +198,65 @@ class RegistryMirrorSyncServiceTest {
         assertThat(service.tryBeginFullSync())
                 .as("guard must be released once the (non-throwing) sync completes")
                 .isTrue();
+    }
+
+    /**
+     * Closed-mode backlog item 185: a package name only present in {@code
+     * registry_mirror_seed_name} (never resolved live, so absent from {@code identified_products})
+     * must still be picked up by a sync — this is the whole point of the new seed source.
+     */
+    @Test
+    void syncAllAndReleaseIncludesOperatorSuppliedSeedNamesNotYetInIdentifiedProducts() {
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("npm")).thenReturn(List.of());
+        when(registryMirrorSeedNameRepository.findDistinctPackageNames("npm")).thenReturn(List.of("left-pad"));
+        when(npmMirrorSyncService.syncPackages(List.of("left-pad")))
+                .thenReturn(new NpmMirrorSyncService.SyncOutcome(1, 0));
+
+        service.tryBeginFullSync();
+        RegistryMirrorSyncService.SyncOutcome outcome = service.syncAllAndRelease();
+
+        verify(npmMirrorSyncService).syncPackages(List.of("left-pad"));
+        assertThat(outcome.observedNameCountByEcosystem()).containsEntry("npm", 1);
+    }
+
+    /**
+     * A name present in both sources must be synced exactly once, not twice.
+     */
+    @Test
+    void syncAllAndReleaseDeduplicatesANameObservedInBothSeedSources() {
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("npm")).thenReturn(List.of("lodash"));
+        when(registryMirrorSeedNameRepository.findDistinctPackageNames("npm")).thenReturn(List.of("lodash"));
+        when(npmMirrorSyncService.syncPackages(List.of("lodash")))
+                .thenReturn(new NpmMirrorSyncService.SyncOutcome(1, 0));
+
+        service.tryBeginFullSync();
+        RegistryMirrorSyncService.SyncOutcome outcome = service.syncAllAndRelease();
+
+        verify(npmMirrorSyncService, times(1)).syncPackages(List.of("lodash"));
+        assertThat(outcome.observedNameCountByEcosystem()).containsEntry("npm", 1);
+    }
+
+    @Test
+    void addOperatorSuppliedNamesRejectsAnUnknownEcosystem() {
+        assertThatThrownBy(() -> service.addOperatorSuppliedNames("maven", List.of("com.example:widget")))
+                .isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(registryMirrorSeedNameRepository);
+    }
+
+    @Test
+    void addOperatorSuppliedNamesTrimsBlanksAndDeduplicatesBeforeInserting() {
+        int submitted = service.addOperatorSuppliedNames("npm",
+                List.of(" left-pad ", "left-pad", "", "  ", "is-odd"));
+
+        assertThat(submitted).isEqualTo(2);
+        verify(registryMirrorSeedNameRepository).insertBatch("npm", List.of("left-pad", "is-odd"));
+    }
+
+    @Test
+    void addOperatorSuppliedNamesIsANoOpForAnAllBlankList() {
+        int submitted = service.addOperatorSuppliedNames("npm", List.of("", "   ", "\n"));
+
+        assertThat(submitted).isEqualTo(0);
+        verifyNoInteractions(registryMirrorSeedNameRepository);
     }
 }
