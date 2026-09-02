@@ -397,6 +397,47 @@ class NvdCveSyncServiceTest {
         assertThat(chunk.getStatus()).isEqualTo(NvdCveSyncChunkStatus.IN_PROGRESS);
     }
 
+    /** Closed-mode backlog item 202, REVISE round 1, point 6: {@code next_start_index} is the
+     *  design's resumption mechanism (§4-2-4), but until now nothing exercised a window spanning
+     *  more than one page. Confirms the second request's {@code startIndex} equals the first page's
+     *  own record count, and that the chunk only completes once the second (final) page is in. */
+    @Test
+    void backfillTickResumesAcrossMultiplePagesOfTheSameChunkAndOnlyCompletesAfterTheSecondPage() {
+        when(chunkRepository.count()).thenReturn(1L);
+        OffsetDateTime start = OffsetDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+        NvdCveSyncChunk chunk = pendingChunk(start, start.plusDays(120));
+        when(chunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED))
+                .thenReturn(List.of(chunk));
+        when(chunkRepository.countByStatusNot(NvdCveSyncChunkStatus.COMPLETED)).thenReturn(1L, 0L);
+        // totalResults=2500 across two pages: 2000 (a full page) + 500 (the remainder).
+        syncServer.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(containsString("startIndex=0")))
+                .andRespond(withSuccess(pageJson(2500, manyVulnerabilitiesJson(2000, "CVE-2023-P1-")),
+                        MediaType.APPLICATION_JSON));
+        syncServer.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(containsString("startIndex=2000")))
+                .andRespond(withSuccess(pageJson(2500, manyVulnerabilitiesJson(500, "CVE-2023-P2-")),
+                        MediaType.APPLICATION_JSON));
+
+        // First tick's budget only allows one page -- the chunk must still be IN_PROGRESS
+        // afterward, not COMPLETED, even though only one page has been fetched so far.
+        SyncOutcome firstTick = service.runBackfillTickAndRelease(Optional.empty(), new RunBudget(1, Duration.ofMinutes(5)));
+        assertThat(firstTick.completed()).isFalse();
+        assertThat(chunk.getStatus()).isEqualTo(NvdCveSyncChunkStatus.IN_PROGRESS);
+        assertThat(chunk.getNextStartIndex())
+                .as("next tick must resume from where the first page left off, not refetch startIndex=0")
+                .isEqualTo(2000);
+
+        // Second tick fetches the second (final) page -- its startIndex (asserted above) must equal
+        // the first page's own record count, and only now does the chunk complete.
+        SyncOutcome secondTick = service.runBackfillTickAndRelease(Optional.empty(), new RunBudget(5, Duration.ofMinutes(5)));
+
+        syncServer.verify();
+        assertThat(secondTick.completed()).isTrue();
+        assertThat(chunk.getStatus()).isEqualTo(NvdCveSyncChunkStatus.COMPLETED);
+        assertThat(chunk.getNextStartIndex()).isEqualTo(2500);
+    }
+
     // --- delta sync (shares the same per-chunk executor) --------------------------------------
 
     @Test
