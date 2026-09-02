@@ -52,12 +52,14 @@ import org.springframework.web.util.UriComponentsBuilder;
  * <p><b>Same executor for backfill and delta</b> (§4-2-4): {@link #runBackfillTickAndRelease}
  * processes the persistent chunk queue seeded once from [1999-01-01, now); {@link
  * #runDeltaTickAndRelease} (only meaningful once the baseline is done — see {@code
- * nvd_cve_sync_state.baseline_completed}) enqueues a single ad hoc chunk covering {@code
- * [last_delta_synced_at - safety margin, now)} and pages it through the identical {@link
- * #processChunkStep} logic. Neither is wired to a scheduler by this class itself — {@code
- * NvdCveBackfillScheduledRunner} drives the backfill side; nothing yet drives the delta side (out
- * of scope for backlog item 202's (2)-(5), which covers mirror infrastructure only, not the A/B
- * verification + cutover that would make delta sync operationally relevant).
+ * nvd_cve_sync_state.baseline_completed}) reuses whatever delta chunk a previous tick left
+ * unfinished, or — only when none is left — enqueues a fresh one covering {@code
+ * [last_delta_synced_at - safety margin, now)} clamped to NVD's 120-day range cap (see {@link
+ * #resolveDeltaChunk}), and pages it through the identical {@link #processChunkStep} logic. Neither
+ * is wired to a scheduler by this class itself — {@code NvdCveBackfillScheduledRunner} drives the
+ * backfill side; nothing yet drives the delta side (out of scope for backlog item 202's (2)-(5),
+ * which covers mirror infrastructure only, not the A/B verification + cutover that would make delta
+ * sync operationally relevant).
  *
  * <p><b>Run budget, counted in attempts</b>: both entry points take a {@link RunBudget} (request
  * count + wall-clock duration) and stop cleanly once either is exhausted, leaving any unfinished
@@ -222,12 +224,7 @@ public class NvdCveSyncService {
         }
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        OffsetDateTime cursor = resolveDeltaCursor(state, now);
-        NvdCveSyncChunk chunk = new NvdCveSyncChunk();
-        chunk.setWindowStart(cursor.minus(DELTA_SAFETY_MARGIN));
-        chunk.setWindowEnd(now);
-        chunk.setStatus(NvdCveSyncChunkStatus.PENDING);
-        nvdCveSyncChunkRepository.save(chunk);
+        NvdCveSyncChunk chunk = resolveDeltaChunk(state, now);
 
         BudgetTracker budget = new BudgetTracker(runBudget);
         int totalUpserted = 0;
@@ -236,17 +233,66 @@ public class NvdCveSyncService {
             ChunkStepOutcome step = processChunkStep(chunk, apiKey, budget);
             totalUpserted += step.upserted();
             if (step.chunkFinished()) {
-                chunkFinished = true;
+                // A split leaves this window's two halves as brand-new PENDING chunk rows (see
+                // splitChunk) instead of actually finishing the sync -- chunk itself does end up
+                // COMPLETED (see ChunkStepOutcome's javadoc), but treating that as "this tick's
+                // delta window is done" would advance the high-water mark past two halves nothing
+                // has processed yet, silently dropping everything but this window's first page
+                // (closed-mode backlog item 202, REVISE round 2, point C). The next delta tick's
+                // resolveDeltaChunk picks up the oldest still-unfinished chunk -- one of these two
+                // halves -- instead of enqueueing a new one (point D), so nothing here is lost, just
+                // not yet counted as done.
+                chunkFinished = !step.split();
                 break;
             }
         }
 
         if (chunkFinished && chunk.getStatus() == NvdCveSyncChunkStatus.COMPLETED) {
-            state.setLastDeltaSyncedAt(now);
+            // The chunk's own window_end, not now: when resolveDeltaChunk clamped the window (point
+            // B) or reused a carried-over chunk from a previous tick, now is past the point this
+            // tick actually synced up to, and advancing the high-water mark to now would silently
+            // drop the clamped-off/not-yet-processed tail of the range on every future tick.
+            state.setLastDeltaSyncedAt(chunk.getWindowEnd());
             state.setUpdatedAt(now);
             nvdCveSyncStateRepository.save(state);
         }
         return new SyncOutcome(totalUpserted, chunkFinished);
+    }
+
+    /** Picks the chunk this delta tick should work on (closed-mode backlog item 202, REVISE round 2,
+     *  point D): reuses the oldest still-unfinished chunk left behind by a previous delta tick (one
+     *  that ran out of budget mid-page, or one half of a chunk this class's own adaptive split
+     *  produced — see {@link #processChunkStep}) rather than always enqueueing a brand-new one.
+     *  Without this, a delta window too large to finish within one run's budget (routine once
+     *  {@link #runDeltaTick}'s window can span up to {@link #WINDOW_DAYS}, per REVISE round 2 point
+     *  B) would never complete, and every tick would insert yet another new row into {@code
+     *  nvd_cve_sync_chunk} on top of the still-{@code IN_PROGRESS} one from last time.
+     *
+     *  <p>Once {@code baseline_completed} is true, every backfill chunk is already {@code COMPLETED}
+     *  (see {@link #runBackfillTick}'s own {@code allDone} check, the only place that flips it) — so
+     *  any row {@link NvdCveSyncChunkRepository#findByStatusNotOrderByWindowStartAsc} returns here is
+     *  necessarily left over from a previous delta tick, never a backfill chunk. Only when nothing is
+     *  left unfinished does this enqueue a fresh chunk, whose window is clamped to NVD's 120-day
+     *  {@code lastModStartDate}/{@code lastModEndDate} cap (REVISE round 2, point B) — an uncapped
+     *  {@code [cursor, now)} can exceed 120 days whenever {@link #resolveDeltaCursor} falls back to
+     *  {@code baseline_started_at}, and NVD rejects an out-of-range request outright. */
+    private NvdCveSyncChunk resolveDeltaChunk(NvdCveSyncState state, OffsetDateTime now) {
+        List<NvdCveSyncChunk> unfinished =
+                nvdCveSyncChunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED);
+        if (!unfinished.isEmpty()) {
+            return unfinished.get(0);
+        }
+
+        OffsetDateTime cursor = resolveDeltaCursor(state, now);
+        OffsetDateTime windowStart = cursor.minus(DELTA_SAFETY_MARGIN);
+        OffsetDateTime uncappedWindowEnd = windowStart.plusDays(WINDOW_DAYS);
+        OffsetDateTime windowEnd = uncappedWindowEnd.isBefore(now) ? uncappedWindowEnd : now;
+        NvdCveSyncChunk chunk = new NvdCveSyncChunk();
+        chunk.setWindowStart(windowStart);
+        chunk.setWindowEnd(windowEnd);
+        chunk.setStatus(NvdCveSyncChunkStatus.PENDING);
+        nvdCveSyncChunkRepository.save(chunk);
+        return chunk;
     }
 
     /** Cursor fallback chain for the first delta tick after a state row exists, in order of
@@ -333,8 +379,15 @@ public class NvdCveSyncService {
     /** Outcome of a single {@link #processChunkStep} call — {@code chunkFinished} is true whenever
      *  the calling loop should stop paging this exact chunk (it completed, failed this attempt, or
      *  was just split), false if the same chunk has more pages to fetch and the run budget allows
-     *  continuing immediately. */
-    private record ChunkStepOutcome(int upserted, boolean chunkFinished) {
+     *  continuing immediately. {@code split} is true only for the split case: {@code chunk} itself
+     *  is marked {@code COMPLETED} (so a naive {@code chunkFinished && status == COMPLETED} check
+     *  elsewhere would treat it as fully done), but its data was only superseded by two brand-new
+     *  {@code PENDING} child chunks that still need their own processing — see {@link #runDeltaTick}
+     *  for why this distinction matters (closed-mode backlog item 202, REVISE round 2, point C). */
+    private record ChunkStepOutcome(int upserted, boolean chunkFinished, boolean split) {
+        ChunkStepOutcome(int upserted, boolean chunkFinished) {
+            this(upserted, chunkFinished, false);
+        }
     }
 
     /**
@@ -375,12 +428,22 @@ public class NvdCveSyncService {
             // after could leave two persisted children behind a parent that never got its
             // COMPLETED save, and the next tick's re-split would then hit the children's own
             // UNIQUE (window_start, window_end) constraint instead of surfacing the real failure.
-            int upserted = ingest(vulnerabilities);
+            int upserted;
+            try {
+                upserted = ingest(vulnerabilities);
+            } catch (Exception e) {
+                return failChunk(chunk, e);
+            }
             splitChunk(chunk, totalResults, upserted, now);
-            return new ChunkStepOutcome(upserted, true);
+            return new ChunkStepOutcome(upserted, true, true);
         }
 
-        int upserted = ingest(vulnerabilities);
+        int upserted;
+        try {
+            upserted = ingest(vulnerabilities);
+        } catch (Exception e) {
+            return failChunk(chunk, e);
+        }
         int fetched = vulnerabilities.size();
         chunk.setTotalResults(totalResults);
         chunk.setUpsertedCount(chunk.getUpsertedCount() + upserted);
@@ -394,6 +457,21 @@ public class NvdCveSyncService {
         }
         nvdCveSyncChunkRepository.save(chunk);
         return new ChunkStepOutcome(upserted, finished);
+    }
+
+    /** Marks {@code chunk} {@code FAILED} the same way a fetch failure does (sanitized error via
+     *  {@link #describeError}, saved, budget already consumed by the caller) — shared by the fetch
+     *  failure path and both {@link #ingest} call sites in {@link #processChunkStep} (closed-mode
+     *  backlog item 202, REVISE round 2, point A). Before this, an exception thrown by {@code
+     *  ingest} (as opposed to a fetch failure) propagated straight out of {@link #processChunkStep},
+     *  uncaught, aborting the *entire* run's remaining budget mid-tick — and since {@code
+     *  next_start_index} is never persisted on that path, the next tick hit the exact same page and
+     *  failed identically, permanently stalling the whole chunk queue (not just this one chunk). */
+    private ChunkStepOutcome failChunk(NvdCveSyncChunk chunk, Exception e) {
+        chunk.setStatus(NvdCveSyncChunkStatus.FAILED);
+        chunk.setLastError(describeError(e));
+        nvdCveSyncChunkRepository.save(chunk);
+        return new ChunkStepOutcome(0, true);
     }
 
     /** One fetch outcome: either a parsed JSON body, or a sanitized error description (see {@link

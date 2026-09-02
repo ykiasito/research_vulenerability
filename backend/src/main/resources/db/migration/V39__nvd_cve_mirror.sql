@@ -63,8 +63,10 @@ CREATE TABLE nvd_cve_sync_chunk (
     -- as a successful page, or a single misbehaving chunk could starve every other chunk's progress
     -- for the rest of the run.
     attempt_count     INT NOT NULL DEFAULT 0,
-    -- Sanitized only: HTTP status code + exception class name + a short message. Must never contain
-    -- the raw API response body or the request URL/query string -- see NvdCveSyncService's fetch
+    -- Sanitized only: HTTP status code + exception class name. Exception messages are deliberately
+    -- excluded entirely (not truncated, not included at all) -- several RestClientException
+    -- subclasses embed the request URL in getMessage(), and this column must never carry that,
+    -- the raw API response body, or the request URL/query string -- see NvdCveSyncService's fetch
     -- error handling for why (this repo has an actual incident history of a real credential ending
     -- up in a persisted column meant for something else; a future keyed run must not repeat that
     -- via this column carrying an apiKey-bearing URL or header dump).
