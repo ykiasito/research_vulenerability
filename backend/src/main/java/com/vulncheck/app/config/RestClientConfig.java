@@ -241,6 +241,27 @@ public class RestClientConfig {
     }
 
     /**
+     * For the Hex.pm mirror sync (closed-mode backlog item 176, Hex rollout, {@code
+     * HexMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient} and the
+     * other {@code *SyncRestClient} beans above. {@code hex.pm} is served through Fastly with no
+     * redirect chain observed against real package lookups (confirmed live 2026-09-02 against
+     * jason/phoenix), so a plain {@link #simpleRequestFactory} (auto-follow redirects) is enough
+     * here, matching {@link #cratesIoSyncRestClient}'s/{@link #rubyGemsSyncRestClient}'s reasoning
+     * for their own equivalent static-index targets.
+     */
+    @Bean
+    public RestClient hexSyncRestClient() {
+        SimpleClientHttpRequestFactory requestFactory =
+                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
+        return RestClient.builder()
+                .requestFactory(requestFactory)
+                .defaultHeader("User-Agent", "vulncheck-server/0.1 (hex mirror sync)")
+                .build();
+    }
+
+    /**
      * Points at the Python LLM microservice (Stage1 Tier2/Tier3, Stage4). Longer read timeout
      * than the external-API client — a web_search-enabled Claude call can take well over 10s.
      */
