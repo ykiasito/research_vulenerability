@@ -6,6 +6,10 @@ name: closed-mode drift check (branch-triggered)
 # 自動マージ戦略の常用は禁止されているため)。ドリフトが検知された場合の
 # 対応(closed-modeブランチへのmerge)は引き続き人手で行うこと。
 #
+# 注記(§3-2の例外): closed-modeブランチは本来「削除のみ・足さない」が原則だが、
+# このワークフロー自体はその不変条件を可視化するためのCI成果物であり、
+# §3-6が閉域ブランチ専用の検証手段を要求しているため、明示的な例外として追加する。
+#
 # セキュリティSLA(運用規律、このワークフローでは自動判定しない):
 # masterに入ったセキュリティ関連修正(依存パッケージのCVE pin、認証/認可、
 # SSRF対策、シークレット関連の修正など)は、検知を待たず48時間以内に
@@ -20,19 +24,34 @@ name: closed-mode drift check (branch-triggered)
 # 失敗させない。7日以上経過している場合のみワークフローを失敗させる。
 # (このロジック自体は `master` 側の同名ワークフローと同一。)
 #
-# `master`側の同名ワークフローとの関係(重要): `master`側にも同じファイル名の
-# ワークフローが存在し(`schedule`トリガーで毎日、`ref: closed-mode`を明示
-# checkoutして同じ判定を行う)、二重に見えるが役割は異なる。
+# `master`側の同名ワークフロー(`closed-mode-drift-check.yml`)との関係
+# (重要): GitHub Actionsはワークフローを「ブランチ」ではなく「リポジトリ内の
+# ファイルパス」単位で識別する。そのため`master`側にも`closed-mode`側にも
+# `.github/workflows/closed-mode-drift-check.yml`という同一パスのファイルが
+# 存在すると、ブランチが違っても両者は同一`workflow_id`に解決され、
+# 有効/無効の状態まで共有する単一のワークフローエンティティになってしまう
+# (「別ブランチ上のファイルだから実行は独立している」という前提は誤り、
+# 2026-09-02のsenior-reviewer指摘で判明)。このファイルを
+# `closed-mode-drift-check-branch.yml`という別名にしているのは、UI上の
+# 見分けやすさのためではなく、パス衝突そのものを回避して別エンティティに
+# するための必須の対処。
+#
+# 次回、master -> closed-mode の同期マージで`master`側の
+# `closed-mode-drift-check.yml`(`schedule`トリガー、毎日`ref: closed-mode`を
+# 明示checkoutして同じ判定を行う)がclosed-modeへ到着したときの対処:
 # `schedule`トリガーはデフォルトブランチ上のワークフロー定義でのみ発火する
-# (GitHub Actionsの既知の仕様)ため、closed-modeブランチにこのファイルを
-# 置いても`schedule`は発火しない。そのためこちらのブランチ側コピーは
-# `schedule`を持たず、代わりにclosed-modeへのpush/pull_requestをトリガーに
-# する(closed-mode-architecture-gate.ymlと同じパターン)。これにより
+# (GitHub Actionsの既知の仕様)ため、closed-modeブランチに置いても
+# `schedule`は発火せず死んだ設定になる。したがって同期マージ時に
+# `closed-mode-drift-check.yml`は削除してよい(§3-2の「masterからの差分は
+# 削除のみ」不変条件の範囲内の操作)。このファイル
+# (`closed-mode-drift-check-branch.yml`)は残すこと。`master`側のファイルで
+# このファイルを上書き・置き換える形で「解決」しないこと(push/pull_request
+# トリガーの経路が失われる)。
+#
+# `closed-mode-architecture-gate.yml`と同じパターンで、`schedule`を持たず
+# 代わりにclosed-modeへのpush/pull_requestをトリガーにする。これにより
 # 「push/PRのたびに即座に確認する」経路と「毎日必ず一度確認する」経路の
 # 二経路になり、互いの穴を補完する(closed-mode backlog item 206)。
-# ジョブ名・ワークフロー名は`master`側と衝突しないよう変えている
-# (別ブランチ上のファイルなので実行自体はそもそも独立しているが、
-# GitHub ActionsのUI上の一覧で見分けやすくするため)。
 
 on:
   pull_request:
