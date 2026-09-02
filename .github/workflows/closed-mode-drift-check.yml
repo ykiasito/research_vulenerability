@@ -1,0 +1,93 @@
+name: closed-mode drift check (branch-triggered)
+
+# 目的: master -> closed-mode の一方向mergeが遅延していないかを可視化する。
+# このワークフローは「取りこぼしの検知・可視化」のみを行う。
+# 自動マージ・自動衝突解決は一切行わない(closed-modeロールアウト計画で
+# 自動マージ戦略の常用は禁止されているため)。ドリフトが検知された場合の
+# 対応(closed-modeブランチへのmerge)は引き続き人手で行うこと。
+#
+# セキュリティSLA(運用規律、このワークフローでは自動判定しない):
+# masterに入ったセキュリティ関連修正(依存パッケージのCVE pin、認証/認可、
+# SSRF対策、シークレット関連の修正など)は、検知を待たず48時間以内に
+# closed-modeへmergeすること。「セキュリティ関連かどうか」の分類は
+# 自動化が難しい人手判断のため、このワークフローの対象外としている。
+#
+# 判定ロジック: master側にあってclosed-mode側に無いコミットのうち、
+# 最も古い(=最初に取り込み漏れになった)コミットの日時を基準に、
+# 現在時刻からの経過日数を計算する。コミット「数」ではなく経過「日数」で
+# 判定する(同期作業中に一時的にコミット数が増えること自体は異常ではないため)。
+# 経過日数が7日未満の場合は、まだ同期作業中である可能性があるため
+# 失敗させない。7日以上経過している場合のみワークフローを失敗させる。
+# (このロジック自体は `master` 側の同名ワークフローと同一。)
+#
+# `master`側の同名ワークフローとの関係(重要): `master`側にも同じファイル名の
+# ワークフローが存在し(`schedule`トリガーで毎日、`ref: closed-mode`を明示
+# checkoutして同じ判定を行う)、二重に見えるが役割は異なる。
+# `schedule`トリガーはデフォルトブランチ上のワークフロー定義でのみ発火する
+# (GitHub Actionsの既知の仕様)ため、closed-modeブランチにこのファイルを
+# 置いても`schedule`は発火しない。そのためこちらのブランチ側コピーは
+# `schedule`を持たず、代わりにclosed-modeへのpush/pull_requestをトリガーに
+# する(closed-mode-architecture-gate.ymlと同じパターン)。これにより
+# 「push/PRのたびに即座に確認する」経路と「毎日必ず一度確認する」経路の
+# 二経路になり、互いの穴を補完する(closed-mode backlog item 206)。
+# ジョブ名・ワークフロー名は`master`側と衝突しないよう変えている
+# (別ブランチ上のファイルなので実行自体はそもそも独立しているが、
+# GitHub ActionsのUI上の一覧で見分けやすくするため)。
+
+on:
+  pull_request:
+    branches:
+      - closed-mode
+  push:
+    branches:
+      - closed-mode
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check-branch-triggered:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch origin/master history
+        run: git fetch origin master:refs/remotes/origin/master
+
+      - name: Evaluate drift (commit count + oldest un-merged commit age)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          behind_count=$(git rev-list --count HEAD..origin/master)
+          echo "closed-mode is behind origin/master by ${behind_count} commit(s)"
+
+          if [ "${behind_count}" -eq 0 ]; then
+            echo "No drift. closed-mode is up to date with origin/master."
+            exit 0
+          fi
+
+          # HEAD(closed-mode側の今回のイベント対象)..origin/master は
+          # origin/master 側にあって closed-mode 側に無いコミット一覧
+          # (新しい順)。末尾が最も古い、つまり最初に取り込み漏れになった
+          # コミット。
+          oldest_unmerged_sha=$(git rev-list HEAD..origin/master | tail -n 1)
+          oldest_commit_date=$(git log -1 --format=%cI "${oldest_unmerged_sha}")
+
+          now_epoch=$(date -u +%s)
+          commit_epoch=$(date -u -d "${oldest_commit_date}" +%s)
+          days_elapsed=$(( (now_epoch - commit_epoch) / 86400 ))
+
+          echo "Oldest un-merged commit: ${oldest_unmerged_sha} (${oldest_commit_date})"
+          echo "Days elapsed since oldest un-merged commit: ${days_elapsed}"
+
+          if [ "${days_elapsed}" -ge 7 ]; then
+            echo "::error::closed-mode has been drifting for ${days_elapsed} day(s) since commit ${oldest_unmerged_sha} (>= 7-day threshold). Please merge master into closed-mode."
+            exit 1
+          fi
+
+          echo "Drift exists (${behind_count} commit(s) behind) but within the 7-day grace period (${days_elapsed} day(s) elapsed). Not failing yet."
