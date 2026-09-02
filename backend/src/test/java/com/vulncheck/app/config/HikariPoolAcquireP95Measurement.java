@@ -50,21 +50,24 @@ import org.springframework.test.context.TestPropertySource;
  * create another 1,000-item job and kick off a real 9-ecosystem registry sync against the real dev
  * DB on every {@code mvn test} run. Re-enable deliberately (remove the annotation, run once by
  * hand, re-add it) rather than leaving it on.
+ *
+ * <p>To run: temporarily remove the {@code @Disabled} annotation, then invoke {@code mvn test
+ * -Dtest=HikariPoolAcquireP95Measurement} with {@code POSTGRES_PASSWORD} set in the environment
+ * (see the {@code @TestPropertySource} password entry below).
  */
 @SpringBootTest
 @TestPropertySource(properties = {
         "spring.datasource.url=jdbc:postgresql://postgres:5432/vulncheck",
         "spring.datasource.username=vulncheck",
-        "spring.datasource.password=vulncheck",
+        // Resolved from the real POSTGRES_PASSWORD env var passed to this docker run invocation
+        // (e.g. `docker run --env-file .env ...`) rather than a literal value checked into source.
+        "spring.datasource.password=${POSTGRES_PASSWORD}",
         "spring.datasource.hikari.maximum-pool-size=20"
 })
 @Disabled("Live job-creating, real-network @SpringBootTest that would create another 1,000-item "
         + "job and trigger a real registry mirror sync against the real dev DB on every mvn test "
-        + "invocation. Re-enable deliberately, by hand, never left on — see class javadoc. NOTE "
-        + "(2026-09-03): the hardcoded password above (same literal as "
-        + "OsvBaselineSyncRealDevDbJobCreator) no longer authenticates against the real dev DB as "
-        + "of this writing — confirm/update the real credential (see this project's standing "
-        + "\"always confirm before using real credentials\" rule) before the next run.")
+        + "invocation. Re-enable deliberately, by hand, never left on — see class javadoc. Requires "
+        + "POSTGRES_PASSWORD to be passed in the environment (e.g. via --env-file) when run.")
 class HikariPoolAcquireP95Measurement {
 
     private static final Long REAL_USER_ID = 5L;
@@ -125,11 +128,18 @@ class HikariPoolAcquireP95Measurement {
         Instant start = Instant.now();
         researchJobProcessingService.processJobAsync(jobId);
 
+        Duration waitTimeout = Duration.ofHours(3);
+        String lastStatus = null;
         while (true) {
             ResearchJob current = researchJobRepository.findById(jobId).orElseThrow();
-            if (ResearchJob.STATUS_COMPLETED.equals(current.getStatus())
-                    || ResearchJob.STATUS_FAILED.equals(current.getStatus())) {
+            lastStatus = current.getStatus();
+            if (ResearchJob.STATUS_COMPLETED.equals(lastStatus)
+                    || ResearchJob.STATUS_FAILED.equals(lastStatus)) {
                 break;
+            }
+            if (Duration.between(start, Instant.now()).compareTo(waitTimeout) > 0) {
+                throw new IllegalStateException("Job " + jobId + " did not reach a terminal status "
+                        + "within " + waitTimeout + " (current status: " + lastStatus + ")");
             }
             Thread.sleep(2000);
         }
