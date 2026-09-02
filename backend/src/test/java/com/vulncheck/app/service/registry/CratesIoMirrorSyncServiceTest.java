@@ -97,6 +97,33 @@ class CratesIoMirrorSyncServiceTest {
     }
 
     @Test
+    void rejectsATraversalShapedPackageNameWithoutAnyHttpCallAndCountsItAsUnresolved() {
+        // Closed-mode backlog item 184: a name whose length would map to a real sparse-index path
+        // (see sparseIndexPathFollowsTheConfirmedLiveConvention below) but that also contains a ".."
+        // segment must never reach the HTTP client.
+        SyncOutcome outcome = service.syncPackages(List.of(".."));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("crates.io"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
+
+    @Test
+    void rejectsAPackageNameWithDisallowedCharactersWithoutAnyHttpCallAndCountsItAsUnresolved() {
+        SyncOutcome outcome = service.syncPackages(List.of("serde;rm -rf"));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("crates.io"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
+
+    @Test
     void sparseIndexPathFollowsTheConfirmedLiveConvention() {
         assertThat(CratesIoMirrorSyncService.sparseIndexPath("x")).isEqualTo("1/x");
         assertThat(CratesIoMirrorSyncService.sparseIndexPath("io")).isEqualTo("2/io");
