@@ -1,6 +1,7 @@
 package com.vulncheck.app.controller;
 
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -123,5 +124,34 @@ class AdminControllerSecurityTest {
     void adminUserIsAllowedThroughToRegistryMirrorSync() throws Exception {
         mockMvc.perform(post("/admin/registry-mirror/sync-all").with(csrf()))
                 .andExpect(status().is2xxSuccessful());
+    }
+
+    /** Same {@code /admin/**} -> {@code hasRole("ADMIN")} rule, exercised against the new NVD CVE
+     *  mirror admin routes (closed-mode backlog item 202): the status/trigger form ({@code GET
+     *  /admin/nvd-cve}) and its manual sync trigger ({@code POST /admin/nvd-cve/sync-now}). */
+    @Test
+    void unauthenticatedRequestToNvdCveFormIsRedirectedToLogin() throws Exception {
+        mockMvc.perform(get("/admin/nvd-cve"))
+                .andExpect(status().is3xxRedirection());
+    }
+
+    @Test
+    @WithMockUser(roles = "USER")
+    void authenticatedNonAdminUserIsForbiddenFromNvdCveForm() throws Exception {
+        mockMvc.perform(get("/admin/nvd-cve"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void unauthenticatedRequestToNvdCveSyncNowIsRedirectedToLogin() throws Exception {
+        mockMvc.perform(post("/admin/nvd-cve/sync-now").with(csrf()))
+                .andExpect(status().is3xxRedirection());
+    }
+
+    @Test
+    @WithMockUser(roles = "USER")
+    void authenticatedNonAdminUserIsForbiddenFromNvdCveSyncNow() throws Exception {
+        mockMvc.perform(post("/admin/nvd-cve/sync-now").with(csrf()))
+                .andExpect(status().isForbidden());
     }
 }
