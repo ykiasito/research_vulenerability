@@ -541,4 +541,42 @@ class NvdCveSyncServiceTest {
                         + "chunk queue seed time and this first delta tick")
                 .isEqualTo(baselineStartedAt.minus(Duration.ofHours(2)));
     }
+
+    /** Closed-mode backlog item 202, REVISE round 2, point B: a delta window whose cursor falls back
+     *  to a {@code baseline_started_at} more than {@code WINDOW_DAYS} (120) in the past must have its
+     *  {@code window_end} clamped, not left open-ended out to {@code now} -- an uncapped range this
+     *  wide exceeds NVD's documented {@code lastModStartDate}/{@code lastModEndDate} max span, and
+     *  since a rejected request never advances {@code last_delta_synced_at}, every later tick would
+     *  recompute the exact same oversized window and fail identically forever. */
+    @Test
+    void deltaTickClampsAWindowExceedingNvdsHundredTwentyDayRangeCap() {
+        NvdCveSyncState state = freshState();
+        state.setBaselineCompleted(true);
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        OffsetDateTime baselineStartedAt = now.minusDays(200);
+        state.setBaselineStartedAt(baselineStartedAt);
+        when(stateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(pageJson(0, "[]"), MediaType.APPLICATION_JSON));
+
+        service.runDeltaTickAndRelease(Optional.empty(), new RunBudget(5, Duration.ofMinutes(5)));
+
+        syncServer.verify();
+        OffsetDateTime expectedWindowStart = baselineStartedAt.minus(Duration.ofHours(2));
+        OffsetDateTime expectedWindowEnd = expectedWindowStart.plusDays(120);
+
+        ArgumentCaptor<NvdCveSyncChunk> captor = ArgumentCaptor.forClass(NvdCveSyncChunk.class);
+        verify(chunkRepository, atLeastOnce()).save(captor.capture());
+        NvdCveSyncChunk enqueuedChunk = captor.getAllValues().get(0);
+        assertThat(enqueuedChunk.getWindowEnd())
+                .as("window_end must be clamped to window_start + 120 days, not left open to now")
+                .isEqualTo(expectedWindowEnd)
+                .isBefore(now);
+
+        assertThat(state.getLastDeltaSyncedAt())
+                .as("the high-water mark must advance only to the clamped window end, not all the "
+                        + "way to now -- otherwise the clamped-off tail of the range is silently "
+                        + "never synced")
+                .isEqualTo(expectedWindowEnd);
+    }
 }

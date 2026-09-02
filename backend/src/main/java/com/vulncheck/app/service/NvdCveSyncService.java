@@ -223,9 +223,19 @@ public class NvdCveSyncService {
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         OffsetDateTime cursor = resolveDeltaCursor(state, now);
+        OffsetDateTime windowStart = cursor.minus(DELTA_SAFETY_MARGIN);
+        // Clamp to NVD's 120-day lastModStartDate/lastModEndDate cap (closed-mode backlog item 202,
+        // REVISE round 2, point B): resolveDeltaCursor can fall back to baseline_started_at (the
+        // very first delta tick, or one resumed after a long backfill-disabled gap), which can put
+        // windowStart more than WINDOW_DAYS behind now. An uncapped [windowStart, now) window in
+        // that case exceeds NVD's documented max range, NVD rejects the request outright, and
+        // because last_delta_synced_at never advances on a rejected request, every subsequent tick
+        // would recompute the exact same oversized window and fail identically forever.
+        OffsetDateTime uncappedWindowEnd = windowStart.plusDays(WINDOW_DAYS);
+        OffsetDateTime windowEnd = uncappedWindowEnd.isBefore(now) ? uncappedWindowEnd : now;
         NvdCveSyncChunk chunk = new NvdCveSyncChunk();
-        chunk.setWindowStart(cursor.minus(DELTA_SAFETY_MARGIN));
-        chunk.setWindowEnd(now);
+        chunk.setWindowStart(windowStart);
+        chunk.setWindowEnd(windowEnd);
         chunk.setStatus(NvdCveSyncChunkStatus.PENDING);
         nvdCveSyncChunkRepository.save(chunk);
 
@@ -242,7 +252,11 @@ public class NvdCveSyncService {
         }
 
         if (chunkFinished && chunk.getStatus() == NvdCveSyncChunkStatus.COMPLETED) {
-            state.setLastDeltaSyncedAt(now);
+            // The window actually processed (windowEnd), not now: when the window above got
+            // clamped, now is past the point this tick actually synced up to, and advancing the
+            // high-water mark to now would silently drop the clamped-off tail of the range on every
+            // future tick (closed-mode backlog item 202, REVISE round 2, point B).
+            state.setLastDeltaSyncedAt(windowEnd);
             state.setUpdatedAt(now);
             nvdCveSyncStateRepository.save(state);
         }
