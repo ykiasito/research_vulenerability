@@ -596,10 +596,8 @@ public class Stage1IdentificationService {
      * Reduces a registry package name to its one meaningful identifying segment before it's used as
      * a containment query — e.g. a Maven coordinate ({@code "com.google.guava:guava"}) or a Go
      * module path ({@code "github.com/gin-gonic/gin"}) is mostly non-identity-bearing groupId/host
-     * scaffolding (see {@link RegistryRoutingPolicy#stripHostPrefix} and {@link
-     * com.vulncheck.app.service.registry.MavenCentralRegistryClient}'s own groupId/artifactId split
-     * for the same reasoning applied elsewhere), and running the *whole* coordinate through
-     * containment would spuriously fail on
+     * scaffolding (see {@link RegistryRoutingPolicy#stripHostPrefix} for the same reasoning applied
+     * elsewhere), and running the *whole* coordinate through containment would spuriously fail on
      * that scaffolding the same way Fix 1/3 had to correct for it on the query side.
      */
     private String lastMeaningfulPackageSegment(String packageName) {

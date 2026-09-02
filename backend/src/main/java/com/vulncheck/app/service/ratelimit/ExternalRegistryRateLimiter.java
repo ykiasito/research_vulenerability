@@ -12,9 +12,8 @@ import org.springframework.stereotype.Component;
 /**
  * Paces every registry lookup, process-wide, against each individual public registry's own
  * acceptable-use limit — one independent gate per ecosystem, not a single shared gate, so waiting
- * on one registry never delays a concurrent call to a different one (Stage1's registry fan-out,
- * see {@code registryLookupExecutor}, is deliberately parallel *across* ecosystems; this only
- * serializes repeated calls to the *same* one, including a single client's own internal retries).
+ * on one registry never delays a concurrent call to a different one; this only serializes repeated
+ * calls to the *same* one, including a single client's own internal retries.
  *
  * <p>Added 2026-08-24 after the registry-lookup parallelization (up to 10 concurrent registries
  * per item, no per-item pacing across an entire job) turned out to have no rate limiting at all
@@ -23,11 +22,19 @@ import org.springframework.stereotype.Component;
  * https://crates.io/data-access) that this app's own {@code CratesIoRegistryClient} could easily
  * have burst past, and Maven Central has begun actively rate-limiting/temporarily-blocking
  * high-volume/bot-like traffic patterns (https://central.sonatype.org/faq/429-error/) — exactly
- * the shape of traffic {@code MavenCentralRegistryClient} can produce on a single pathological
- * item (up to 31 requests) with zero pacing between them. The remaining registries have no
- * published number as of 2026-08 (Hex.pm documents 100 req/min/IP; npm/PyPI/NuGet/RubyGems/
- * Packagist/pub.dev/the Go proxy don't publish a fixed one) — a conservative default is used for
- * those rather than assuming unlimited.
+ * the shape of traffic {@code MavenCentralRegistryClient} could produce on a single pathological
+ * item (up to 31 requests) with zero pacing between them, back when that lookup was still live.
+ * The remaining registries have no published number as of 2026-08 (Hex.pm documents 100 req/min/IP;
+ * npm/PyPI/NuGet/RubyGems/Packagist/pub.dev/the Go proxy don't publish a fixed one) — a
+ * conservative default is used for those rather than assuming unlimited.
+ *
+ * <p>Closed-mode backlog item 193 (B3, {@code docs/spec/closed-mode-plan.md} §3-2): none of the
+ * per-item Stage1 registry lookups call {@link #awaitTurn} anymore (each {@code *RegistryClient}
+ * answers from a local mirror table instead — {@code MavenCentralRegistryClient} has no mirror at
+ * all and is gutted to a fixed no-op, see its own javadoc). The remaining callers are the
+ * {@code *MirrorSyncService} classes' own periodic live fetches that populate those mirrors, and
+ * the CSAF vendor advisory sync services — this class's per-ecosystem pacing still matters for
+ * both, just no longer for a live per-item lookup.
  *
  * <p><b>{@code Thread.sleep} deliberately happens outside each ecosystem's lock</b> ({@link
  * #reserveSlot} only books the next-allowed slot under the lock, then returns) — sleeping while
