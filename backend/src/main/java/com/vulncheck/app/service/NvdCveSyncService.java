@@ -375,12 +375,22 @@ public class NvdCveSyncService {
             // after could leave two persisted children behind a parent that never got its
             // COMPLETED save, and the next tick's re-split would then hit the children's own
             // UNIQUE (window_start, window_end) constraint instead of surfacing the real failure.
-            int upserted = ingest(vulnerabilities);
+            int upserted;
+            try {
+                upserted = ingest(vulnerabilities);
+            } catch (Exception e) {
+                return failChunk(chunk, e);
+            }
             splitChunk(chunk, totalResults, upserted, now);
             return new ChunkStepOutcome(upserted, true);
         }
 
-        int upserted = ingest(vulnerabilities);
+        int upserted;
+        try {
+            upserted = ingest(vulnerabilities);
+        } catch (Exception e) {
+            return failChunk(chunk, e);
+        }
         int fetched = vulnerabilities.size();
         chunk.setTotalResults(totalResults);
         chunk.setUpsertedCount(chunk.getUpsertedCount() + upserted);
@@ -394,6 +404,21 @@ public class NvdCveSyncService {
         }
         nvdCveSyncChunkRepository.save(chunk);
         return new ChunkStepOutcome(upserted, finished);
+    }
+
+    /** Marks {@code chunk} {@code FAILED} the same way a fetch failure does (sanitized error via
+     *  {@link #describeError}, saved, budget already consumed by the caller) — shared by the fetch
+     *  failure path and both {@link #ingest} call sites in {@link #processChunkStep} (closed-mode
+     *  backlog item 202, REVISE round 2, point A). Before this, an exception thrown by {@code
+     *  ingest} (as opposed to a fetch failure) propagated straight out of {@link #processChunkStep},
+     *  uncaught, aborting the *entire* run's remaining budget mid-tick — and since {@code
+     *  next_start_index} is never persisted on that path, the next tick hit the exact same page and
+     *  failed identically, permanently stalling the whole chunk queue (not just this one chunk). */
+    private ChunkStepOutcome failChunk(NvdCveSyncChunk chunk, Exception e) {
+        chunk.setStatus(NvdCveSyncChunkStatus.FAILED);
+        chunk.setLastError(describeError(e));
+        nvdCveSyncChunkRepository.save(chunk);
+        return new ChunkStepOutcome(0, true);
     }
 
     /** One fetch outcome: either a parsed JSON body, or a sanitized error description (see {@link

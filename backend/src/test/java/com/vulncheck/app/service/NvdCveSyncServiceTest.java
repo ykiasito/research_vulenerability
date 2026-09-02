@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -436,6 +437,49 @@ class NvdCveSyncServiceTest {
         assertThat(secondTick.completed()).isTrue();
         assertThat(chunk.getStatus()).isEqualTo(NvdCveSyncChunkStatus.COMPLETED);
         assertThat(chunk.getNextStartIndex()).isEqualTo(2500);
+    }
+
+    /** Closed-mode backlog item 202, REVISE round 2, point A: an exception thrown by {@code ingest}
+     *  (as opposed to a fetch failure) must fail *that* chunk only, exactly like a fetch failure
+     *  does -- not propagate out of {@code processChunkStep} uncaught and abort the whole tick's
+     *  remaining budget (which, since {@code next_start_index} is never persisted on that path,
+     *  would leave the chunk permanently re-fetching and re-failing on this exact same page). */
+    @Test
+    void backfillTickFailsAChunkWhoseIngestThrowsButStillProcessesTheNextChunk() {
+        when(chunkRepository.count()).thenReturn(1L);
+        OffsetDateTime start1 = OffsetDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+        NvdCveSyncChunk chunk1 = pendingChunk(start1, start1.plusDays(120));
+        OffsetDateTime start2 = start1.plusDays(120);
+        NvdCveSyncChunk chunk2 = pendingChunk(start2, start2.plusDays(120));
+        chunk2.setId(2L);
+        when(chunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED))
+                .thenReturn(List.of(chunk1, chunk2));
+        when(chunkRepository.countByStatusNot(NvdCveSyncChunkStatus.COMPLETED)).thenReturn(1L);
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(pageJson(1, oneVulnerabilityJson("CVE-2023-0010")), MediaType.APPLICATION_JSON));
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(pageJson(1, oneVulnerabilityJson("CVE-2023-0011")), MediaType.APPLICATION_JSON));
+        // The first chunk's page fetches fine -- the downstream upsert is what throws -- and this
+        // must fail only that chunk, not abort the tick before the second chunk is ever attempted.
+        doThrow(new RuntimeException("simulated upsert failure"))
+                .doNothing()
+                .when(recordRepository).upsertBatch(anyList());
+
+        SyncOutcome outcome = service.runBackfillTickAndRelease(Optional.empty(), new RunBudget(5, Duration.ofMinutes(5)));
+
+        syncServer.verify();
+        assertThat(outcome.upserted())
+                .as("the failed chunk's page contributes nothing; the second chunk's page still counts")
+                .isEqualTo(1);
+        assertThat(chunk1.getStatus()).isEqualTo(NvdCveSyncChunkStatus.FAILED);
+        assertThat(chunk1.getLastError())
+                .as("must record the exception class only, never its message (which could embed a URL)")
+                .contains("RuntimeException")
+                .doesNotContain("simulated upsert failure");
+        assertThat(chunk2.getStatus())
+                .as("the second chunk must still be processed even though the first chunk's ingest threw")
+                .isEqualTo(NvdCveSyncChunkStatus.COMPLETED);
+        verify(recordRepository, times(2)).upsertBatch(anyList());
     }
 
     // --- delta sync (shares the same per-chunk executor) --------------------------------------
