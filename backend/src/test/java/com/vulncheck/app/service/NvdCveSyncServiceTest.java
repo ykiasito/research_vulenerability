@@ -1,10 +1,14 @@
 package com.vulncheck.app.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -12,6 +16,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
@@ -62,8 +67,12 @@ class NvdCveSyncServiceTest {
         chunkRepository = mock(NvdCveSyncChunkRepository.class);
         recordRepository = mock(NvdCveRecordRepository.class);
         cpeMatchRepository = mock(NvdCveCpeMatchRepository.class);
+        // The real split service, backed by the same mocked chunkRepository -- not a mock itself --
+        // so tests can assert against chunkRepository's actual save/exists calls (including the
+        // idempotent-split behavior it's responsible for) exactly as if it were wired by Spring.
+        NvdCveSyncChunkSplitService chunkSplitService = new NvdCveSyncChunkSplitService(chunkRepository);
         service = new NvdCveSyncService(syncClientBuilder.build(), new NvdRateLimiter(), stateRepository,
-                chunkRepository, recordRepository, cpeMatchRepository);
+                chunkRepository, recordRepository, cpeMatchRepository, chunkSplitService);
 
         when(stateRepository.findById((short) 1)).thenReturn(Optional.of(freshState()));
     }
@@ -95,6 +104,31 @@ class NvdCveSyncServiceTest {
                 + "\"metrics\":{\"cvssMetricV31\":[{\"cvssData\":{\"baseScore\":9.8,\"baseSeverity\":\"CRITICAL\"}}]},"
                 + "\"configurations\":[{\"nodes\":[{\"cpeMatch\":[{\"vulnerable\":true,"
                 + "\"criteria\":\"cpe:2.3:a:acme:widget:*:*:*:*:*:*:*:*\",\"versionEndExcluding\":\"2.0.0\"}]}]}]}}]";
+    }
+
+    /** Same shape as {@link #oneVulnerabilityJson}, but a bare (non-array) fragment and with the
+     *  {@code lastModified} field optional -- lets a single page mix a normal CVE with one missing
+     *  {@code lastModified} entirely. */
+    private String vulnerabilityFragment(String cveId, boolean includeLastModified) {
+        String lastModifiedField = includeLastModified ? "\"lastModified\":\"2023-06-01T00:00:00.000\"," : "";
+        return "{\"cve\":{\"id\":\"" + cveId + "\",\"published\":\"2023-01-01T00:00:00.000\"," + lastModifiedField
+                + "\"descriptions\":[{\"lang\":\"en\",\"value\":\"An example vulnerability.\"}],"
+                + "\"metrics\":{\"cvssMetricV31\":[{\"cvssData\":{\"baseScore\":9.8,\"baseSeverity\":\"CRITICAL\"}}]}}}";
+    }
+
+    /** A bare-bones {@code vulnerabilities} array of {@code count} entries, each with only an id
+     *  and a {@code lastModified} -- used for pagination tests where the exact contents of each
+     *  entry don't matter, only that there are enough of them to force a second page. */
+    private String manyVulnerabilitiesJson(int count, String cveIdPrefix) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append("{\"cve\":{\"id\":\"").append(cveIdPrefix).append(i)
+                    .append("\",\"lastModified\":\"2023-06-01T00:00:00.000\"}}");
+        }
+        return sb.append(']').toString();
     }
 
     // --- single-run guard -----------------------------------------------------------------
@@ -209,6 +243,45 @@ class NvdCveSyncServiceTest {
         assertThat(match.versionEndExcluding()).isEqualTo("2.0.0");
     }
 
+    /** Closed-mode backlog item 202, REVISE round 1, point 1: a CVE missing {@code lastModified}
+     *  (or with an unparseable one) must be skipped, not allowed to blow up the whole page's batch
+     *  upsert via {@code nvd_cve_records.last_modified_at}'s {@code NOT NULL} constraint -- which
+     *  would otherwise leave the chunk re-fetching (and re-failing on) this exact page forever. */
+    @Test
+    void ingestSkipsACveWithMissingLastModifiedButStillIngestsTheRestOfThePageAndAdvancesTheChunk() {
+        when(chunkRepository.count()).thenReturn(1L);
+        OffsetDateTime start = OffsetDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+        NvdCveSyncChunk chunk = pendingChunk(start, start.plusDays(120));
+        when(chunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED))
+                .thenReturn(List.of(chunk));
+        when(chunkRepository.countByStatusNot(NvdCveSyncChunkStatus.COMPLETED)).thenReturn(0L);
+        String vulnerabilitiesJson = "[" + vulnerabilityFragment("CVE-2023-0001", true) + ","
+                + vulnerabilityFragment("CVE-2023-9999", false) + "]";
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(pageJson(2, vulnerabilitiesJson), MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.runBackfillTickAndRelease(Optional.empty(), new RunBudget(5, Duration.ofMinutes(5)));
+
+        syncServer.verify();
+        assertThat(outcome.upserted())
+                .as("the CVE missing lastModified must be skipped, not counted as upserted")
+                .isEqualTo(1);
+        assertThat(outcome.completed()).isTrue();
+        assertThat(chunk.getStatus())
+                .as("the chunk must still complete rather than getting stuck re-fetching this page")
+                .isEqualTo(NvdCveSyncChunkStatus.COMPLETED);
+        assertThat(chunk.getNextStartIndex())
+                .as("next_start_index must move past both fetched records (including the skipped "
+                        + "one) so the next tick doesn't refetch this exact same page")
+                .isEqualTo(2);
+
+        ArgumentCaptor<List<NvdCveRecordRepository.Row>> recordsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(recordRepository).upsertBatch(recordsCaptor.capture());
+        assertThat(recordsCaptor.getValue())
+                .extracting(NvdCveRecordRepository.Row::cveId)
+                .containsExactly("CVE-2023-0001");
+    }
+
     @Test
     void backfillTickMarksAChunkFailedOnAFetchErrorWithoutLeakingTheUrlOrResponseBody() {
         when(chunkRepository.count()).thenReturn(1L);
@@ -268,6 +341,39 @@ class NvdCveSyncServiceTest {
                     assertThat(c.getWindowStart()).isEqualTo(mid);
                     assertThat(c.getWindowEnd()).isEqualTo(end);
                 });
+    }
+
+    /** Closed-mode backlog item 202, REVISE round 1, point 2: {@code splitChunk} must be idempotent
+     *  -- a parent window re-selected and re-split a second time (e.g. a retried tick after an
+     *  earlier attempt crashed between committing the children and completing the parent) must not
+     *  throw ({@code UNIQUE (window_start, window_end)}) or create duplicate child chunks. */
+    @Test
+    void splittingTheSameWindowTwiceDoesNotDuplicateChildChunksOrThrow() {
+        when(chunkRepository.count()).thenReturn(1L);
+        OffsetDateTime start = OffsetDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+        OffsetDateTime end = start.plusDays(120);
+        OffsetDateTime mid = start.plus(Duration.between(start, end).dividedBy(2));
+        NvdCveSyncChunk chunk = pendingChunk(start, end);
+        when(chunkRepository.findByStatusNotOrderByWindowStartAsc(NvdCveSyncChunkStatus.COMPLETED))
+                .thenReturn(List.of(chunk));
+        when(chunkRepository.countByStatusNot(NvdCveSyncChunkStatus.COMPLETED)).thenReturn(2L);
+        // false on the first check (child doesn't exist yet, gets inserted), true on the second
+        // (the retried split finds it already committed and must skip re-inserting it).
+        when(chunkRepository.existsByWindowStartAndWindowEnd(start, mid)).thenReturn(false, true);
+        when(chunkRepository.existsByWindowStartAndWindowEnd(mid, end)).thenReturn(false, true);
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(pageJson(25_000, oneVulnerabilityJson("CVE-2023-0002")), MediaType.APPLICATION_JSON));
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(pageJson(25_000, oneVulnerabilityJson("CVE-2023-0002")), MediaType.APPLICATION_JSON));
+
+        assertThatCode(() -> {
+            service.runBackfillTickAndRelease(Optional.empty(), new RunBudget(5, Duration.ofMinutes(5)));
+            service.runBackfillTickAndRelease(Optional.empty(), new RunBudget(5, Duration.ofMinutes(5)));
+        }).doesNotThrowAnyException();
+
+        syncServer.verify();
+        // Exactly two child chunks total across both split attempts -- no duplicates from the retry.
+        verify(chunkRepository, times(2)).save(argThat((NvdCveSyncChunk c) -> c != chunk));
     }
 
     @Test

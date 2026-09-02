@@ -2,6 +2,7 @@ package com.vulncheck.app.repository;
 
 import com.vulncheck.app.entity.NvdCveSyncChunk;
 import com.vulncheck.app.entity.NvdCveSyncChunkStatus;
+import java.time.OffsetDateTime;
 import java.util.List;
 import org.springframework.data.jpa.repository.JpaRepository;
 
@@ -18,4 +19,11 @@ public interface NvdCveSyncChunkRepository extends JpaRepository<NvdCveSyncChunk
      *  entire backfill (no chunks left besides {@link NvdCveSyncChunkStatus#COMPLETED} ones) or
      *  merely ran out of budget partway through. */
     long countByStatusNot(NvdCveSyncChunkStatus status);
+
+    /** Backs {@code NvdCveSyncChunkSplitService}'s idempotent child-window insert: a window pair
+     *  that already exists must be skipped rather than re-inserted, since {@code UNIQUE
+     *  (window_start, window_end)} would otherwise reject a retried split (e.g. a tick that
+     *  re-selects a parent chunk whose children were already committed by an earlier, interrupted
+     *  attempt at the same split). */
+    boolean existsByWindowStartAndWindowEnd(OffsetDateTime windowStart, OffsetDateTime windowEnd);
 }

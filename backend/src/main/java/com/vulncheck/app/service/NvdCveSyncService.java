@@ -112,6 +112,7 @@ public class NvdCveSyncService {
     private final NvdCveSyncChunkRepository nvdCveSyncChunkRepository;
     private final NvdCveRecordRepository nvdCveRecordRepository;
     private final NvdCveCpeMatchRepository nvdCveCpeMatchRepository;
+    private final NvdCveSyncChunkSplitService nvdCveSyncChunkSplitService;
 
     /** Result of one run (a bounded tick of either {@link #runBackfillTickAndRelease} or {@link
      *  #runDeltaTickAndRelease}). For the backfill side, {@code completed} means the *entire*
@@ -284,23 +285,21 @@ public class NvdCveSyncService {
      *  halves, and marks {@code chunk} itself {@code COMPLETED} (its own row needs no further
      *  attention once its children exist — see the class javadoc's "COMPLETED" note). Recurses
      *  naturally: a freshly-inserted child goes through this exact same check the next time it's
-     *  picked up, so a still-too-dense half keeps splitting on its own without any extra code here. */
-    private void splitChunk(NvdCveSyncChunk chunk, int observedTotalResults) {
+     *  picked up, so a still-too-dense half keeps splitting on its own without any extra code here.
+     *
+     *  <p>The actual writes (both children plus the parent's own {@code COMPLETED} save) happen
+     *  inside {@link NvdCveSyncChunkSplitService#splitAndComplete}, a single atomic, idempotent
+     *  transaction on a separate bean — see that class's javadoc for why this must not be three
+     *  separate non-transactional writes on {@code this} (closed-mode backlog item 202, REVISE
+     *  round 1, point 2). {@code observedTotalResults}/{@code upserted} must reflect a page that
+     *  has *already* been ingested by the time this is called — see {@link #processChunkStep}'s
+     *  call site, which fetches+ingests before ever calling this. */
+    private void splitChunk(NvdCveSyncChunk chunk, int observedTotalResults, int upserted, OffsetDateTime now) {
         Duration span = Duration.between(chunk.getWindowStart(), chunk.getWindowEnd());
         OffsetDateTime mid = chunk.getWindowStart().plus(span.dividedBy(2));
 
-        NvdCveSyncChunk first = new NvdCveSyncChunk();
-        first.setWindowStart(chunk.getWindowStart());
-        first.setWindowEnd(mid);
-        first.setStatus(NvdCveSyncChunkStatus.PENDING);
+        nvdCveSyncChunkSplitService.splitAndComplete(chunk, mid, observedTotalResults, upserted, now);
 
-        NvdCveSyncChunk second = new NvdCveSyncChunk();
-        second.setWindowStart(mid);
-        second.setWindowEnd(chunk.getWindowEnd());
-        second.setStatus(NvdCveSyncChunkStatus.PENDING);
-
-        nvdCveSyncChunkRepository.save(first);
-        nvdCveSyncChunkRepository.save(second);
         log.warn("NVD CVE backfill: window {}..{} exceeded the adaptive-split threshold ({} results > {}) "
                         + "-- split into {}..{} and {}..{}",
                 chunk.getWindowStart(), chunk.getWindowEnd(), observedTotalResults, SPLIT_THRESHOLD,
@@ -346,14 +345,14 @@ public class NvdCveSyncService {
         long windowDays = Duration.between(chunk.getWindowStart(), chunk.getWindowEnd()).toDays();
 
         if (isFirstPage && totalResults > SPLIT_THRESHOLD && windowDays > MIN_SPLIT_WINDOW_DAYS) {
-            splitChunk(chunk, totalResults);
+            // Ingest *before* splitting (closed-mode backlog item 202, REVISE round 1, point 2):
+            // if ingest throws (e.g. a downstream data issue), the chunk is left IN_PROGRESS with
+            // no children yet, which is safe to retry -- whereas splitting first and ingesting
+            // after could leave two persisted children behind a parent that never got its
+            // COMPLETED save, and the next tick's re-split would then hit the children's own
+            // UNIQUE (window_start, window_end) constraint instead of surfacing the real failure.
             int upserted = ingest(vulnerabilities);
-            chunk.setTotalResults(totalResults);
-            chunk.setUpsertedCount(chunk.getUpsertedCount() + upserted);
-            chunk.setStatus(NvdCveSyncChunkStatus.COMPLETED);
-            chunk.setCompletedAt(now);
-            chunk.setLastError(null);
-            nvdCveSyncChunkRepository.save(chunk);
+            splitChunk(chunk, totalResults, upserted, now);
             return new ChunkStepOutcome(upserted, true);
         }
 
@@ -425,7 +424,17 @@ public class NvdCveSyncService {
     /** Parses and upserts every CVE record + its {@code cpeMatch} rows in {@code vulnerabilities}
      *  (one NVD API page). Returns the number of CVE records processed (mirrors {@code
      *  NvdCpeSyncService#sync}'s "rows processed" counter convention, not "rows this predicate
-     *  actually wrote"). */
+     *  actually wrote").
+     *
+     *  <p>A CVE whose {@code lastModified} is missing or fails to parse is logged and skipped
+     *  entirely (closed-mode backlog item 202, REVISE round 1, point 1) — {@code
+     *  nvd_cve_records.last_modified_at} is {@code NOT NULL}, so passing a {@code null} value
+     *  through to {@link NvdCveRecordRepository#upsertBatch} would throw {@code
+     *  DataIntegrityViolationException} for the *whole page's batch*, which propagates out before
+     *  {@link #processChunkStep} ever persists this chunk's advanced {@code next_start_index} —
+     *  leaving the chunk permanently re-fetching (and re-failing on) this exact same page, with no
+     *  retry cap. Skipping just the offending CVE lets every other record on the page still upsert
+     *  and the chunk still advance past it. */
     private int ingest(JsonNode vulnerabilities) {
         List<NvdCveRecordRepository.Row> records = new ArrayList<>();
         List<String> cveIds = new ArrayList<>();
@@ -437,6 +446,12 @@ public class NvdCveSyncService {
             if (cveId == null) {
                 continue;
             }
+            OffsetDateTime lastModifiedAt = parseNvdTimestamp(cve.path("lastModified").asText(null));
+            if (lastModifiedAt == null) {
+                log.warn("NVD CVE ingest: skipping {} -- lastModified is missing or unparseable "
+                        + "(nvd_cve_records.last_modified_at is NOT NULL)", cveId);
+                continue;
+            }
             cveIds.add(cveId);
             records.add(new NvdCveRecordRepository.Row(
                     cveId,
@@ -444,7 +459,7 @@ public class NvdCveSyncService {
                     extractSeverity(cve.path("metrics")),
                     extractScore(cve.path("metrics")),
                     parseNvdTimestamp(cve.path("published").asText(null)),
-                    parseNvdTimestamp(cve.path("lastModified").asText(null))));
+                    lastModifiedAt));
             collectCpeMatches(cveId, cve.path("configurations"), matches);
         }
 
