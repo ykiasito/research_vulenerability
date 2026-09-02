@@ -8,10 +8,12 @@ import com.vulncheck.app.config.SecurityConfig;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
+import com.vulncheck.app.repository.NvdCveSyncStateRepository;
 import com.vulncheck.app.repository.OsvSyncFailureRepository;
 import com.vulncheck.app.repository.OsvSyncStateRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.NvdCpeSyncService;
+import com.vulncheck.app.service.NvdCveSyncService;
 import com.vulncheck.app.service.UserApiKeyService;
 import com.vulncheck.app.service.csaf.RedHatCsafSyncService;
 import com.vulncheck.app.service.csaf.SiemensCsafSyncService;
@@ -76,6 +78,10 @@ class AdminControllerSecurityTest {
     private OsvSyncFailureRepository osvSyncFailureRepository;
     @MockBean
     private RegistryMirrorSyncService registryMirrorSyncService;
+    @MockBean
+    private NvdCveSyncService nvdCveSyncService;
+    @MockBean
+    private NvdCveSyncStateRepository nvdCveSyncStateRepository;
 
     @Test
     void unauthenticatedRequestIsRedirectedToLogin() throws Exception {
