@@ -356,6 +356,30 @@ class RegistryMirrorSyncServiceTest {
     }
 
     /**
+     * Closed-mode backlog item 186 (senior review, PR #145 REVISE): the freshness check must
+     * compare *normalized* names (see {@link com.vulncheck.app.service.vuln.
+     * OsvPackageNameNormalizer#normalize}), not raw ones — crates.io folds {@code -}/{@code _}
+     * together, so a seed name spelled {@code Serde_Json} must still be recognized as fresh when
+     * {@code registry_package_mirror} has it recorded (normalized) as {@code serde-json}. The other
+     * freshness tests in this class all use npm, whose normalization is a plain lowercase fold and
+     * so never actually exercises the crates.io-specific {@code -}/{@code _} folding rule.
+     */
+    @Test
+    void syncAllAndReleaseSkipsACratesIoNameAlreadySyncedUnderItsNormalizedSpelling() {
+        when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("crates.io"))
+                .thenReturn(List.of("Serde_Json"));
+        when(registryPackageMirrorRepository.findFreshlySyncedNormalizedPackageNames(
+                org.mockito.ArgumentMatchers.eq("crates.io"), any()))
+                .thenReturn(Set.of("serde-json"));
+
+        service.tryBeginFullSync();
+        RegistryMirrorSyncService.SyncOutcome outcome = service.syncAllAndRelease();
+
+        verify(cratesIoMirrorSyncService, never()).syncPackages(anyList());
+        assertThat(outcome.observedNameCountByEcosystem()).containsEntry("crates.io", 0);
+    }
+
+    /**
      * {@code app.registry-mirror-sync-freshness-days} <= 0 disables the filter entirely — same
      * escape-hatch convention as {@code chunkSize}'s own non-positive fallback.
      */
