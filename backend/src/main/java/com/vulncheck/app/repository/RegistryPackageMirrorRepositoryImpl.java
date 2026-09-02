@@ -20,14 +20,18 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
 
     /**
      * TTL for the {@link #hasAnyEntries} in-memory cache (closed-mode backlog item 179 -- flagged by
-     * senior-reviewer during the PR#112 batch review). Every {@code *RegistryClient#lookup} call
-     * checks {@code mirrorEnabled && hasAnyEntries(ecosystem)} before falling back to a live HTTP
-     * call; without caching, that is one DB round trip per CSV item per registry once a mirror flag
-     * is turned on -- an N+1 pattern across all 9 registries at CSV-job scale, for a value that only
-     * ever changes when a sync job actually writes rows (see {@link #upsertBatch}, which proactively
-     * refreshes this cache the moment that happens -- the primary invalidation path). This TTL is a
-     * safety net for the one case that bypasses that proactive path: rows appearing out-of-band (e.g.
-     * a direct DB fix) rather than through this repository's own write method.
+     * senior-reviewer during the PR#112 batch review). This dates from before closed-mode B3 removed
+     * the live-HTTP fallback: every {@code *RegistryClient#lookup} call used to check {@code
+     * mirrorEnabled && hasAnyEntries(ecosystem)} before falling back to a live HTTP call, and without
+     * caching that was one DB round trip per CSV item per registry once a mirror flag was turned on --
+     * an N+1 pattern across all 9 registries at CSV-job scale. No caller does that check anymore (see
+     * {@link RegistryPackageMirrorRepository#hasAnyEntries}'s own javadoc), but the cache itself is
+     * kept working rather than deleted -- it is still exercised directly by {@code
+     * RegistryPackageMirrorRepositoryImplTest} -- and it still only ever changes when a sync job
+     * actually writes rows (see {@link #upsertBatch}, which proactively refreshes this cache the
+     * moment that happens -- the primary invalidation path). This TTL is a safety net for the one case
+     * that bypasses that proactive path: rows appearing out-of-band (e.g. a direct DB fix) rather than
+     * through this repository's own write method.
      *
      * <p><b>Only {@code true} results are ever cached (see {@link #hasAnyEntries}) -- REVISE fix,
      * closed-mode item 179 round 2.</b> A negative result used to be cached too, which raced against

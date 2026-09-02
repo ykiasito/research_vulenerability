@@ -14,10 +14,17 @@ import java.util.Map;
 public interface RegistryPackageMirrorRepository {
 
     /**
-     * Whether this ecosystem has been synced at all (any row, regardless of package). Callers use
-     * this to distinguish "the mirror is enabled but nobody has run the initial sync yet" (fall back
-     * to live) from "the mirror is enabled and populated, but this specific package isn't in it"
-     * (a real, confident negative -- see {@link #findVersions}).
+     * Whether this ecosystem has been synced at all (any row, regardless of package).
+     *
+     * <p>Historically used to distinguish "the mirror is enabled but nobody has run the initial
+     * sync yet" (fall back to live) from "the mirror is populated, but this specific package isn't
+     * in it" (a real, confident negative -- see {@link #findVersions}). Closed-mode B3 removed that
+     * live-HTTP fallback outright -- there is no network in closed mode to fall back to -- so no
+     * {@code *RegistryClient} calls this method anymore; {@link #findVersions} returning empty is
+     * now always treated as a confident negative, synced or not. Kept (not deleted) to avoid the
+     * merge-conflict cost of removing it from both this interface and {@code
+     * RegistryPackageMirrorRepositoryImpl}'s caching implementation; still directly exercised by
+     * {@code RegistryPackageMirrorRepositoryImplTest}.
      */
     boolean hasAnyEntries(String ecosystem);
 
