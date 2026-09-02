@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.context.ApplicationContext;
 
 /**
@@ -28,8 +29,13 @@ import org.springframework.context.ApplicationContext;
  * schema against it on startup) — same requirement as every other {@code @SpringBootTest} in this
  * module (e.g. {@code SessionCookieSecureDefaultTest}/{@code SessionCookieSecureEnabledTest}), not
  * something new this test suite introduces.
+ *
+ * <p>{@code webEnvironment = WebEnvironment.RANDOM_PORT} matches the only other {@code
+ * @SpringBootTest}s actually run in this module ({@code SessionCookieSecureDefaultTest}/{@code
+ * SessionCookieSecureEnabledTest}), so this suite reuses Spring's cached application context
+ * (Flyway validation and all) instead of starting a second full context from scratch.
  */
-@SpringBootTest
+@SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
 class ClosedModeBeanArchitectureGateTest {
 
     @Autowired
