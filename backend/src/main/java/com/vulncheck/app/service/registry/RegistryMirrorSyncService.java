@@ -195,9 +195,16 @@ public class RegistryMirrorSyncService {
      *                                     #freshnessDays} skipped as recently synced — see {@link
      *                                     #collectSeedNames}) were actually candidates to sync for
      *                                     each ecosystem, before syncing — kept separate from {@code
-     *                                     totalSynced} so a caller can tell "nothing to sync yet" (0
-     *                                     observed) apart from "synced 0 of N" (every observed name
-     *                                     failed to resolve).
+     *                                     totalSynced} so a caller can tell "0 candidates this run"
+     *                                     apart from "synced 0 of N candidates" (every candidate
+     *                                     name failed to resolve). 0 here is ambiguous by design and
+     *                                     must not be read as "nothing to sync yet" (senior review,
+     *                                     PR #145 REVISE): it means either "no seed names observed
+     *                                     at all for this ecosystem" or "every observed name was
+     *                                     already fresh (synced within {@link #freshnessDays}) and
+     *                                     therefore skipped" — the latter is the expected steady
+     *                                     state for a healthy weekly deployment once every name has
+     *                                     been synced at least once, not a sign of a problem.
      */
     public record SyncOutcome(int totalSynced, int totalUnresolved, Map<String, Integer> observedNameCountByEcosystem) {
     }
@@ -448,7 +455,8 @@ public class RegistryMirrorSyncService {
             observedNameCountByEcosystem.put(tasks.get(i).ecosystem(), result[2]);
         }
 
-        log.info("Registry mirror sync (all ecosystems): {} synced, {} unresolved, observed name counts: {}",
+        log.info("Registry mirror sync (all ecosystems): {} synced, {} unresolved, candidate name counts "
+                        + "(after freshness filter): {}",
                 totalSynced, totalUnresolved, observedNameCountByEcosystem);
         return new SyncOutcome(totalSynced, totalUnresolved, observedNameCountByEcosystem);
     }
