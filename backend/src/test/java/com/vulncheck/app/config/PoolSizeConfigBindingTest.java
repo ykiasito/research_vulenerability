@@ -16,11 +16,11 @@ import org.springframework.core.io.FileSystemResource;
 /**
  * Regression coverage for how {@code app.item-processing-pool-size} and {@code
  * spring.datasource.hikari.maximum-pool-size} in the production {@code
- * backend/src/main/resources/application.yml} actually bind (item 167, 2026-09-01,
- * {@code docs/spec/closed-mode-plan.md} §3-3 A4/§7 P2/P4) — i.e. whether the {@code
- * ${ITEM_PROCESSING_POOL_SIZE:8}}/{@code ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:10}}
- * placeholders resolve to the same defaults the two hardcoded values they replaced used to have,
- * and that an overriding env var actually takes effect. Same rationale/technique as {@link
+ * backend/src/main/resources/application.yml} actually bind (item 167, 2026-09-01, raised to 20 by
+ * item 198, 2026-09-03, {@code docs/spec/closed-mode-plan.md} §3-3 A4/§7 P2/P4) — i.e. whether the
+ * {@code ${ITEM_PROCESSING_POOL_SIZE:8}}/{@code ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:20}}
+ * placeholders resolve to the currently-intended defaults, and that an overriding env var actually
+ * takes effect. Same rationale/technique as {@link
  * SessionCookieConfigBindingTest}: {@code backend/src/test/resources/application.yml} fully
  * shadows the production file for any {@code @SpringBootTest} context and doesn't set either of
  * these keys, so a context-based test could only ever observe Spring Boot's/HikariCP's own
@@ -47,21 +47,21 @@ class PoolSizeConfigBindingTest {
     }
 
     @Test
-    void hikariMaximumPoolSizeDefaultsToTenWhenUnset() throws Exception {
+    void hikariMaximumPoolSizeDefaultsToTwentyWhenUnset() throws Exception {
         assertThat(bindInt(Map.of(), "spring.datasource.hikari.maximum-pool-size"))
                 .as("spring.datasource.hikari.maximum-pool-size with "
                         + "SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE unset")
-                .isEqualTo(10);
+                .isEqualTo(20);
     }
 
     @Test
     void hikariMaximumPoolSizeHonorsEnvOverride() throws Exception {
         assertThat(bindInt(
-                        Map.of("SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE", "20"),
+                        Map.of("SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE", "30"),
                         "spring.datasource.hikari.maximum-pool-size"))
                 .as("spring.datasource.hikari.maximum-pool-size with "
-                        + "SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE=20")
-                .isEqualTo(20);
+                        + "SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE=30")
+                .isEqualTo(30);
     }
 
     /**

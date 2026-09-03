@@ -370,7 +370,8 @@ public class ResearchJobProcessingService {
         // is already caught inside it, so this would mean an unexpected bug there), that's the
         // same "we don't actually have a signal" situation as every individual source failing —
         // see the firing condition below.
-        Stage2VulnerabilityResearchService.Stage2Result stage2Result = new Stage2VulnerabilityResearchService.Stage2Result(0, false);
+        Stage2VulnerabilityResearchService.Stage2Result stage2Result =
+                new Stage2VulnerabilityResearchService.Stage2Result(0, false, false);
         long stage2Start = System.nanoTime();
         try {
             stage2Result = stage2VulnerabilityResearchService.research(item, identifiedProduct.get(), userId);
@@ -387,8 +388,21 @@ public class ResearchJobProcessingService {
         // could mean the item was never actually checked (a false-negative security report). May be
         // overwritten below with INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK if Stage4 also ends up
         // skipped for this item.
-        item.setResearchIncompleteReason(
-                stage2Result.anySourceSucceeded() ? null : ResearchJobItem.INCOMPLETE_REASON_SOURCES_FAILED);
+        //
+        // findingsTruncated (closed-mode backlog item 251, REVISE item 11) is checked second, only
+        // once sourcesFailed is ruled out: a source's write-safety cap dropping some findings still
+        // means real findings WERE found and persisted (just not all of them), a materially
+        // different situation from "nothing was actually checked" that INCOMPLETE_REASON_SOURCES_FAILED
+        // exists to flag — see ResearchJobItem#INCOMPLETE_REASON_FINDINGS_TRUNCATED's javadoc.
+        String incompleteReason;
+        if (!stage2Result.anySourceSucceeded()) {
+            incompleteReason = ResearchJobItem.INCOMPLETE_REASON_SOURCES_FAILED;
+        } else if (stage2Result.findingsTruncated()) {
+            incompleteReason = ResearchJobItem.INCOMPLETE_REASON_FINDINGS_TRUNCATED;
+        } else {
+            incompleteReason = null;
+        }
+        item.setResearchIncompleteReason(incompleteReason);
         researchJobItemRepository.save(item);
 
         // Stage4 (paid AI web-search) only fires on a genuine zero-findings result — i.e. at

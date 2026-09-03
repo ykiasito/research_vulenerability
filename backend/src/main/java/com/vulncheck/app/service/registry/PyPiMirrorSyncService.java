@@ -41,10 +41,15 @@ import org.springframework.web.util.UriComponentsBuilder;
  *   OsvPackageNameNormalizer#normalize} already implements PEP 503 for {@code pypi} — see its own
  *   javadoc) — a non-normalized name (mixed case, {@code _}/{@code .} instead of {@code -}, e.g. the
  *   literal {@code Django-Extensions}) 301-redirects to the normalized path instead of answering
- *   directly (confirmed live). Pre-normalizing avoids relying on redirect-following at all, same
- *   {@code UriComponentsBuilder.path(...)} technique (not a {@code {name}} URI template substitution,
- *   to avoid percent-encoding a name that happens to contain a literal {@code .} or other
- *   template-unsafe character) as {@code PackagistMirrorSyncService#fetchVersions} uses.</li>
+ *   directly (confirmed live). Pre-normalizing avoids relying on redirect-following at all. {@link
+ *   #fetchVersions} still uses the same {@code UriComponentsBuilder.path(...)} technique (not a
+ *   {@code {name}} URI template placeholder) as {@code PackagistMirrorSyncService#fetchVersions} —
+ *   not to avoid percent-encoding a literal {@code .} (PEP 503 normalization folds every run of
+ *   {@code .}/{@code -}/{@code _} into a single {@code -}, so a normalized name never contains one —
+ *   {@code "zope.interface"} normalizes to {@code "zope-interface"}, the same rationale {@link
+ *   RegistryMirrorPackageNameValidator}'s class javadoc gives for excluding pypi from its checks), but
+ *   simply to keep the same path-building shape (including the trailing {@code /} the Simple API
+ *   path requires) as {@code PackagistMirrorSyncService#fetchVersions} already uses.</li>
  * </ul>
  * A package that doesn't exist returns a plain 404 with a small text body, not JSON — same as every
  * other mirror sync here. PEP 691's {@code versions} array is already the deduplicated list of every
@@ -118,9 +123,12 @@ public class PyPiMirrorSyncService {
         try {
             String normalizedName = OsvPackageNameNormalizer.normalize(ECOSYSTEM, packageName);
             // Same UriComponentsBuilder.path(...) technique (not a {name} URI template
-            // substitution) as PackagistMirrorSyncService#fetchVersions uses, for a related reason:
-            // a normalized pypi name can contain a literal "." (e.g. "zope.interface"), which a
-            // {name} template substitution would percent-encode, breaking the real simple/ path.
+            // substitution) as PackagistMirrorSyncService#fetchVersions uses, but for a different
+            // reason: a normalized pypi name can never contain a "." (OsvPackageNameNormalizer
+            // folds every run of "."/"-"/"_" into a single "-", e.g. "zope.interface" ->
+            // "zope-interface" -- same rationale RegistryMirrorPackageNameValidator's class javadoc
+            // gives for excluding pypi). This just keeps the same path-building shape (including the
+            // trailing "/" the Simple API path requires) as the Packagist sync uses.
             URI uri = UriComponentsBuilder.fromUriString("https://pypi.org/")
                     .path("simple/" + normalizedName + "/")
                     .build()

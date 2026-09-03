@@ -66,4 +66,39 @@ public class AsyncConfig {
         executor.initialize();
         return executor;
     }
+
+    /**
+     * Fans out {@link com.vulncheck.app.service.registry.RegistryMirrorSyncService}'s 9 per-
+     * ecosystem mirror syncs concurrently (closed-mode backlog item 186) instead of one after
+     * another — each ecosystem's own {@link
+     * com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter} pacing is already an
+     * independent gate keyed by ecosystem (see that class's javadoc), so running all 9 at once
+     * doesn't make any single ecosystem's own requests any less paced; it only stops one slow
+     * ecosystem's run from serializing behind the other 8. A deliberately separate pool from
+     * {@code registryLookupExecutor} above rather than a reuse of it: that pool exists to bound
+     * a single CSV item's interactive registry fan-out during job processing (sized/tuned for
+     * that request-latency-sensitive workload), while this one only ever runs 9 long-running
+     * background tasks at a time (admin-triggered or the weekly schedule) — sharing the pool
+     * would let an off-hours full mirror sync contend with, and add latency to, in-flight job
+     * processing for no benefit either workload needs. Sized to exactly the ecosystem count (9,
+     * see {@code RegistryMirrorSyncService#KNOWN_ECOSYSTEMS}) since {@code syncAll} never submits
+     * more than 9 tasks to it at once; core == max, so no thread churn between runs.
+     *
+     * <p>This pool's 9 threads are the "9 concurrently-running sync workers" referenced by {@code
+     * spring.datasource.hikari.maximum-pool-size}'s comment in {@code application.yml} (senior
+     * review, PR #145 REVISE) — see that comment for why they are not simply added on top of
+     * {@code app.item-processing-pool-size} when sizing the HikariCP pool: each worker holds a DB
+     * connection only for a short per-chunk batch upsert, never while making its rate-limited HTTP
+     * calls, so the 9 of them don't need 9 concurrently-held connections' worth of headroom.
+     */
+    @Bean(name = "registryMirrorSyncExecutor")
+    public Executor registryMirrorSyncExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(9);
+        executor.setMaxPoolSize(9);
+        executor.setQueueCapacity(9);
+        executor.setThreadNamePrefix("registry-mirror-sync-");
+        executor.initialize();
+        return executor;
+    }
 }

@@ -122,7 +122,7 @@ class ResearchJobProcessingServiceTest {
         // Mixed outcome: some sources failed, but at least one genuinely completed and found
         // nothing — this is a real zero signal, so Stage4 must still fire.
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
 
         newService().processJobAsync(1L);
 
@@ -142,7 +142,7 @@ class ResearchJobProcessingServiceTest {
         // Every source errored out (e.g. GHSA rate-limited, NVD/OSV/CVE.org all down) — findingCount
         // is 0 but there's no real "nothing found" signal, so the paid AI web-search must not fire.
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, false));
+                .thenReturn(new Stage2Result(0, false, false));
 
         newService().processJobAsync(2L);
 
@@ -160,7 +160,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(3, true));
+                .thenReturn(new Stage2Result(3, true, false));
 
         newService().processJobAsync(3L);
 
@@ -180,7 +180,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
 
         newService().processJobAsync(4L);
 
@@ -202,7 +202,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, false));
+                .thenReturn(new Stage2Result(0, false, false));
 
         newService().processJobAsync(6L);
 
@@ -212,6 +212,35 @@ class ResearchJobProcessingServiceTest {
         // researchIncompleteReason set after Stage2 — see processItem. Stage4 isn't reached here
         // (anySourceSucceeded is false), so there's no third save from the confidence gate.
         verify(researchJobItemRepository, times(2)).save(item);
+    }
+
+    @Test
+    void itemIsMarkedFindingsTruncatedWhenAWriteSafetyCapDroppedSomeGenuineFindings() {
+        // closed-mode backlog item 251 REVISE item 11: a source's own write-safety cap (e.g.
+        // NvdVulnerabilitySource#MAX_FINDINGS_PER_ITEM for a broad-surface product) can drop some
+        // genuinely-matched findings without every source having failed -- distinct from
+        // INCOMPLETE_REASON_SOURCES_FAILED (nothing was checked at all): here findings WERE found
+        // and persisted, just not the complete set, so a dedicated reason is needed rather than
+        // collapsing this into a silent "clean" 0-incomplete-reason result.
+        ResearchJob job = job(20L, 10L);
+        ResearchJobItem item = item(21L, 20L);
+        IdentifiedProduct product = identifiedProduct(21L);
+
+        when(researchJobRepository.findById(20L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdAndStatusOrderById(20L, ResearchJobItem.STATUS_PENDING))
+                .thenReturn(List.of(item));
+        when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
+        when(stage2VulnerabilityResearchService.research(item, product, 10L))
+                .thenReturn(new Stage2Result(10_000, true, true));
+
+        newService().processJobAsync(20L);
+
+        assertThat(item.getResearchIncompleteReason())
+                .isEqualTo(ResearchJobItem.INCOMPLETE_REASON_FINDINGS_TRUNCATED);
+        assertThat(item.isResearchIncomplete()).isTrue();
+        // findingCount is nonzero, so Stage4's zero-findings firing condition never applies here --
+        // no AI web-search fallback for an item that already has 10,000 real findings persisted.
+        verify(stage4WebSearchResearchService, never()).research(any(), any(), any(), anyLong());
     }
 
     @Test
@@ -229,7 +258,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
 
         newService().processJobAsync(8L);
 
@@ -252,7 +281,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
 
         newService().processJobAsync(7L);
 
@@ -273,7 +302,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
 
         newService().processJobAsync(5L);
 
@@ -300,7 +329,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
         when(stage4WebSearchResearchService.research(item, "npm", "lodash", 10L))
                 .thenReturn(new Stage4WebSearchResearchService.Stage4ResearchResult(
                         0, ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE));
@@ -322,7 +351,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
         when(stage4WebSearchResearchService.research(item, "npm", "lodash", 10L))
                 .thenReturn(new Stage4WebSearchResearchService.Stage4ResearchResult(
                         0, ResearchJobItem.INCOMPLETE_REASON_BUDGET_EXHAUSTED));
@@ -352,7 +381,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
         when(stage4WebSearchResearchService.research(item, "npm", "lodash", 10L))
                 .thenThrow(new RuntimeException("LLM service unavailable"));
 
@@ -379,7 +408,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
         when(stage4WebSearchResearchService.research(item, "npm", "lodash", 10L))
                 .thenReturn(new Stage4WebSearchResearchService.Stage4ResearchResult(
                         0, ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED));
@@ -469,7 +498,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
 
         newService().processJobAsync(30L);
 
@@ -490,7 +519,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
 
         newService().processJobAsync(31L);
 
@@ -514,7 +543,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(0, true));
+                .thenReturn(new Stage2Result(0, true, false));
 
         newService().processJobAsync(32L);
 
@@ -533,7 +562,7 @@ class ResearchJobProcessingServiceTest {
                 .thenReturn(List.of(item));
         when(stage1IdentificationService.identify(item, 10L)).thenReturn(Optional.of(product));
         when(stage2VulnerabilityResearchService.research(item, product, 10L))
-                .thenReturn(new Stage2Result(3, true));
+                .thenReturn(new Stage2Result(3, true, false));
 
         newService().processJobAsync(33L);
 
