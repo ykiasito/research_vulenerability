@@ -96,7 +96,14 @@ class ClosedModeArchitectureGateTest {
 
     // ------------------------------------------------------------------------------------------
     // §3-6 item 1: classpath must not contain anthropic / LlmServiceClient / live *RegistryClient
-    // / NvdVulnerabilitySource / OsvLiveQueryClient.
+    // / OsvLiveQueryClient. NvdVulnerabilitySource is a second deliberate divergence from this
+    // item's literal wording, alongside the *RegistryClient one below (closed-mode backlog item
+    // 264/B4, 2026-09-04): it stays on the classpath as a mirror-only VulnerabilitySource rather
+    // than being deleted outright, since (unlike OsvLiveQueryClient, whose sole caller was already
+    // gutted to a no-op) it also implements Stage2's real, still-needed NVD CVE mirror lookup —
+    // only its live NVD CVE API path (fetchFromNvd) was removed. See
+    // osvLiveQueryClientIsAbsentFromClasspath()'s own @Disabled note below for what item 261 should
+    // decide to assert about it instead.
     //
     // Note on "live *RegistryClient": §3-6's original text was written expecting B3 to delete the
     // 10 *RegistryClient classes outright (same treatment as LlmServiceClient for B1). B3 (item
@@ -169,14 +176,20 @@ class ClosedModeArchitectureGateTest {
 
     @Test
     @Disabled(
-            "NvdVulnerabilitySource/OsvLiveQueryClient are B4 work (docs/spec/closed-mode-plan.md "
-                    + "§9-2 Phase B), not yet started as of item 196 — they still legitimately exist on "
-                    + "closed-mode today. Re-enable this test as part of implementing B4 (live NVD/live "
-                    + "OSV removal), at which point both classes should be gone.")
-    void nvdAndOsvLiveClientsAreAbsentFromClasspath() {
-        assertThrows(
-                ClassNotFoundException.class,
-                () -> Class.forName("com.vulncheck.app.service.vuln.NvdVulnerabilitySource"));
+            "Left disabled as part of item 261 (B7)'s own scope, not re-enabled here (closed-mode "
+                    + "backlog item 264/B4, 2026-09-04): the assertion below is corrected to match how B4 "
+                    + "was actually implemented, so item 261 doesn't inherit a stale premise when it "
+                    + "eventually re-enables this test. OsvLiveQueryClient is now genuinely gone (its sole "
+                    + "caller, BundledComponentResearchService, was already gutted to a no-op in B2), so "
+                    + "that half is ready to assert absence. NvdVulnerabilitySource, unlike "
+                    + "OsvLiveQueryClient, was deliberately NOT deleted -- it still exists as a "
+                    + "mirror-only VulnerabilitySource (fetchFromMirror is Stage2's real NVD CVE lookup "
+                    + "on this branch), just with its live NVD CVE API path (fetchFromNvd) physically "
+                    + "removed. Item 261 should still decide whether/how to assert \"NvdVulnerabilitySource "
+                    + "has no live-egress capability\" (e.g. no externalApiRestClient-typed field, mirroring "
+                    + "liveRegistryClientsHaveNoLookupLiveMethod()'s approach for the 10 registry clients) "
+                    + "when it re-enables this test, rather than a bare classpath-absence check.")
+    void osvLiveQueryClientIsAbsentFromClasspath() {
         assertThrows(
                 ClassNotFoundException.class,
                 () -> Class.forName("com.vulncheck.app.service.vuln.OsvLiveQueryClient"));

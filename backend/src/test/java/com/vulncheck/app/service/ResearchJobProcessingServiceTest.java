@@ -20,7 +20,6 @@ import com.vulncheck.app.service.Stage2VulnerabilityResearchService.Stage2Result
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.GhsaRateLimiter;
-import com.vulncheck.app.service.vuln.OsvRateLimiter;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
@@ -70,7 +69,7 @@ class ResearchJobProcessingServiceTest {
                 identifiedProductRepository, stage1IdentificationService, stage2VulnerabilityResearchService,
                 stage4WebSearchResearchService, bundledComponentResearchService, jobCostBudgetService, new NvdRateLimiter(),
                 ExternalRegistryRateLimiter.disabledForTesting(), GhsaRateLimiter.disabledForTesting(),
-                OsvRateLimiter.disabledForTesting(), itemProcessingExecutor);
+                itemProcessingExecutor);
     }
 
     private ResearchJob job(Long id, Long userId) {

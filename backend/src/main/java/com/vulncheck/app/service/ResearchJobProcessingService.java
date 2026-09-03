@@ -9,7 +9,6 @@ import com.vulncheck.app.repository.ResearchJobRepository;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.GhsaRateLimiter;
-import com.vulncheck.app.service.vuln.OsvRateLimiter;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -124,7 +123,6 @@ public class ResearchJobProcessingService {
     private final NvdRateLimiter nvdRateLimiter;
     private final ExternalRegistryRateLimiter externalRegistryRateLimiter;
     private final GhsaRateLimiter ghsaRateLimiter;
-    private final OsvRateLimiter osvRateLimiter;
 
     @Qualifier("itemProcessingExecutor")
     private final Executor itemProcessingExecutor;
@@ -161,7 +159,6 @@ public class ResearchJobProcessingService {
         JobTimings timings = new JobTimings();
         long nvdWaitBaselineMs = nvdRateLimiter.cumulativeWaitMillis();
         long ghsaWaitBaselineMs = ghsaRateLimiter.cumulativeWaitMillis();
-        long osvWaitBaselineMs = osvRateLimiter.cumulativeWaitMillis();
         Map<String, Long> registryWaitBaseline = externalRegistryRateLimiter.cumulativeWaitMillisByEcosystem();
         try {
             // Items within this one job are processed concurrently (bounded by
@@ -205,7 +202,7 @@ public class ResearchJobProcessingService {
         }
 
         logJobTimings(jobId, items.size(), jobStartNanos, timings, nvdWaitBaselineMs, ghsaWaitBaselineMs,
-                osvWaitBaselineMs, registryWaitBaseline);
+                registryWaitBaseline);
 
         job.setStatus(ResearchJob.STATUS_COMPLETED);
         job.setCompletedAt(OffsetDateTime.now());
@@ -262,14 +259,17 @@ public class ResearchJobProcessingService {
      * wait counters across this job's processing window (not perfectly attributable if another job
      * ran concurrently and used the same limiter, but good enough for the debugging/validation pass
      * this exists for — see {@code NvdRateLimiter}/{@code ExternalRegistryRateLimiter}/{@code
-     * GhsaRateLimiter}/{@code OsvRateLimiter}'s own {@code cumulativeWait*} javadocs).
+     * GhsaRateLimiter}'s own {@code cumulativeWait*} javadocs). No {@code osv} entry any more
+     * (closed-mode backlog item 264, B4): {@code OsvRateLimiter} existed solely to pace {@code
+     * OsvLiveQueryClient}'s live {@code api.osv.dev} calls, both now physically deleted — Stage2's
+     * own {@code find()} has read the local OSV mirror only since before this branch existed.
      */
     private void logJobTimings(Long jobId, int itemCount, long jobStartNanos, JobTimings timings,
-            long nvdWaitBaselineMs, long ghsaWaitBaselineMs, long osvWaitBaselineMs,
+            long nvdWaitBaselineMs, long ghsaWaitBaselineMs,
             Map<String, Long> registryWaitBaseline) {
         long wallMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - jobStartNanos);
         log.info("Job {} timings: items={} wallMs={} stage1SumMs={} stage2SumMs={} stage4SumMs={} bundledComponentSumMs={} "
-                        + "rateLimiterWaitDeltaMs=[nvd={} ghsa={} osv={} registry={}]",
+                        + "rateLimiterWaitDeltaMs=[nvd={} ghsa={} registry={}]",
                 jobId, itemCount, wallMs,
                 TimeUnit.NANOSECONDS.toMillis(timings.stage1Nanos.get()),
                 TimeUnit.NANOSECONDS.toMillis(timings.stage2Nanos.get()),
@@ -277,7 +277,6 @@ public class ResearchJobProcessingService {
                 TimeUnit.NANOSECONDS.toMillis(timings.bundledComponentNanos.get()),
                 nvdRateLimiter.cumulativeWaitMillis() - nvdWaitBaselineMs,
                 ghsaRateLimiter.cumulativeWaitMillis() - ghsaWaitBaselineMs,
-                osvRateLimiter.cumulativeWaitMillis() - osvWaitBaselineMs,
                 waitDelta(registryWaitBaseline, externalRegistryRateLimiter.cumulativeWaitMillisByEcosystem()));
     }
 
