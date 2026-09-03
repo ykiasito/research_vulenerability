@@ -224,6 +224,16 @@ class NvdMirrorAbVerificationRunner {
         liveCountsByRow.stream().limit(10)
                 .forEach(entry -> System.out.println("    " + entry.getKey() + ": " + entry.getValue()));
 
+        // Display-cap proposal (item 3, NOT implemented here -- this class only measures the
+        // distribution its own analysis needs): round 3's real numbers (64 rows, sum 4676, average
+        // ~73.1/row) show the mean itself is already far past what a per-item findings list can
+        // usefully show, and the distribution is heavily right-skewed by a handful of
+        // broad-surface products (Google Chrome 2739, Mozilla Firefox 681, GitLab 282 -- vs. an
+        // average of ~73 and a long tail of rows with single-digit or zero counts). A cap of the
+        // top 10 findings per item, sorted by CVSS score descending, with the remainder collapsed
+        // into a "他N件" (N = total - 10) summary line, would show 100% of findings for the
+        // majority of rows in this sample (rows with <=10 findings) while keeping the worst-case
+        // row (Chrome, N=2729 hidden) from overwhelming the UI.
         // Gate criterion (item 4): mirrorOnly must be zero (removing the vulnerable=true filter
         // should already drive false positives to zero -- any survivor here is a genuine
         // mirrorLookup/versionApplies bug, not a known limitation) and every liveOnly CVE must be
