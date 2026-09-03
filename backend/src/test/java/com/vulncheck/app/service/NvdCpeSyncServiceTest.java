@@ -126,6 +126,28 @@ class NvdCpeSyncServiceTest {
     }
 
     @Test
+    void balancedBraceKeywordIsPercentEncodedInsteadOfThrowing() {
+        // Backlog item 254 (senior review of PR#166, 2026-09-03): the item-253 fix above switched
+        // fetchPage() to builder.encode(), which is URI *template* encoding -- "{"/"}" are left
+        // alone as template-variable delimiters, not percent-encoded. A keyword with a balanced
+        // brace pair (e.g. an MSI ProductCode GUID like "{90160000-008C}", which shows up verbatim
+        // in Windows installed-software listings) then survives .encode() untouched and trips the
+        // single-arg java.net.URI constructor inside build().toUri() with "Illegal character in
+        // query", silently discarding the whole Stage1 identification for that item. Confirms the
+        // expand-then-encode fix instead percent-encodes the literal braces and completes normally.
+        syncServer.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("%7B")))
+                .andExpect(requestTo(Matchers.containsString("%7D")))
+                .andExpect(queryParam("resultsPerPage", "10000"))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        int upserted = service.syncByKeyword("Office {90160000-008C}", Optional.empty());
+
+        assertThat(upserted).isZero();
+        syncServer.verify();
+    }
+
+    @Test
     void syncReportsIncompleteWhenAPageFetchFailsPartWayThrough() {
         // fetchPage() treats a failed HTTP request as an empty result (caught, logged, returns
         // null) rather than throwing — sync() must not report that as a clean finish, since the

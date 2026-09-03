@@ -7,7 +7,9 @@ import com.vulncheck.app.service.nvd.CpeUtils;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.RequiredArgsConstructor;
@@ -182,20 +184,33 @@ public class NvdCpeSyncService {
 
     private JsonNode fetchPage(String keyword, int startIndex, int resultsPerPage, Optional<String> apiKey,
             RestClient restClient) {
-        // .encode() is required here: keyword is the CSV-supplied product name (see
-        // Stage1IdentificationService's syncKeywordSinglePage / AdminController's syncByKeyword),
-        // so a product cell like "foo&resultsPerPage=1" would otherwise inject an unencoded "&"
-        // into the query string and let CSV input override resultsPerPage/startIndex above --
-        // same class of bug as NvdVulnerabilitySource's cpeName case (PR#163).
+        // keyword is the CSV-supplied product name (see Stage1IdentificationService's
+        // syncKeywordSinglePage / AdminController's syncByKeyword), so a product cell like
+        // "foo&resultsPerPage=1" would otherwise inject an unencoded "&" into the query string and
+        // let CSV input override resultsPerPage/startIndex above -- same class of bug as
+        // NvdVulnerabilitySource's cpeName case (PR#163).
+        //
+        // Encoding it via expand-then-encode rather than builder.encode() (backlog item 254,
+        // senior review of PR#166): UriComponentsBuilder#encode() is URI *template* encoding, so
+        // "{" / "}" are left alone as template-variable delimiters instead of being percent-encoded
+        // -- and NVD keywords routinely contain literal braces (e.g. MSI ProductCode GUIDs like
+        // "{90160000-008C-0000-1000-0000000FF1CE}", which show up verbatim in Windows installed-
+        // software listings). A balanced brace pair then survives .encode() untouched and trips the
+        // single-argument java.net.URI constructor inside build().toUri() with "Illegal character
+        // in query". Passing the keyword through as a URI template variable and expanding it before
+        // encoding avoids that: by the time encode() runs there is no template syntax left to
+        // preserve, so literal braces get percent-encoded like any other reserved character.
         UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromHttpUrl(NVD_CPE_API)
                 .queryParam("resultsPerPage", resultsPerPage)
                 .queryParam("startIndex", startIndex);
+        Map<String, Object> templateVars = new HashMap<>();
         if (keyword != null && !keyword.isBlank()) {
-            uriBuilder.queryParam("keywordSearch", keyword);
+            uriBuilder.queryParam("keywordSearch", "{keywordSearch}");
+            templateVars.put("keywordSearch", keyword);
         }
-        URI uri = uriBuilder.encode().build().toUri();
 
         try {
+            URI uri = uriBuilder.build().expand(templateVars).encode().toUri();
             return restClient.get()
                     .uri(uri)
                     .headers(headers -> apiKey.ifPresent(key -> headers.set("apiKey", key)))
