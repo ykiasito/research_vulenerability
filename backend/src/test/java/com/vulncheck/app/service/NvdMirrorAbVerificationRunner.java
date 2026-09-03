@@ -1,19 +1,27 @@
 package com.vulncheck.app.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJob;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.ResearchJobItemRepository;
 import com.vulncheck.app.service.nvd.CpeUtils;
+import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.vuln.NvdVulnerabilitySource;
 import com.vulncheck.app.service.vuln.SourceResult;
 import com.vulncheck.app.service.vuln.VersionUtils;
 import com.vulncheck.app.service.vuln.VulnFinding;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +38,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.util.UriComponentsBuilder;
 
 /**
  * Closed-mode backlog item 202's Phase 3b mandatory A/B gate (docs/spec/closed-mode-plan.md
@@ -58,17 +68,77 @@ import org.springframework.transaction.annotation.Transactional;
  * which is the only thing the current schema supports — see this run's own diff findings for whether
  * that gap actually manifested against golden-300's IDENTIFIED_CPE rows in practice.
  *
- * <p><b>Round 3 result (2026-09-03)</b>: of the 38 {@code liveOnly} CVEs found across the mismatched
- * rows, 0 were attributable to the {@code -} fail-closed rule in {@link #versionApplies}
- * (DASH_FAIL_CLOSED was 0 across all 65 rows) — i.e. this run's remaining {@code liveOnly} gap
- * wasn't caused by the AND-node/{@code -} schema gap described above. This does <em>not</em> mean
- * no row's {@code cpe_match} data contained a bare {@code -} version segment: {@link
- * #classifyLiveOnly}'s DASH_FAIL_CLOSED count is only computed over the {@code liveOnly} CVEs of
- * already-mismatched rows, so a {@code -} segment on a CVE that {@link #mirrorLookup} and the live
- * query already agreed on (or one attached to a {@code mirrorOnly} CVE) is invisible to this
- * counter. The round 1 (39/65 matched, {@code -} treated as {@code *}) vs. round 2 (43/65 matched,
- * {@code -} fail-closed) delta is itself evidence that this branch does fire in practice. See the
- * {@code @Disabled} reason below for the full numeric breakdown.
+ * <p><b>Round 3 finding, corrected (2026-09-03)</b>: round 3's original text here claimed the
+ * remaining {@code liveOnly} gap "wasn't caused by" the AND-node/{@code -} schema gap, based on
+ * DASH_FAIL_CLOSED being 0 across all 65 rows. That claim was invalid — round 3's {@link
+ * #classifyLiveOnly} judged freshness via a wall-clock backfill-completion-timestamp comparison
+ * that a CVE's own (NVD-side) {@code last_modified_at} is, structurally, almost always older than;
+ * a senior-reviewer DB measurement confirmed all 385,847 mirrored records satisfied that "stale"
+ * condition. Every {@code liveOnly} CVE was therefore absorbed into the freshness bucket before the
+ * {@code -} fail-closed check or the unexplained catch-all ever ran, making DASH_FAIL_CLOSED and
+ * UNEXPLAINED structurally unreachable rather than genuinely zero. {@link #classifyLiveOnly} now
+ * checks {@code nvd_cve_cpe_match} row presence directly instead of a timestamp (see its own
+ * javadoc), so both buckets are reachable again — see the {@code @Disabled} reason below for this
+ * round's real numeric breakdown. DASH_FAIL_CLOSED/UNEXPLAINED, whatever their value, remain only
+ * computed over the {@code liveOnly} CVEs of already-mismatched rows, so a {@code -} segment on a
+ * CVE that {@link #mirrorLookup} and the live query already agreed on (or one attached to a {@code
+ * mirrorOnly} CVE) is still invisible to those counters.
+ *
+ * <p><b>Round 4 finding, corrected (round 5, 2026-09-03)</b>: round 4 above left one {@code
+ * liveOnly} CVE — CVE-2026-18301, golden-300's GIMP 2.10.38 row — as {@code UNEXPLAINED}, and
+ * classified the other 37 as {@code FRESHNESS_STALE} purely on "zero matching {@code
+ * nvd_cve_cpe_match} rows", assumed (never checked against NVD's own authoritative data) to mean
+ * "not synced yet" — the same unproven-freshness mistake round 3 made in a different shape. A
+ * senior-reviewer direct, unauthenticated, non-destructive query of NVD's public {@code ?cveId=}
+ * endpoint for CVE-2026-18301 found its authoritative record's own {@code lastModified=2026-09-02}
+ * (NVD had just reanalyzed this CVE) carries exactly one {@code gimp:gimp} {@code cpeMatch} — a
+ * fixed {@code criteria} version of {@code 3.2.2}, no range fields — which does not cover
+ * golden-300's queried {@code 2.10.38} at all. Live's {@code ?cpeName=} search endpoint (queried by
+ * {@link NvdVulnerabilitySource#fetchFromNvdCached} above) simply hadn't caught up with that
+ * reanalysis yet and returned this CVE anyway: a live-side search-index lag, not a mirror defect.
+ * {@link #classifyLiveOnly} now checks this authoritative {@code ?cveId=} data first (see its own
+ * javadoc and {@link #fetchAuthoritativeCveData}) for every {@code liveOnly} CVE, splitting what
+ * round 4 lumped into one unproven {@code FRESHNESS_STALE} bucket into a proven {@code
+ * LIVE_ONLY_FALSE_POSITIVE}/{@code FRESHNESS_MISSING}/{@code FRESHNESS_LAG}/{@code
+ * INGEST_GAP_OR_LOGIC_BUG} breakdown instead.
+ *
+ * <p><b>Round 5 result (2026-09-03)</b>: the fix above unblocked the real run against the dev DB
+ * mirror. 64 of golden-300's 65 {@code IDENTIFIED_CPE} rows produced a successful live query (1 --
+ * Notepad++ -- excluded as inconclusive, same as round 4); 51/64 matched exactly, {@code
+ * totalMirrorOnly=0} (no false positives). {@code totalLiveOnly=64}, and — contrary to round 3/4's
+ * working assumption that this gap was freshness-driven — all 64 of those {@code liveOnly} CVEs
+ * classified as {@link LiveOnlyCause#LIVE_ONLY_FALSE_POSITIVE}: for each one, NVD's own
+ * authoritative {@code ?cveId=} record has no {@code cpeMatch} covering the queried version at all,
+ * meaning live's {@code ?cpeName=} search index returned a CVE its own authoritative record doesn't
+ * actually cover — the same search-index-lag/over-broad-match shape round 4 found in isolation for
+ * CVE-2026-18301/GIMP, recurring across the entire {@code liveOnly} set in this run rather than
+ * being a one-off. {@code freshnessMissing=0}, {@code freshnessLag=0}, {@code
+ * dashFailClosedOnly=0}, {@code ingestGapOrLogicBug=0}, {@code unexplained=0} — {@code gatePassed =
+ * true}. See the {@code @Disabled} reason below for the full breakdown; this is one measurement
+ * against this DB's snapshot and NVD's live state on 2026-09-03, not a standing guarantee for other
+ * points in time or other samples.
+ *
+ * <p><b>Round 5 blocker (2026-09-03)</b>: the first attempt to actually run round 5 against the real
+ * dev DB failed on the very first golden-300 row with {@code AEADBadTagException}. Root cause: (a)
+ * this class's {@code compareLiveAndMirrorForEveryIdentifiedCpeGoldenRow} test method was passing
+ * {@link #REAL_USER_ID} into {@link Stage1IdentificationService#identify}, and that user already has
+ * a real NVD API key registered in that DB, encrypted under the app's real, production secret
+ * encryption key; (b) this harness's {@code @TestPropertySource} does not (and per (d) below, must
+ * not) supply that real key, so {@code UserApiKeyService#getNvdApiKey}'s decryption attempt against
+ * whatever dummy/test key is in effect fails hard rather than silently. (c) The fix is not to bring a
+ * real key into the test config — it's to stop routing {@code identify} through {@link
+ * #REAL_USER_ID} at all: {@code identify} now takes {@link #UNKEYED_USER_ID} instead, the same
+ * structurally-keyless id every other live call in this class already uses, so {@code getNvdApiKey}
+ * has nothing to decrypt for that call either, regardless of what's registered against user 5 in
+ * whatever DB this runs against. {@link #REAL_USER_ID} is now used only where an FK to a real user
+ * row is unavoidable, i.e. {@link ResearchJobService#createJob}. (d) A side effect worth recording:
+ * rounds 1 through 4 above never hit this exception only because user 5 happened to have no NVD key
+ * registered at the time they ran (see the now-removed javadoc paragraph on {@link #REAL_USER_ID}
+ * that used to require re-confirming that by hand before every run) — had a key existed then, {@code
+ * identify}'s NVD lookups in those rounds would have silently used keyed pacing (~700ms/request)
+ * instead of this gate's required unkeyed 6.5s/request, a latent violation of the gate's own pacing
+ * requirement that this fix now makes structurally impossible rather than dependent on remembering
+ * to check a database row by hand.
  *
  * <p>Uses the same {@code @Transactional} rollback trick as {@link ChocolateyRemovalGolden300RecallTest}
  * (job creation joins this test method's own transaction and is rolled back at the end, never
@@ -76,41 +146,65 @@ import org.springframework.transaction.annotation.Transactional;
  * this package. Disabled by default; re-enable by hand, run once, restore {@code @Disabled}.
  */
 @SpringBootTest
+// Never override app.secret-encryption-key here, literal or via ${APP_SECRET_ENCRYPTION_KEY} --
+// this DB may hold real, production-encrypted secrets (see the class javadoc's "Round 5 blocker"
+// and the removed FRESHNESS_STALE-style unproven-assumption mistakes it cites): a test-only key
+// here would either fail to decrypt them (as happened) or, worse, silently succeed against
+// differently-encrypted data. The fix for the AEADBadTagException below is routing calls through
+// UNKEYED_USER_ID instead, not bringing a real/dummy key into this test config.
 @TestPropertySource(properties = {
         "spring.datasource.url=jdbc:postgresql://postgres:5432/vulncheck",
         "spring.datasource.username=vulncheck",
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Round 3 (2026-09-03, closed-mode backlog item 202 Phase 3b gate) RUN, GATE PASSED: 65 "
-        + "golden-300.csv IDENTIFIED_CPE rows compared (64 with a successful live query, 1 -- "
-        + "Notepad++ -- had a live-query failure and was excluded as inconclusive). 53/65 matched "
-        + "exactly; of the remaining 12 mismatched rows (including the 1 inconclusive one), "
-        + "totalMirrorOnly=0 (no false positives) and totalLiveOnly=38, all 38 freshness-explained "
-        + "(FRESHNESS_MISSING/FRESHNESS_STALE against this DB's backfill-completion timestamp), 0 "
-        + "DASH_FAIL_CLOSED, 0 UNEXPLAINED. Per-row live finding counts across the 64 successfully "
-        + "queried rows: sum 4676, average ~73.1, top 5 by count: Google Chrome 127.0.6533.100 "
-        + "(2739), Mozilla Firefox 128.0 (681), GitLab 17.2.1 (282), IrfanView 4.67 (165), MongoDB "
-        + "7.0.12 (86). Round 1 (naive '-'-version handling, treating a CPE 2.3 '-' version segment "
-        + "the same as '*'): 39/65 rows matched, 26 mismatched. Round 2 (fixed versionApplies to "
-        + "fail-closed on '-'): 43/65 matched (66%), 22 mismatched, GATE NOT PASSED -- see git "
-        + "history for round 2's full mismatch breakdown (superseded by the mirrorLookup "
-        + "vulnerable=false fix and the mirrorOnly/liveOnly gate-classification rewrite that "
-        + "produced round 3's numbers above, so round 2's mirrorOnly/liveOnly split specifically is "
-        + "stale and should not be quoted going forward). Left disabled so it can never re-fire on a "
-        + "routine mvn test run -- see class javadoc.")
+@Disabled("Round 5 (2026-09-03, senior-reviewer finding on round 4's PR: classifyLiveOnly's "
+        + "FRESHNESS_STALE bucket was itself an unproven assumption -- the same failure shape as "
+        + "round 3's unreachable-counter bug, see class javadoc) has been run against the real dev "
+        + "DB mirror. GATE PASSED. 65 golden-300.csv IDENTIFIED_CPE rows compared (64 with a "
+        + "successful live query, 1 -- Notepad++ -- excluded as inconclusive, same exclusion as "
+        + "round 4). 51/64 matched exactly (CVE-id sets identical); totalMirrorOnly=0 across the 13 "
+        + "mismatched rows (no false positives). totalLiveOnly=64, and this round's authoritative-"
+        + "data-first check (rather than round 4's assumption) classified all 64/64 as "
+        + "LIVE_ONLY_FALSE_POSITIVE: for every one of these CVEs, NVD's own authoritative ?cveId= "
+        + "record has no cpeMatch covering the queried version at all -- live's ?cpeName= search "
+        + "endpoint returned each CVE anyway, the same search-index-lag/over-broad-match shape round "
+        + "4 found in isolation for CVE-2026-18301/GIMP, here recurring across the entire liveOnly "
+        + "set rather than being a one-off. freshnessMissing=0, freshnessLag=0 -- none of the 64 "
+        + "liveOnly CVEs were actually freshness gaps once checked against authoritative data, which "
+        + "means round 3/4's working assumption that this liveOnly gap was freshness-driven did not "
+        + "hold for this sample. dashFailClosedOnly=0, ingestGapOrLogicBug=0, unexplained=0 (every "
+        + "authoritative ?cveId= fetch succeeded and was classifiable). Gate criterion "
+        + "(totalMirrorOnly==0 && dashFailClosedOnly==0 && ingestGapOrLogicBug==0 && unexplained==0) "
+        + "is satisfied: gatePassed=true. This is one measurement against golden-300's 64 "
+        + "successfully-queried IDENTIFIED_CPE rows at this DB's snapshot and NVD's live state on "
+        + "2026-09-03 -- not a guarantee the same breakdown reproduces at another point in time or "
+        + "against a different sample. This round's unit test (NvdMirrorAbVerificationRunnerTest) "
+        + "covers the authoritativeConfigurationsCover predicate in isolation with fixture JSON; the "
+        + "real-mirror numbers above come from this class's own @Test run, not from that unit test. "
+        + "Per-row live finding counts across the 64 successfully queried rows unchanged from round "
+        + "4 (live-side query logic wasn't touched by this round's fix): sum 4676, average ~73.1, "
+        + "top 3 by count: Google Chrome 127.0.6533.100 (2739), Mozilla Firefox 128.0 (681), GitLab "
+        + "17.2.1 (282). Left disabled so it can never re-fire on a routine mvn test run -- see class "
+        + "javadoc.")
 class NvdMirrorAbVerificationRunner {
 
-    /** Round 3 (2026-09-03) ran with no Claude key registered for user 5, so the 65 {@link
-     *  Stage1IdentificationService#identify} calls below completed for free (static-only, no Stage1
-     *  AI arbitration). Anyone re-enabling this class must re-confirm that's still true before
-     *  running it again — if user 5 has since gained a registered key, {@code identify} will fire a
-     *  billed Stage1 AI arbitration call per row instead. */
+    /** Used only as the job-owner foreign key for {@link ResearchJobService#createJob} — job
+     *  ownership requires a real, existing {@code users} row. Never pass this to {@link
+     *  Stage1IdentificationService#identify} or {@link NvdVulnerabilitySource#fetchFromNvdCached}
+     *  (see {@link #UNKEYED_USER_ID}'s own javadoc for why: this user id may have a real, live
+     *  encrypted secret registered against it in whatever DB this runs against, and this harness's
+     *  test config cannot decrypt that). */
     private static final Long REAL_USER_ID = 5L;
-    /** Deliberately not a real user id (no {@code user_secrets} row can exist for it) — forces
-     *  {@link com.vulncheck.app.service.UserApiKeyService#getNvdApiKey} to return empty so every
-     *  live call here goes through {@code NvdRateLimiter}'s unkeyed 6.5s/request pacing, exactly as
-     *  the task brief for this gate requires, regardless of what key (if any) is registered against
-     *  {@link #REAL_USER_ID} at the time this happens to run. */
+    /** Deliberately not a real user id (no {@code user_secrets} row can exist for it). Passed to
+     *  both {@link NvdVulnerabilitySource#fetchFromNvdCached} and {@link
+     *  Stage1IdentificationService#identify} so that, structurally and regardless of whatever is or
+     *  isn't registered against {@link #REAL_USER_ID} in whatever DB this happens to run against:
+     *  (i) every NVD access those two call sites make goes through {@code NvdRateLimiter}'s unkeyed
+     *  6.5s/request pacing, exactly as this gate's task brief requires (the other live path, {@link
+     *  #fetchAuthoritativeCveData}, takes no user id at all and always paces unkeyed by construction),
+     *  and (ii) zero billed Claude calls are possible, since {@code identify} can only reach Stage1
+     *  AI arbitration via a registered key this user id structurally cannot have. See the class
+     *  javadoc's "Round 5 blocker" section for the incident this design replaced. */
     private static final Long UNKEYED_USER_ID = -1L;
 
     @Autowired
@@ -123,6 +217,19 @@ class NvdMirrorAbVerificationRunner {
     private NvdVulnerabilitySource nvdVulnerabilitySource;
     @Autowired
     private JdbcTemplate jdbcTemplate;
+    @Autowired
+    private RestClient externalApiRestClient;
+    @Autowired
+    private NvdRateLimiter nvdRateLimiter;
+
+    private static final String NVD_CVE_API = "https://services.nvd.nist.gov/rest/json/cves/2.0";
+
+    /** Memoizes {@link #fetchAuthoritativeCveData} per CVE id across this test run -- the liveOnly
+     *  CVEs recur across mismatched golden-300 rows (round 4: 38 liveOnly CVEs across 12 mismatched
+     *  rows), and every fetch already pays {@link NvdRateLimiter}'s unkeyed 6.5s pacing, so
+     *  refetching the same id would multiply an already-slow run's wall time for no new
+     *  information. */
+    private final Map<String, AuthoritativeCveData> authoritativeCveCache = new HashMap<>();
 
     private record GoldenCpeRow(String rawProductName, String version, String cpeName) {
     }
@@ -145,7 +252,7 @@ class NvdMirrorAbVerificationRunner {
             if (!identifiedCpeKeys.contains(key(item.getRawProductName(), item.getVersion()))) {
                 continue;
             }
-            Optional<IdentifiedProduct> identified = stage1IdentificationService.identify(item, REAL_USER_ID);
+            Optional<IdentifiedProduct> identified = stage1IdentificationService.identify(item, UNKEYED_USER_ID);
             if (identified.isEmpty() || identified.get().getCpe() == null) {
                 System.out.println("SKIP (Stage1 did not produce a CPE for this row): "
                         + item.getRawProductName() + " " + item.getVersion());
@@ -159,19 +266,14 @@ class NvdMirrorAbVerificationRunner {
         }
         System.out.println("=== rows with a real Stage1-produced CPE to A/B: " + rows.size() + " ===\n");
 
-        // Backfill-completion timestamp, used by classifyLiveOnly's FRESHNESS_STALE bucket (item 4:
-        // "last_modified_at older than backfill completion" as a freshness signal). Empty when the
-        // baseline backfill itself hasn't finished -- in that case only the FRESHNESS_MISSING bucket
-        // (CVE absent from nvd_cve_records altogether) is available as a freshness explanation.
-        Optional<OffsetDateTime> backfillCompletedAt = loadBackfillCompletedAt();
-        System.out.println("=== backfill completed at: "
-                + backfillCompletedAt.map(Object::toString).orElse("(baseline not yet complete)") + " ===\n");
-
         int matched = 0;
         int totalMirrorOnly = 0;
         int totalLiveOnly = 0;
-        int freshnessExplained = 0;
+        int liveOnlyFalsePositive = 0;
+        int freshnessMissing = 0;
+        int freshnessLag = 0;
         int dashFailClosedOnly = 0;
+        int ingestGapOrLogicBug = 0;
         int unexplained = 0;
         List<String> mismatchReports = new ArrayList<>();
         // (row, live findings count) for every successfully-queried row -- item 3's raw material for
@@ -210,10 +312,13 @@ class NvdMirrorAbVerificationRunner {
                     .append("    live=").append(liveIds.size()).append(" mirror=").append(mirrorIds.size())
                     .append(" liveOnly=").append(liveOnly).append(" mirrorOnly=").append(mirrorOnly).append('\n');
             for (String cveId : liveOnly) {
-                LiveOnlyExplanation explanation = classifyLiveOnly(cveId, row.cpeName(), backfillCompletedAt.orElse(null));
+                LiveOnlyExplanation explanation = classifyLiveOnly(cveId, row.cpeName());
                 switch (explanation.cause()) {
-                    case FRESHNESS_MISSING, FRESHNESS_STALE -> freshnessExplained++;
+                    case LIVE_ONLY_FALSE_POSITIVE -> liveOnlyFalsePositive++;
+                    case FRESHNESS_MISSING -> freshnessMissing++;
+                    case FRESHNESS_LAG -> freshnessLag++;
                     case DASH_FAIL_CLOSED -> dashFailClosedOnly++;
+                    case INGEST_GAP_OR_LOGIC_BUG -> ingestGapOrLogicBug++;
                     case UNEXPLAINED -> unexplained++;
                 }
                 report.append("    liveOnly ").append(cveId).append(" [").append(explanation.cause()).append("]: ")
@@ -247,26 +352,41 @@ class NvdMirrorAbVerificationRunner {
         // into a "他N件" (N = total - 10) summary line, would show 100% of findings for the
         // majority of rows in this sample (rows with <=10 findings) while keeping the worst-case
         // row (Chrome, N=2729 hidden) from overwhelming the UI.
-        // Gate criterion (item 4): mirrorOnly must be zero (removing the vulnerable=true filter
-        // should already drive false positives to zero -- any survivor here is a genuine
-        // mirrorLookup/versionApplies bug, not a known limitation) and every liveOnly CVE must be
-        // explained by data freshness. dashFailClosedOnly is reported as its own independent bucket
-        // per item 4's second requirement, but is NOT counted as "explained" -- it is the known,
+        // Gate criterion, round 5 (senior-reviewer finding on round 4's PR): mirrorOnly must be zero
+        // (removing the vulnerable=true filter should already drive false positives to zero -- any
+        // survivor here is a genuine mirrorLookup/versionApplies bug, not a known limitation), and
+        // every liveOnly CVE must be explained without assuming freshness -- classifyLiveOnly now
+        // checks NVD's own authoritative ?cveId= data first (see its own javadoc). A liveOnly CVE the
+        // authoritative record itself doesn't cover (liveOnlyFalsePositive) is a live search-index
+        // artifact, not a mirror defect, so it does NOT gate. dashFailClosedOnly (the known,
         // schema-limited AND-node/versionApplies('-') gap this task's scope explicitly excludes
-        // fixing (would need V39's node/operator columns), so it still fails the gate on its own.
-        boolean gatePassed = totalMirrorOnly == 0 && unexplained == 0 && dashFailClosedOnly == 0;
+        // fixing) and ingestGapOrLogicBug (a genuine, non-freshness, non-dash gap between a fresh
+        // mirror and authoritative data) both still fail the gate -- neither is "explained".
+        boolean gatePassed = totalMirrorOnly == 0 && dashFailClosedOnly == 0 && ingestGapOrLogicBug == 0
+                && unexplained == 0;
 
         System.out.println("\n=== closed-mode backlog item 202 Phase 3b A/B gate result ===");
         System.out.println("total rows compared: " + rows.size());
         System.out.println("matched (identical CVE-id set): " + matched);
         System.out.println("mismatched: " + mismatchReports.size());
         System.out.println("totalMirrorOnly (false positives, must be 0 to pass): " + totalMirrorOnly);
-        System.out.println("totalLiveOnly (mirror-missing CVEs): " + totalLiveOnly);
-        System.out.println("  of which freshness-explained (missing from nvd_cve_records, or stale "
-                + "last_modified_at): " + freshnessExplained);
-        System.out.println("  of which versionApplies '-' fail-closed only (known AND-node schema gap, "
-                + "reported separately, does NOT count as explained): " + dashFailClosedOnly);
-        System.out.println("  of which unexplained (neither freshness nor the '-' rule): " + unexplained);
+        System.out.println("totalLiveOnly (live-only CVEs across mismatched rows): " + totalLiveOnly);
+        System.out.println("  of which liveOnlyFalsePositive (authoritative ?cveId= data does NOT cover "
+                + "this version -- live search-index artifact, not a mirror defect, does NOT gate): "
+                + liveOnlyFalsePositive);
+        System.out.println("  of which freshnessMissing (authoritative data covers it, but absent from "
+                + "nvd_cve_records entirely): " + freshnessMissing);
+        System.out.println("  of which freshnessLag (authoritative data covers it, nvd_cve_records row "
+                + "exists but its own last_modified_at is older than authoritative's lastModified): "
+                + freshnessLag);
+        System.out.println("  of which dashFailClosedOnly (authoritative data covers it, mirror is fresh, "
+                + "but its own cpe_match row(s) carry a '-' version segment -- known AND-node schema "
+                + "gap, must be 0 to pass): " + dashFailClosedOnly);
+        System.out.println("  of which ingestGapOrLogicBug (authoritative data covers it, mirror is "
+                + "fresh, no '-' row either -- genuine ingest/logic gap, must be 0 to pass): "
+                + ingestGapOrLogicBug);
+        System.out.println("  of which unexplained (authoritative ?cveId= fetch itself failed -- cannot "
+                + "classify without ground truth, must be 0 to pass): " + unexplained);
         System.out.println("GATE " + (gatePassed ? "PASSED" : "NOT PASSED"));
         for (String report : mismatchReports) {
             System.out.println("--- MISMATCH ---");
@@ -338,19 +458,26 @@ class NvdMirrorAbVerificationRunner {
         String criteria = (String) matchRow.get("criteria");
         List<String> segments = splitCpeSegments(criteria);
         String criteriaVersion = segments.size() > 5 ? segments.get(5) : "*";
+        return versionInRange(itemVersion, criteriaVersion,
+                (String) matchRow.get("version_start_including"),
+                (String) matchRow.get("version_start_excluding"),
+                (String) matchRow.get("version_end_including"),
+                (String) matchRow.get("version_end_excluding"));
+    }
 
+    /** The actual version-applicability rule shared by {@link #versionApplies} (mirror DB rows,
+     *  snake_case columns) and {@link #authoritativeConfigurationsCover} (live {@code ?cveId=} JSON,
+     *  camelCase fields) -- pulled out so both consult the exact same fail-closed-on-{@code -}
+     *  semantics rather than two independently-maintained copies drifting apart. Package-private
+     *  static, no DB/network access, directly unit-testable. */
+    static boolean versionInRange(String itemVersion, String criteriaVersion, String startIncluding,
+            String startExcluding, String endIncluding, String endExcluding) {
         if ("-".equals(criteriaVersion)) {
             return false;
         }
         if (!"*".equals(criteriaVersion)) {
             return criteriaVersion.equalsIgnoreCase(itemVersion);
         }
-
-        String startIncluding = (String) matchRow.get("version_start_including");
-        String startExcluding = (String) matchRow.get("version_start_excluding");
-        String endIncluding = (String) matchRow.get("version_end_including");
-        String endExcluding = (String) matchRow.get("version_end_excluding");
-
         if (startIncluding != null && VersionUtils.compare(itemVersion, startIncluding) < 0) {
             return false;
         }
@@ -366,98 +493,300 @@ class NvdMirrorAbVerificationRunner {
         return true;
     }
 
+    private record AuthoritativeCveData(boolean fetchSucceeded, String lastModified, JsonNode configurations) {
+    }
+
+    /** Fetches one CVE's authoritative ground truth via NVD's {@code ?cveId=} endpoint (the single,
+     *  fully-current record NVD has for that id) -- unlike {@code ?cpeName=} search, which round 4
+     *  found can lag behind a CVE's own {@code lastModified} reanalysis by at least a day (see class
+     *  javadoc for the CVE-2026-18301/GIMP case this exists to catch). Memoized via {@link
+     *  #authoritativeCveCache}.
+     *
+     *  <p>Sequential only, through the same shared {@link NvdRateLimiter} (unkeyed, 6.5s/request)
+     *  every other live call in this class already goes through -- deliberately not parallelized:
+     *  this round's task brief is explicit that parallelizing would trip NVD's 5 req/30s unkeyed
+     *  limit and produce a wave of fetch failures that would corrupt the very comparison this class
+     *  exists to run.
+     *
+     *  <p>Any failure to get a usable record back -- network/parse error, zero {@code vulnerabilities}
+     *  entries, or a missing/unparseable {@code lastModified} -- is reported as {@code
+     *  fetchSucceeded=false} rather than silently treated as "no data" or "covers nothing": {@link
+     *  #classifyLiveOnly} turns that into {@link LiveOnlyCause#UNEXPLAINED}, which fails the gate,
+     *  per this round's task brief ("取得失敗時はUNEXPLAINED扱いにしてゲートを落とす"). */
+    private AuthoritativeCveData fetchAuthoritativeCveData(String cveId) {
+        if (authoritativeCveCache.containsKey(cveId)) {
+            return authoritativeCveCache.get(cveId);
+        }
+        AuthoritativeCveData data;
+        try {
+            URI uri = UriComponentsBuilder.fromHttpUrl(NVD_CVE_API)
+                    .queryParam("cveId", cveId)
+                    .build()
+                    .toUri();
+            nvdRateLimiter.awaitTurn(false);
+            JsonNode body = externalApiRestClient.get().uri(uri).retrieve().body(JsonNode.class);
+            JsonNode vulnerabilities = body == null ? null : body.path("vulnerabilities");
+            if (vulnerabilities == null || !vulnerabilities.isArray() || vulnerabilities.isEmpty()) {
+                System.out.println("AUTHORITATIVE FETCH: ?cveId=" + cveId
+                        + " returned zero vulnerabilities entries -- treating as a fetch failure");
+                data = new AuthoritativeCveData(false, null, null);
+            } else {
+                JsonNode cve = vulnerabilities.get(0).path("cve");
+                String lastModified = cve.path("lastModified").asText(null);
+                if (lastModified == null) {
+                    System.out.println("AUTHORITATIVE FETCH: ?cveId=" + cveId
+                            + " response has no cve.lastModified -- treating as a fetch failure");
+                    data = new AuthoritativeCveData(false, null, null);
+                } else {
+                    data = new AuthoritativeCveData(true, lastModified, cve.path("configurations"));
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("AUTHORITATIVE FETCH FAILED: ?cveId=" + cveId + " -- " + e);
+            data = new AuthoritativeCveData(false, null, null);
+        }
+        authoritativeCveCache.put(cveId, data);
+        return data;
+    }
+
+    /** NVD's {@code lastModified} field is ISO-8601 without a zone/offset (e.g. {@code
+     *  "2019-10-03T13:15:10.947"}, implicitly UTC) -- same fallback shape {@code
+     *  NvdCveSyncService#parseNvdTimestamp} uses, deliberately duplicated rather than reused here
+     *  (see class javadoc for why this class doesn't lean on production parsing code beyond the bare
+     *  minimum). */
+    private static OffsetDateTime parseNvdTimestamp(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return OffsetDateTime.parse(value);
+        } catch (DateTimeParseException e) {
+            try {
+                return LocalDateTime.parse(value).atOffset(ZoneOffset.UTC);
+            } catch (DateTimeException e2) {
+                return null;
+            }
+        }
+    }
+
+    /** Pure predicate, no DB/network access -- exercised directly by {@code
+     *  NvdMirrorAbVerificationRunnerTest} with fixture JSON (this class itself is a disabled,
+     *  DB/network-backed integration harness whose own {@code @Test} can't double as that unit
+     *  test). Does the authoritative {@code configurations} JSON (from a {@code ?cveId=} response's
+     *  {@code cve.configurations}) contain at least one {@code cpeMatch} entry for the given (part,
+     *  vendor, product) whose version-applicability covers {@code itemVersion}? Same OR-only,
+     *  fail-closed-on-{@code -} semantics as {@link #versionApplies} (see {@link #versionInRange}),
+     *  deliberately duplicated field-extraction from the live JSON shape rather than reused, since
+     *  it differs from {@link #mirrorLookup}'s flattened DB-row shape. */
+    static boolean authoritativeConfigurationsCover(JsonNode configurations, String part, String vendor,
+            String product, String itemVersion) {
+        for (JsonNode cpeMatch : matchingCriteriaNodes(configurations, part, vendor, product)) {
+            List<String> segments = splitCpeSegments(cpeMatch.path("criteria").asText(""));
+            String criteriaVersion = segments.size() > 5 ? segments.get(5) : "*";
+            if (versionInRange(itemVersion, criteriaVersion,
+                    cpeMatch.path("versionStartIncluding").asText(null),
+                    cpeMatch.path("versionStartExcluding").asText(null),
+                    cpeMatch.path("versionEndIncluding").asText(null),
+                    cpeMatch.path("versionEndExcluding").asText(null))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Every {@code cpeMatch} node across {@code configurations[].nodes[]} whose own {@code
+     *  criteria} parses to the given (part, vendor, product) -- regardless of version applicability.
+     *  Shared by {@link #authoritativeConfigurationsCover} (checks version applicability over this
+     *  set) and {@link #authoritativeCriteriaSummary} (dumps this set for the human-readable
+     *  report). */
+    private static List<JsonNode> matchingCriteriaNodes(JsonNode configurations, String part, String vendor,
+            String product) {
+        List<JsonNode> result = new ArrayList<>();
+        if (configurations == null || configurations.isMissingNode() || configurations.isNull()) {
+            return result;
+        }
+        for (JsonNode config : configurations) {
+            for (JsonNode node : config.path("nodes")) {
+                for (JsonNode cpeMatch : node.path("cpeMatch")) {
+                    List<String> segments = splitCpeSegments(cpeMatch.path("criteria").asText(""));
+                    if (segments.size() > 4 && part.equals(segments.get(2)) && vendor.equals(segments.get(3))
+                            && product.equals(segments.get(4))) {
+                        result.add(cpeMatch);
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    /** Human-readable dump of every authoritative {@code cpeMatch}'s own {@code criteria} string for
+     *  the given (part, vendor, product) -- used in {@link LiveOnlyCause#LIVE_ONLY_FALSE_POSITIVE}
+     *  report detail so the printed record carries NVD's own ground-truth criteria, not just this
+     *  class's verdict. */
+    private static String authoritativeCriteriaSummary(JsonNode configurations, String part, String vendor,
+            String product) {
+        List<String> criteriaStrings = new ArrayList<>();
+        for (JsonNode cpeMatch : matchingCriteriaNodes(configurations, part, vendor, product)) {
+            criteriaStrings.add(cpeMatch.path("criteria").asText());
+        }
+        return criteriaStrings.isEmpty()
+                ? "(no cpeMatch entries at all for this part/vendor/product)"
+                : criteriaStrings.toString();
+    }
+
     /** Why a live-only CVE (returned by the live NVD query, not by {@link #mirrorLookup}) diverges
      *  -- see the gate's own pass/fail wording in {@link
      *  #compareLiveAndMirrorForEveryIdentifiedCpeGoldenRow} for how each cause is (or isn't) treated
      *  as "explained". */
     private enum LiveOnlyCause {
-        /** {@code nvd_cve_records} has no row for this CVE at all -- never synced, or created/modified
-         *  after this DB's backfill snapshot. A freshness gap. */
+        /** NVD's own authoritative {@code ?cveId=} record (see {@link #fetchAuthoritativeCveData})
+         *  has no {@code cpeMatch} covering this (part, vendor, product, version) at all -- live's
+         *  {@code ?cpeName=} search endpoint returned this CVE anyway, meaning that search index
+         *  hasn't caught up with the CVE's own reanalysis yet (confirmed live for CVE-2026-18301/
+         *  GIMP, round 4 -> round 5). This is a live-side artifact, not a mirror defect: {@link
+         *  #mirrorLookup} was right not to return it. Explained, does NOT gate. */
+        LIVE_ONLY_FALSE_POSITIVE,
+        /** Authoritative data confirms this CVE genuinely covers the queried version, but {@code
+         *  nvd_cve_records} has no row for this CVE at all -- never synced, or created/modified after
+         *  this DB's backfill snapshot. A proven freshness gap. Explained, does NOT gate. */
         FRESHNESS_MISSING,
-        /** {@code nvd_cve_records} has a row, but its {@code last_modified_at} predates the baseline
-         *  backfill's own completion timestamp -- this CVE's CPE-applicability enrichment plausibly
-         *  hadn't landed by the time the backfill snapshot was taken (NVD tags a CVE's CPE
-         *  applicability days-to-weeks after publication; no delta sync currently runs to catch up).
-         *  A freshness gap. */
-        FRESHNESS_STALE,
-        /** {@code nvd_cve_records} has a fresh row, and this class found a {@code cpe_match} row for
-         *  this CVE/part/vendor/product whose {@code criteria} carries a bare {@code -} version
-         *  segment -- {@link #versionApplies}'s deliberate fail-closed treatment (see its own javadoc)
-         *  is exactly why {@link #mirrorLookup} didn't match it. This is the known, schema-limited
-         *  AND-node gap ({@code nvd_cve_cpe_match} has no node/operator columns to represent a real
-         *  NVD applicability condition spanning two paired CPEs) -- NOT fixable within this task's
-         *  scope, and NOT counted as "freshness-explained" for gate purposes, but broken out as its
-         *  own bucket so its share of the remaining gap is visible. */
+        /** Authoritative data confirms this CVE genuinely covers the queried version, and {@code
+         *  nvd_cve_records} has a row for it, but that row's own {@code last_modified_at} is older
+         *  than the authoritative {@code lastModified} -- the mirror is holding a stale revision. A
+         *  proven (not assumed, unlike round 4's {@code FRESHNESS_STALE}) freshness gap. Explained,
+         *  does NOT gate. */
+        FRESHNESS_LAG,
+        /** Authoritative data confirms this CVE genuinely covers the queried version, the mirror's
+         *  {@code nvd_cve_records} row is at least as fresh as authoritative's own {@code
+         *  lastModified} (so this is NOT a freshness gap), and this class found a {@code cpe_match}
+         *  row for this CVE/part/vendor/product whose {@code criteria} carries a bare {@code -}
+         *  version segment -- {@link #versionApplies}'s deliberate fail-closed treatment (see its own
+         *  javadoc) is exactly why {@link #mirrorLookup} didn't match it. This is the known,
+         *  schema-limited AND-node gap ({@code nvd_cve_cpe_match} has no node/operator columns to
+         *  represent a real NVD applicability condition spanning two paired CPEs) -- NOT fixable
+         *  within this task's scope, and still gates (not counted as "explained"). */
         DASH_FAIL_CLOSED,
-        /** Neither of the above -- a genuine unexplained applicability-logic difference worth
-         *  root-causing on its own, not a known/accepted gap. */
+        /** Authoritative data confirms this CVE genuinely covers the queried version, the mirror's
+         *  {@code nvd_cve_records} row is at least as fresh as authoritative's own {@code
+         *  lastModified}, and none of its {@code nvd_cve_cpe_match} rows for this CVE/part/vendor/
+         *  product carry a {@code -} either -- neither freshness nor the known dash schema gap
+         *  explains this. A genuine ingest-correctness bug (this specific CVE's cpe_match rows for
+         *  this part/vendor/product simply didn't land, or landed wrong, despite the record itself
+         *  being fresh) or applicability-logic bug in {@link #mirrorLookup}/{@link #versionApplies}
+         *  worth root-causing on its own. Gates. */
+        INGEST_GAP_OR_LOGIC_BUG,
+        /** The authoritative {@code ?cveId=} fetch itself failed (network/parse error, zero {@code
+         *  vulnerabilities} entries, or an unparseable {@code lastModified}) -- see {@link
+         *  #fetchAuthoritativeCveData}. Cannot classify this liveOnly CVE without ground truth, so it
+         *  is never silently treated as explained. Gates. */
         UNEXPLAINED
     }
 
     private record LiveOnlyExplanation(LiveOnlyCause cause, String detail) {
     }
 
-    /** Classifies one live-only CVE id per {@link LiveOnlyCause}. Freshness (missing or stale) is
-     *  checked first and takes priority over the '-' fail-closed bucket even if both would apply --
-     *  a CVE that's simply not fresh yet doesn't need the schema-gap explanation to be accounted for. */
-    private LiveOnlyExplanation classifyLiveOnly(String cveId, String cpeName, OffsetDateTime backfillCompletedAt) {
-        List<Map<String, Object>> recordRows = jdbcTemplate.queryForList(
-                "SELECT last_modified_at FROM nvd_cve_records WHERE cve_id = ?", cveId);
-        if (recordRows.isEmpty()) {
-            return new LiveOnlyExplanation(LiveOnlyCause.FRESHNESS_MISSING,
-                    "not present in nvd_cve_records at all -- mirror data gap (never synced, or CVE "
-                            + "created/modified after this DB's backfill snapshot)");
-        }
-        if (backfillCompletedAt != null) {
-            Boolean stale = jdbcTemplate.queryForObject(
-                    "SELECT last_modified_at < ? FROM nvd_cve_records WHERE cve_id = ?",
-                    Boolean.class, backfillCompletedAt, cveId);
-            if (Boolean.TRUE.equals(stale)) {
-                return new LiveOnlyExplanation(LiveOnlyCause.FRESHNESS_STALE,
-                        "present in nvd_cve_records but last_modified_at predates backfill completion ("
-                                + backfillCompletedAt + ") -- CPE-applicability enrichment for this CVE "
-                                + "likely hadn't landed by then");
-            }
+    /** Classifies one live-only CVE id per {@link LiveOnlyCause}, using NVD's own authoritative
+     *  {@code ?cveId=} response (see {@link #fetchAuthoritativeCveData}) as ground truth rather than
+     *  assuming every liveOnly CVE is a mirror freshness gap.
+     *
+     *  <p>REVISE (senior-reviewer round 4 -> round 5, 2026-09-03): round 4's {@code FRESHNESS_STALE}
+     *  bucket (absorbing every liveOnly CVE with zero matching {@code nvd_cve_cpe_match} rows)
+     *  repeated round 3's structural-tautology mistake in a new shape -- "no mirror match row" was
+     *  *assumed* to mean "not synced yet" without ever checking whether NVD's own live data actually
+     *  covers this CVE at all. Live's {@code ?cpeName=} search was re-verified against
+     *  CVE-2026-18301/GIMP: its own {@code ?cveId=} authoritative record (lastModified=2026-09-02)
+     *  has exactly one {@code gimp:gimp} {@code cpeMatch} -- version {@code 3.2.2}, a fixed value
+     *  with no range -- which does not cover golden-300's queried {@code 2.10.38}. Live's search
+     *  index (not yet caught up to that record's own reanalysis) returned this CVE anyway: a
+     *  live-side false positive, not a mirror defect. This version checks authoritative coverage
+     *  first (step (a): {@link #authoritativeConfigurationsCover}) before ever consulting freshness,
+     *  and only falls through to the freshness/dash/ingest-gap buckets (step (b)) once authoritative
+     *  data has confirmed there's a real gap for the mirror to explain. Freshness (missing record,
+     *  then a stale {@code last_modified_at}) is checked before the '-' fail-closed bucket, which in
+     *  turn is checked before the {@link LiveOnlyCause#INGEST_GAP_OR_LOGIC_BUG} catch-all -- a CVE
+     *  that's simply not fresh yet doesn't need the schema-gap explanation to be accounted for. */
+    private LiveOnlyExplanation classifyLiveOnly(String cveId, String cpeName) {
+        AuthoritativeCveData authoritative = fetchAuthoritativeCveData(cveId);
+        if (!authoritative.fetchSucceeded()) {
+            return new LiveOnlyExplanation(LiveOnlyCause.UNEXPLAINED,
+                    "authoritative NVD ?cveId=" + cveId + " lookup failed or returned no usable record "
+                            + "(see AUTHORITATIVE FETCH log above) -- cannot classify without ground "
+                            + "truth, counted as unexplained rather than silently skipped");
         }
 
         List<String> segments = splitCpeSegments(cpeName);
+        String part = segments.get(2);
+        String vendor = segments.get(3);
+        String product = segments.get(4);
+        String itemVersion = segments.get(5);
+
+        if (!authoritativeConfigurationsCover(authoritative.configurations(), part, vendor, product,
+                itemVersion)) {
+            return new LiveOnlyExplanation(LiveOnlyCause.LIVE_ONLY_FALSE_POSITIVE,
+                    "CVE " + cveId + ": live NVD's ?cpeName= search returned this CVE, but its own "
+                            + "authoritative ?cveId= record (lastModified=" + authoritative.lastModified()
+                            + ") has no cpeMatch covering " + part + ":" + vendor + ":" + product + ":"
+                            + itemVersion + " -- a live search-index lag/over-broad-match false "
+                            + "positive, not a mirror defect. Authoritative cpeMatch criteria for this "
+                            + "part/vendor/product: "
+                            + authoritativeCriteriaSummary(authoritative.configurations(), part, vendor, product));
+        }
+
+        OffsetDateTime authoritativeLastModified = parseNvdTimestamp(authoritative.lastModified());
+        if (authoritativeLastModified == null) {
+            return new LiveOnlyExplanation(LiveOnlyCause.UNEXPLAINED,
+                    "authoritative NVD ?cveId=" + cveId + " lastModified=\"" + authoritative.lastModified()
+                            + "\" could not be parsed -- cannot determine freshness without it, counted "
+                            + "as unexplained rather than silently assumed fresh");
+        }
+
+        List<Map<String, Object>> recordRows = jdbcTemplate.queryForList(
+                "SELECT (last_modified_at >= ?) AS mirror_is_fresh FROM nvd_cve_records WHERE cve_id = ?",
+                authoritativeLastModified, cveId);
+        if (recordRows.isEmpty()) {
+            return new LiveOnlyExplanation(LiveOnlyCause.FRESHNESS_MISSING,
+                    "authoritative data confirms this CVE genuinely covers " + itemVersion + " (part="
+                            + part + " vendor=" + vendor + " product=" + product + "), but it's not "
+                            + "present in nvd_cve_records at all -- mirror data gap (never synced, or "
+                            + "CVE created/modified after this DB's backfill snapshot)");
+        }
+        boolean mirrorIsFresh = Boolean.TRUE.equals(recordRows.get(0).get("mirror_is_fresh"));
+        if (!mirrorIsFresh) {
+            return new LiveOnlyExplanation(LiveOnlyCause.FRESHNESS_LAG,
+                    "authoritative data confirms this CVE genuinely covers " + itemVersion + ", and this "
+                            + "DB's nvd_cve_records row for it exists but its own last_modified_at is "
+                            + "older than live's authoritative lastModified=" + authoritative.lastModified()
+                            + " -- the mirror is holding a stale revision of this CVE, a proven (not "
+                            + "assumed) freshness gap");
+        }
+
         List<Map<String, Object>> matchRows = jdbcTemplate.queryForList(
                 "SELECT criteria, vulnerable, version_start_including, version_start_excluding, "
                         + "version_end_including, version_end_excluding FROM nvd_cve_cpe_match "
                         + "WHERE cve_id = ? AND part = ? AND vendor = ? AND product = ?",
-                cveId, segments.get(2), segments.get(3), segments.get(4));
-        for (Map<String, Object> matchRow : matchRows) {
-            List<String> criteriaSegments = splitCpeSegments((String) matchRow.get("criteria"));
+                cveId, part, vendor, product);
+        boolean mirrorHasDashRow = matchRows.stream().anyMatch(row -> {
+            List<String> criteriaSegments = splitCpeSegments((String) row.get("criteria"));
             String criteriaVersion = criteriaSegments.size() > 5 ? criteriaSegments.get(5) : "*";
-            if ("-".equals(criteriaVersion)) {
-                return new LiveOnlyExplanation(LiveOnlyCause.DASH_FAIL_CLOSED,
-                        "present and fresh, but its own cpe_match row (" + matchRow.get("criteria")
-                                + ") carries a bare '-' version segment that versionApplies fail-closes "
-                                + "on -- see versionApplies javadoc, needs a V39 schema change (node/operator "
-                                + "columns) to fix properly, out of this task's scope");
-            }
+            return "-".equals(criteriaVersion);
+        });
+        if (mirrorHasDashRow) {
+            return new LiveOnlyExplanation(LiveOnlyCause.DASH_FAIL_CLOSED,
+                    "authoritative data confirms this CVE genuinely covers " + itemVersion + ", the "
+                            + "mirror's nvd_cve_records row is at least as fresh as live's authoritative "
+                            + "lastModified, but its own nvd_cve_cpe_match row(s) for this CVE/part/"
+                            + "vendor/product carry a bare '-' version segment that versionApplies "
+                            + "fail-closes on -- the known, schema-limited AND-node gap (see "
+                            + "versionApplies javadoc), not fixable within this task's scope. mirror "
+                            + "cpe_match rows: " + matchRows);
         }
-        return new LiveOnlyExplanation(LiveOnlyCause.UNEXPLAINED,
-                "present in nvd_cve_records (fresh), not matched by mirrorLookup -- its own cpe_match "
-                        + "rows for this part/vendor/product: " + matchRows);
-    }
-
-    /** Baseline backfill's own completion timestamp ({@code nvd_cve_sync_state.updated_at} at the
-     *  point {@code baseline_completed} first flipped true), used as the freshness cutoff for {@link
-     *  #classifyLiveOnly}'s {@code FRESHNESS_STALE} bucket. Empty if the baseline hasn't completed at
-     *  all yet. Note: {@code updated_at} is also touched by delta-sync ticks (see {@link
-     *  com.vulncheck.app.service.NvdCveSyncService#runDeltaTick}), so this is only an exact proxy for
-     *  "backfill completion" as long as no delta sync has run since -- true as of this gate's own run
-     *  (delta sync isn't currently scheduled, see the disabled-test javadoc), but worth re-checking if
-     *  that ever changes. */
-    private Optional<OffsetDateTime> loadBackfillCompletedAt() {
-        List<Boolean> completedRows = jdbcTemplate.queryForList(
-                "SELECT baseline_completed FROM nvd_cve_sync_state WHERE id = 1", Boolean.class);
-        if (completedRows.isEmpty() || !Boolean.TRUE.equals(completedRows.get(0))) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(jdbcTemplate.queryForObject(
-                "SELECT updated_at FROM nvd_cve_sync_state WHERE id = 1", OffsetDateTime.class));
+        return new LiveOnlyExplanation(LiveOnlyCause.INGEST_GAP_OR_LOGIC_BUG,
+                "authoritative data confirms this CVE genuinely covers " + itemVersion + ", the mirror's "
+                        + "nvd_cve_records row is at least as fresh as live's authoritative lastModified, "
+                        + "and none of its nvd_cve_cpe_match rows for this CVE/part/vendor/product carry "
+                        + "a '-' version segment either -- NOT a freshness gap and NOT the known dash "
+                        + "schema limitation, a genuine ingest-correctness or applicability-logic bug "
+                        + "worth root-causing on its own. mirror cpe_match rows: " + matchRows);
     }
 
     /** For a CVE id only the mirror query returned: dumps the exact {@code cpe_match} row(s) that
