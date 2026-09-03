@@ -9,7 +9,6 @@ import com.vulncheck.app.service.nvd.CpeUtils;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.vuln.NvdVulnerabilitySource;
 import com.vulncheck.app.service.vuln.SourceResult;
-import com.vulncheck.app.service.vuln.VersionUtils;
 import com.vulncheck.app.service.vuln.VulnFinding;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -453,44 +452,22 @@ class NvdMirrorAbVerificationRunner {
      *  Real NVD applicability data uses {@code -} on one node of a multi-CPE AND config (e.g. paired
      *  with a real version-bounded companion entry) — exactly the node-grouping this flat table
      *  can't represent (see class javadoc) — so the only safe, fail-closed treatment here is to never
-     *  match on a bare {@code -}, not to guess at the paired condition this schema has no column for. */
+     *  match on a bare {@code -}, not to guess at the paired condition this schema has no column for.
+     *
+     *  <p>Closed-mode backlog item 251 (B4, senior-reviewer REVISE item 10): the actual predicate
+     *  (criteria-version extraction + range/fail-closed-on-{@code -} logic described above) now lives
+     *  in {@link CpeUtils#parseVersion}/{@link CpeUtils#versionInRange} — production {@code
+     *  NvdVulnerabilitySource}'s own mirror-backed lookup needs the exact same logic this method's
+     *  own REVISE history hardened, so this method delegates there instead of keeping an
+     *  independently-maintained copy (see backlog item 254 for why that pattern is worth avoiding). */
     private boolean versionApplies(Map<String, Object> matchRow, String itemVersion) {
         String criteria = (String) matchRow.get("criteria");
-        List<String> segments = splitCpeSegments(criteria);
-        String criteriaVersion = segments.size() > 5 ? segments.get(5) : "*";
-        return versionInRange(itemVersion, criteriaVersion,
+        String criteriaVersion = CpeUtils.parseVersion(criteria);
+        return CpeUtils.versionInRange(itemVersion, criteriaVersion,
                 (String) matchRow.get("version_start_including"),
                 (String) matchRow.get("version_start_excluding"),
                 (String) matchRow.get("version_end_including"),
                 (String) matchRow.get("version_end_excluding"));
-    }
-
-    /** The actual version-applicability rule shared by {@link #versionApplies} (mirror DB rows,
-     *  snake_case columns) and {@link #authoritativeConfigurationsCover} (live {@code ?cveId=} JSON,
-     *  camelCase fields) -- pulled out so both consult the exact same fail-closed-on-{@code -}
-     *  semantics rather than two independently-maintained copies drifting apart. Package-private
-     *  static, no DB/network access, directly unit-testable. */
-    static boolean versionInRange(String itemVersion, String criteriaVersion, String startIncluding,
-            String startExcluding, String endIncluding, String endExcluding) {
-        if ("-".equals(criteriaVersion)) {
-            return false;
-        }
-        if (!"*".equals(criteriaVersion)) {
-            return criteriaVersion.equalsIgnoreCase(itemVersion);
-        }
-        if (startIncluding != null && VersionUtils.compare(itemVersion, startIncluding) < 0) {
-            return false;
-        }
-        if (startExcluding != null && VersionUtils.compare(itemVersion, startExcluding) <= 0) {
-            return false;
-        }
-        if (endIncluding != null && VersionUtils.compare(itemVersion, endIncluding) > 0) {
-            return false;
-        }
-        if (endExcluding != null && VersionUtils.compare(itemVersion, endExcluding) >= 0) {
-            return false;
-        }
-        return true;
     }
 
     private record AuthoritativeCveData(boolean fetchSucceeded, String lastModified, JsonNode configurations) {
@@ -576,15 +553,14 @@ class NvdMirrorAbVerificationRunner {
      *  test). Does the authoritative {@code configurations} JSON (from a {@code ?cveId=} response's
      *  {@code cve.configurations}) contain at least one {@code cpeMatch} entry for the given (part,
      *  vendor, product) whose version-applicability covers {@code itemVersion}? Same OR-only,
-     *  fail-closed-on-{@code -} semantics as {@link #versionApplies} (see {@link #versionInRange}),
-     *  deliberately duplicated field-extraction from the live JSON shape rather than reused, since
-     *  it differs from {@link #mirrorLookup}'s flattened DB-row shape. */
+     *  fail-closed-on-{@code -} semantics as {@link #versionApplies} (both now delegate to {@link
+     *  CpeUtils#versionInRange}), deliberately duplicated field-extraction from the live JSON shape
+     *  rather than reused, since it differs from {@link #mirrorLookup}'s flattened DB-row shape. */
     static boolean authoritativeConfigurationsCover(JsonNode configurations, String part, String vendor,
             String product, String itemVersion) {
         for (JsonNode cpeMatch : matchingCriteriaNodes(configurations, part, vendor, product)) {
-            List<String> segments = splitCpeSegments(cpeMatch.path("criteria").asText(""));
-            String criteriaVersion = segments.size() > 5 ? segments.get(5) : "*";
-            if (versionInRange(itemVersion, criteriaVersion,
+            String criteriaVersion = CpeUtils.parseVersion(cpeMatch.path("criteria").asText(""));
+            if (CpeUtils.versionInRange(itemVersion, criteriaVersion,
                     cpeMatch.path("versionStartIncluding").asText(null),
                     cpeMatch.path("versionStartExcluding").asText(null),
                     cpeMatch.path("versionEndIncluding").asText(null),
