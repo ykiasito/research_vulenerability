@@ -2,6 +2,8 @@ package com.vulncheck.app.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 import com.vulncheck.app.entity.IdentifiedProduct;
@@ -9,12 +11,12 @@ import com.vulncheck.app.entity.ResearchJob;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.entity.User;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
+import com.vulncheck.app.repository.JobItemVulnerabilityCappedView;
 import com.vulncheck.app.repository.JobItemVulnerabilityRepository;
 import com.vulncheck.app.repository.ResearchJobItemRepository;
 import com.vulncheck.app.repository.ResearchJobRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.CsvParsingService;
-import com.vulncheck.app.service.JobItemVulnerabilityView;
 import com.vulncheck.app.service.PendingCsvUploadStore;
 import com.vulncheck.app.service.ResearchJobProcessingService;
 import com.vulncheck.app.service.ResearchJobService;
@@ -24,7 +26,6 @@ import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
@@ -106,6 +107,86 @@ class JobControllerTest {
         return item;
     }
 
+    /** Fixture builder for {@link JobItemVulnerabilityCappedView} (an interface projection, not
+     *  instantiable via {@code new}) — same field order as the old {@code JobItemVulnerabilityView}
+     *  record constructor this replaces, plus {@code totalCount} appended. */
+    private JobItemVulnerabilityCappedView cappedView(Long jobItemId, String cveOrGhsaId, String source,
+            String severity, String url, String discoveredViaTier, String citationUrl, String fixedVersion,
+            String bundledComponentName, String bundledComponentVersion, String csafAdvisoryId, String csafStatus,
+            String csafFixedVersion, long totalCount) {
+        return new JobItemVulnerabilityCappedView() {
+            @Override
+            public Long getJobItemId() {
+                return jobItemId;
+            }
+
+            @Override
+            public String getCveOrGhsaId() {
+                return cveOrGhsaId;
+            }
+
+            @Override
+            public String getSource() {
+                return source;
+            }
+
+            @Override
+            public String getSeverity() {
+                return severity;
+            }
+
+            @Override
+            public String getUrl() {
+                return url;
+            }
+
+            @Override
+            public String getDiscoveredViaTier() {
+                return discoveredViaTier;
+            }
+
+            @Override
+            public String getCitationUrl() {
+                return citationUrl;
+            }
+
+            @Override
+            public String getFixedVersion() {
+                return fixedVersion;
+            }
+
+            @Override
+            public String getBundledComponentName() {
+                return bundledComponentName;
+            }
+
+            @Override
+            public String getBundledComponentVersion() {
+                return bundledComponentVersion;
+            }
+
+            @Override
+            public String getCsafAdvisoryId() {
+                return csafAdvisoryId;
+            }
+
+            @Override
+            public String getCsafStatus() {
+                return csafStatus;
+            }
+
+            @Override
+            public String getCsafFixedVersion() {
+                return csafFixedVersion;
+            }
+
+            @Override
+            public Long getTotalCount() {
+                return totalCount;
+            }
+        };
+    }
+
     @Test
     void exportCsvReturnsAllColumnsForAMixOfIdentifiedAndUnidentifiedItems() throws IOException {
         User owner = user(1L, "owner@example.com");
@@ -121,16 +202,16 @@ class JobControllerTest {
         identifiedProduct.setPackageName("lodash");
         identifiedProduct.setConfidence(new BigDecimal("0.95"));
 
-        JobItemVulnerabilityView vuln1 = new JobItemVulnerabilityView(
-                100L, "CVE-2021-0001", "nvd", "HIGH", "https://example.com/1", "stage2", null, null, null, null, null, null, null);
-        JobItemVulnerabilityView vuln2 = new JobItemVulnerabilityView(
-                100L, "GHSA-aaaa-bbbb-cccc", "ghsa", "MEDIUM", "https://example.com/2", "stage2", null, null, null, null, null, null, null);
+        JobItemVulnerabilityCappedView vuln1 = cappedView(
+                100L, "CVE-2021-0001", "nvd", "HIGH", "https://example.com/1", "stage2", null, null, null, null, null, null, null, 2L);
+        JobItemVulnerabilityCappedView vuln2 = cappedView(
+                100L, "GHSA-aaaa-bbbb-cccc", "ghsa", "MEDIUM", "https://example.com/2", "stage2", null, null, null, null, null, null, null, 2L);
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
         when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem, unidentifiedItem));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L, 101L))).thenReturn(List.of(identifiedProduct));
-        when(jobItemVulnerabilityRepository.findViewsByJobItemIdIn(List.of(100L, 101L)))
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L, 101L)), anyInt()))
                 .thenReturn(List.of(vuln1, vuln2));
 
         ResponseEntity<byte[]> response = newController().exportCsv(userDetails("owner@example.com"), 10L);
@@ -185,17 +266,17 @@ class JobControllerTest {
                 item(100L, 10L, "Chocolatey CLI", "4.6.0", null, ResearchJobItem.STATUS_IDENTIFIED);
 
         // One product finding (no bundled attribution) plus one bundled 7-Zip finding.
-        JobItemVulnerabilityView productVuln = new JobItemVulnerabilityView(
-                100L, "CVE-2021-0001", "nvd", "HIGH", "https://example.com/1", "stage2", null, null, null, null, null, null, null);
-        JobItemVulnerabilityView bundledVuln = new JobItemVulnerabilityView(
+        JobItemVulnerabilityCappedView productVuln = cappedView(
+                100L, "CVE-2021-0001", "nvd", "HIGH", "https://example.com/1", "stage2", null, null, null, null, null, null, null, 1L);
+        JobItemVulnerabilityCappedView bundledVuln = cappedView(
                 100L, "CVE-2026-11111", "nvd", "CRITICAL", "https://example.com/2", "bundled_component", null,
-                "26.03", "7-Zip", "26.02", null, null, null);
+                "26.03", "7-Zip", "26.02", null, null, null, 1L);
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
         when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
-        when(jobItemVulnerabilityRepository.findViewsByJobItemIdIn(List.of(100L)))
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
                 .thenReturn(List.of(productVuln, bundledVuln));
 
         ResponseEntity<byte[]> response = newController().exportCsv(userDetails("owner@example.com"), 10L);
@@ -210,108 +291,163 @@ class JobControllerTest {
         assertThat(row.get("bundled_component_findings")).isEqualTo("7-Zip 26.02");
     }
 
-    // --- REVISE item 3 (senior review 2026-08-26): a bundled finding must never set the product-
-    // level "推奨アップデート版" recommendation ---------------------------------------------------
+    // --- closed-mode backlog item 251 REVISE item 4: the display/export cap appends a "他N件"
+    // notice to the vulnerabilities cell (not to vulnerability_count, which stays the true total) --
 
     @Test
-    void detailNeverLetsABundledFindingsFixedVersionSetTheProductLevelMaxFixedVersion() {
+    void exportCsvAppendsAHiddenCountNoticeWhenTheTrueTotalExceedsWhatWasReturned() throws IOException {
         User owner = user(1L, "owner@example.com");
         ResearchJob job = job(10L, 1L);
         ResearchJobItem identifiedItem =
-                item(100L, 10L, "Chocolatey CLI", "4.6.0", null, ResearchJobItem.STATUS_IDENTIFIED);
+                item(100L, 10L, "Google Chrome", "127.0.6533.100", null, ResearchJobItem.STATUS_IDENTIFIED);
 
-        // A product finding with a low fix version, and a bundled finding with a much higher one
-        // (e.g. 7-Zip 26.03) that must not win the product-level recommendation.
-        JobItemVulnerabilityView productVuln = new JobItemVulnerabilityView(
-                100L, "CVE-2021-0001", "nvd", "HIGH", "https://example.com/1", "stage2", null, "5.0.0", null, null, null, null, null);
-        JobItemVulnerabilityView bundledVuln = new JobItemVulnerabilityView(
-                100L, "CVE-2026-11111", "nvd", "CRITICAL", "https://example.com/2", "bundled_component", null,
-                "26.03", "7-Zip", "26.02", null, null, null);
+        // Simulates the repository having already capped the list server-side: only 2 rows come
+        // back, but each carries the TRUE total (2739) via getTotalCount().
+        JobItemVulnerabilityCappedView vuln1 = cappedView(
+                100L, "CVE-2024-0001", "nvd", "CRITICAL", "u", "nvd", null, null, null, null, null, null, null, 2739L);
+        JobItemVulnerabilityCappedView vuln2 = cappedView(
+                100L, "CVE-2024-0002", "nvd", "CRITICAL", "u", "nvd", null, null, null, null, null, null, null, 2739L);
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
         when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
-        when(jobItemVulnerabilityRepository.findViewsByJobItemIdIn(List.of(100L)))
-                .thenReturn(List.of(productVuln, bundledVuln));
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
+                .thenReturn(List.of(vuln1, vuln2));
 
-        Model model = new ExtendedModelMap();
-        newController().detail(userDetails("owner@example.com"), 10L, model);
+        ResponseEntity<byte[]> response = newController().exportCsv(userDetails("owner@example.com"), 10L);
 
-        @SuppressWarnings("unchecked")
-        Map<Long, String> maxFixedVersionByItemId = (Map<Long, String>) model.getAttribute("maxFixedVersionByItemId");
-        assertThat(maxFixedVersionByItemId).containsEntry(100L, "5.0.0");
+        List<CSVRecord> rows = parseCsv(response.getBody());
+        CSVRecord row = rows.get(0);
+        // vulnerability_count is the TRUE total, never capped.
+        assertThat(row.get("vulnerability_count")).isEqualTo("2739");
+        // The listed-ids cell shows what was actually returned plus how many more exist.
+        assertThat(row.get("vulnerabilities")).isEqualTo("CVE-2024-0001; CVE-2024-0002; 他2737件");
     }
 
     // --- CSAF annotation (docs/spec/csaf-vendor-advisory-plan.md §8-2(b)) --------------------------
 
     @Test
-    void detailStillUsesAnotherSourcesFixedVersionOnARowCsafMerelyAnnotated() {
-        // Path 1 of the CSAF design (an existing NVD/OSV/CVE.org row CSAF only annotates, never
-        // competes for) — the row's own fixedVersion (from NVD) is untouched by the CSAF
-        // annotation and must still count toward the product-level recommendation. Only a
-        // CSAF-only new row (never reachable here — Stage2VulnerabilityResearchService always
-        // writes NULL there) would need excluding, per JobController#highestFixedVersion's javadoc.
+    void detailPassesTheItemsOwnMaxFixedVersionThroughToTheModelWithoutRecomputingIt() {
+        // closed-mode backlog item 251 REVISE item 5: JobController no longer computes this at all —
+        // it's Stage2VulnerabilityResearchService's job now (see its own tests for that computation's
+        // coverage). This just confirms the item itself (carrying whatever Stage2 already persisted)
+        // reaches the model unchanged.
         User owner = user(1L, "owner@example.com");
         ResearchJob job = job(10L, 1L);
         ResearchJobItem identifiedItem =
                 item(100L, 10L, "OpenSSL", "3.0.1", null, ResearchJobItem.STATUS_IDENTIFIED);
-
-        JobItemVulnerabilityView annotatedVuln = new JobItemVulnerabilityView(
-                100L, "CVE-2024-1111", "nvd", "HIGH", "https://example.com/1", "nvd", null, "3.0.7", null, null,
-                "SSA-1", "known_affected", "0:3.0.7-24.el9_2");
+        identifiedItem.setMaxFixedVersion("3.0.7");
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
         when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
-        when(jobItemVulnerabilityRepository.findViewsByJobItemIdIn(List.of(100L)))
-                .thenReturn(List.of(annotatedVuln));
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
+                .thenReturn(List.of());
 
         Model model = new ExtendedModelMap();
         newController().detail(userDetails("owner@example.com"), 10L, model);
 
         @SuppressWarnings("unchecked")
-        Map<Long, String> maxFixedVersionByItemId = (Map<Long, String>) model.getAttribute("maxFixedVersionByItemId");
-        assertThat(maxFixedVersionByItemId).containsEntry(100L, "3.0.7");
+        List<ResearchJobItem> items = (List<ResearchJobItem>) model.getAttribute("items");
+        assertThat(items).hasSize(1);
+        assertThat(items.get(0).getMaxFixedVersion()).isEqualTo("3.0.7");
     }
 
-    // --- REVISE item 1 (senior review 2026-08-27): a cross-item write on the shared vulnerabilities
-    // row must never leak into this item's own "推奨アップデート版" ----------------------------------
+    // --- Second REVISE round (closed-mode backlog item 251, item 1): detail.html must be able to
+    // tell the user a category's findings list was capped, and by how much -- this asserts the model
+    // attributes detail.html's notice reads (productCountsByItemId/bundledCountsByItemId), since this
+    // test suite has no MockMvc/Thymeleaf rendering infrastructure to assert the rendered HTML
+    // itself against ------------------------------------------------------------------------------
 
     @Test
-    void detailExcludesACsafOnlyRowsFixedVersionEvenWhenACrossItemWriteLandedOnTheSharedRow() {
-        // (a) this item's own NVD-sourced finding, with its own legitimate fixed version.
-        // (b) a path-2 CSAF-only row for a DIFFERENT CVE — its own write to vulnerabilities.fixed_version
-        // is always NULL at insert time (Stage2VulnerabilityResearchService), but simulates a later,
-        // unrelated item's finding for the SAME CVE having since populated the shared vulnerabilities
-        // row (VulnerabilityRepository#upsertAndGetId's COALESCE — first non-null write from ANY item
-        // sticks). That value must never count toward THIS item's recommendation.
+    void detailComputesPerCategoryShownAndTrueCountsSeparatelyForProductAndBundledFindings() {
         User owner = user(1L, "owner@example.com");
         ResearchJob job = job(10L, 1L);
         ResearchJobItem identifiedItem =
-                item(100L, 10L, "Siemens Device", "1.0.0", null, ResearchJobItem.STATUS_IDENTIFIED);
+                item(100L, 10L, "Google Chrome", "127.0.6533.100", null, ResearchJobItem.STATUS_IDENTIFIED);
 
-        JobItemVulnerabilityView nvdVuln = new JobItemVulnerabilityView(
-                100L, "CVE-2024-1111", "nvd", "HIGH", "https://example.com/1", "nvd", null, "2.1.0", null, null,
-                null, null, null);
-        JobItemVulnerabilityView csafOnlyVuln = new JobItemVulnerabilityView(
-                100L, "CVE-2024-2222", "csaf_siemens", "HIGH", "https://example.com/2", "csaf_siemens", null,
-                "3.0.7", null, null, "SSA-2", "known_affected", null);
+        // 2 product findings returned (out of a true total of 2739) and 1 bundled finding returned
+        // (out of a true total of 3) -- two independently-capped categories, same item.
+        JobItemVulnerabilityCappedView productVuln1 = cappedView(
+                100L, "CVE-2024-0001", "nvd", "CRITICAL", "u", "nvd", null, null, null, null, null, null, null, 2739L);
+        JobItemVulnerabilityCappedView productVuln2 = cappedView(
+                100L, "CVE-2024-0002", "nvd", "CRITICAL", "u", "nvd", null, null, null, null, null, null, null, 2739L);
+        JobItemVulnerabilityCappedView bundledVuln = cappedView(
+                100L, "CVE-2026-11111", "nvd", "HIGH", "u", "bundled_component", null, "26.03", "7-Zip", "26.02",
+                null, null, null, 3L);
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
         when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
-        when(jobItemVulnerabilityRepository.findViewsByJobItemIdIn(List.of(100L)))
-                .thenReturn(List.of(nvdVuln, csafOnlyVuln));
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
+                .thenReturn(List.of(productVuln1, productVuln2, bundledVuln));
 
         Model model = new ExtendedModelMap();
         newController().detail(userDetails("owner@example.com"), 10L, model);
 
         @SuppressWarnings("unchecked")
-        Map<Long, String> maxFixedVersionByItemId = (Map<Long, String>) model.getAttribute("maxFixedVersionByItemId");
-        assertThat(maxFixedVersionByItemId).containsEntry(100L, "2.1.0");
+        var productCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("productCountsByItemId");
+        @SuppressWarnings("unchecked")
+        var bundledCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("bundledCountsByItemId");
+
+        assertThat(productCountsByItemId.get(100L)).isEqualTo(new JobController.CategoryCounts(2, 2739L));
+        assertThat(bundledCountsByItemId.get(100L)).isEqualTo(new JobController.CategoryCounts(1, 3L));
+    }
+
+    @Test
+    void detailOmitsCategoryCountsForAnItemWithNoFindingsAtAllInThatCategory() {
+        User owner = user(1L, "owner@example.com");
+        ResearchJob job = job(10L, 1L);
+        ResearchJobItem identifiedItem =
+                item(100L, 10L, "lodash", "4.17.21", null, ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
+                .thenReturn(List.of());
+
+        Model model = new ExtendedModelMap();
+        newController().detail(userDetails("owner@example.com"), 10L, model);
+
+        @SuppressWarnings("unchecked")
+        var productCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("productCountsByItemId");
+        @SuppressWarnings("unchecked")
+        var bundledCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("bundledCountsByItemId");
+
+        assertThat(productCountsByItemId).doesNotContainKey(100L);
+        assertThat(bundledCountsByItemId).doesNotContainKey(100L);
+    }
+
+    // --- Third REVISE round (PR#170): detail.html must never hardcode the 10/200 cap values itself
+    // -- pinning these model attributes to the controller's own constants means the template's
+    // notice text can never silently drift from the actual cap. ------------------------------------
+
+    @Test
+    void detailExposesTheCapConstantsAsModelAttributesMatchingTheControllersOwnValues() {
+        User owner = user(1L, "owner@example.com");
+        ResearchJob job = job(10L, 1L);
+        ResearchJobItem identifiedItem =
+                item(100L, 10L, "lodash", "4.17.21", null, ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
+                .thenReturn(List.of());
+
+        Model model = new ExtendedModelMap();
+        newController().detail(userDetails("owner@example.com"), 10L, model);
+
+        // Package-visible (not private) specifically so this test can pin the model attribute to
+        // the controller's own constant rather than a literal that could silently drift from it.
+        assertThat(model.getAttribute("htmlDetailFindingCap")).isEqualTo(JobController.HTML_DETAIL_FINDING_CAP);
+        assertThat(model.getAttribute("csvExportFindingCap")).isEqualTo(JobController.CSV_EXPORT_FINDING_CAP);
     }
 
     // --- REVISE item 10 (senior review 2026-08-27): the CSV export must reflect CSAF vendor status --
@@ -323,18 +459,18 @@ class JobControllerTest {
         ResearchJobItem identifiedItem =
                 item(100L, 10L, "OpenSSL", "3.0.1", null, ResearchJobItem.STATUS_IDENTIFIED);
 
-        JobItemVulnerabilityView annotatedVuln = new JobItemVulnerabilityView(
+        JobItemVulnerabilityCappedView annotatedVuln = cappedView(
                 100L, "CVE-2024-1111", "nvd", "HIGH", "https://example.com/1", "nvd", null, "3.0.7", null, null,
-                "SSA-1", "known_affected", "0:3.0.7-24.el9_2");
-        JobItemVulnerabilityView plainVuln = new JobItemVulnerabilityView(
+                "SSA-1", "known_affected", "0:3.0.7-24.el9_2", 2L);
+        JobItemVulnerabilityCappedView plainVuln = cappedView(
                 100L, "CVE-2024-9999", "nvd", "LOW", "https://example.com/2", "nvd", null, null, null, null,
-                null, null, null);
+                null, null, null, 2L);
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
         when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
-        when(jobItemVulnerabilityRepository.findViewsByJobItemIdIn(List.of(100L)))
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
                 .thenReturn(List.of(annotatedVuln, plainVuln));
 
         ResponseEntity<byte[]> response = newController().exportCsv(userDetails("owner@example.com"), 10L);
@@ -365,7 +501,8 @@ class JobControllerTest {
         when(researchJobItemRepository.findByJobIdOrderById(10L))
                 .thenReturn(List.of(itemWithReason, itemWithoutReason));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L, 101L))).thenReturn(List.of());
-        when(jobItemVulnerabilityRepository.findViewsByJobItemIdIn(List.of(100L, 101L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L, 101L)), anyInt()))
+                .thenReturn(List.of());
 
         ResponseEntity<byte[]> response = newController().exportCsv(userDetails("owner@example.com"), 10L);
 

@@ -109,6 +109,14 @@ app:
     nuget-mirror-enabled: ${CLOSED_MODE_NUGET_MIRROR_ENABLED:false}
     go-mirror-enabled: ${CLOSED_MODE_GO_MIRROR_ENABLED:false}
     pub-mirror-enabled: ${CLOSED_MODE_PUB_MIRROR_ENABLED:false}
+    # NvdVulnerabilitySource's mirror-backed lookup (closed-mode backlog item 251, B4) — routes
+    # find()/fetchFromNvdCached() to the local nvd_cve_records/nvd_cve_cpe_match mirror (V39/
+    # NvdCveSyncService) instead of a live NVD CVE API call. Off by default, but unlike the 9
+    # registry-ecosystem flags above, this is NOT a degrade-if-empty toggle — see
+    # NvdVulnerabilitySource#mirrorEnabled's own javadoc for why there's no automatic live fallback
+    # here. Only enable once NvdCveSyncService's backfill has actually completed
+    # (nvd_cve_sync_state.baseline_completed = true).
+    nvd-mirror-enabled: ${CLOSED_MODE_NVD_MIRROR_ENABLED:false}
   # High-confidence AI verification backstop (see HighConfidenceVerificationService) — an extra
   # AI+web_search check for Stage1 items that reached a high-confidence CPE match purely via static
   # (Tier1) logic, never reviewed by Tier2/Tier3's AI disambiguation. Off by default so this never
