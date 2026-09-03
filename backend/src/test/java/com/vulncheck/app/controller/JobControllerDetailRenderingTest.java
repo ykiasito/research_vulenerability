@@ -1,6 +1,7 @@
 package com.vulncheck.app.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -27,6 +28,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -189,7 +193,8 @@ class JobControllerDetailRenderingTest {
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
-        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(item));
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(item)));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
         when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
                 .thenReturn(List.of(productVuln1, productVuln2, productVuln3, bundledVuln1, bundledVuln2));
@@ -234,5 +239,98 @@ class JobControllerDetailRenderingTest {
 
     private long countOccurrences(String text, char target) {
         return text.chars().filter(c -> c == target).count();
+    }
+
+    // --- closed-mode backlog item 267: JobController#detail's HTML item-list pagination, rendered
+    // through the real template rather than just asserted at the model-attribute level (same
+    // rationale as this class's own javadoc: previous rounds' bugs in this exact template only
+    // ever surfaced once something actually rendered it) ------------------------------------------
+
+    @Test
+    @WithMockUser(username = "owner@example.com")
+    void detailPageTwoRendersOnlyThatPagesItemWithPreviousAndNextLinks() throws Exception {
+        User owner = new User();
+        owner.setId(1L);
+        owner.setEmail("owner@example.com");
+        owner.setPasswordHash("hash");
+
+        ResearchJob job = new ResearchJob();
+        job.setId(10L);
+        job.setUserId(1L);
+        job.setCsvFilename("test.csv");
+        job.setStatus(ResearchJob.STATUS_COMPLETED);
+
+        ResearchJobItem itemOnPage2 = new ResearchJobItem();
+        itemOnPage2.setId(200L);
+        itemOnPage2.setJobId(10L);
+        itemOnPage2.setProductName("express");
+        itemOnPage2.setVersion("4.18.0");
+        itemOnPage2.setUsageText("used somewhere");
+        itemOnPage2.setStatus(ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        // 120 items total at ITEMS_PAGE_SIZE=50 -> 3 pages; requesting page=1 (0-based, the middle
+        // page) must show both a previous and a next link.
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(itemOnPage2), PageRequest.of(1, JobController.ITEMS_PAGE_SIZE), 120));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(200L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(200L)), anyInt()))
+                .thenReturn(List.of());
+
+        MvcResult result = mockMvc.perform(get("/jobs/10").param("page", "1"))
+                .andExpect(status().isOk())
+                .andReturn();
+        String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        assertThat(body).contains("express");
+        assertThat(body).contains("2 / 3");
+        assertThat(body).contains("全120件");
+        assertThat(body).contains("← 前のページ");
+        assertThat(body).contains("次のページ →");
+        assertThat(body).contains("page=0");
+        assertThat(body).contains("page=2");
+    }
+
+    @Test
+    @WithMockUser(username = "owner@example.com")
+    void detailLastPageOmitsTheNextLinkAndFirstPageOmitsThePreviousLink() throws Exception {
+        User owner = new User();
+        owner.setId(1L);
+        owner.setEmail("owner@example.com");
+        owner.setPasswordHash("hash");
+
+        ResearchJob job = new ResearchJob();
+        job.setId(10L);
+        job.setUserId(1L);
+        job.setCsvFilename("test.csv");
+        job.setStatus(ResearchJob.STATUS_COMPLETED);
+
+        ResearchJobItem lastItem = new ResearchJobItem();
+        lastItem.setId(300L);
+        lastItem.setJobId(10L);
+        lastItem.setProductName("tail-item");
+        lastItem.setVersion("1.0.0");
+        lastItem.setUsageText("used somewhere");
+        lastItem.setStatus(ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        // 120 items, page 2 (0-based) is the last of 3 pages (20 items) -- must show a previous
+        // link but no next link.
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(lastItem), PageRequest.of(2, JobController.ITEMS_PAGE_SIZE), 120));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(300L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(300L)), anyInt()))
+                .thenReturn(List.of());
+
+        MvcResult result = mockMvc.perform(get("/jobs/10").param("page", "2"))
+                .andExpect(status().isOk())
+                .andReturn();
+        String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        assertThat(body).contains("3 / 3");
+        assertThat(body).contains("← 前のページ");
+        assertThat(body).doesNotContain("次のページ →");
     }
 }

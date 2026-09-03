@@ -2,8 +2,10 @@ package com.vulncheck.app.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.vulncheck.app.entity.IdentifiedProduct;
@@ -32,8 +34,12 @@ import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.ui.ExtendedModelMap;
@@ -274,6 +280,8 @@ class JobControllerTest {
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        // exportCsv deliberately stays unpaginated (task scope) -- it still calls the single-arg,
+        // List-returning findByJobIdOrderById overload, not the Pageable one detail() uses.
         when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
         when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
@@ -341,13 +349,14 @@ class JobControllerTest {
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
-        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(identifiedItem)));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
         when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
                 .thenReturn(List.of());
 
         Model model = new ExtendedModelMap();
-        newController().detail(userDetails("owner@example.com"), 10L, model);
+        newController().detail(userDetails("owner@example.com"), 10L, 0, model);
 
         @SuppressWarnings("unchecked")
         List<ResearchJobItem> items = (List<ResearchJobItem>) model.getAttribute("items");
@@ -380,13 +389,14 @@ class JobControllerTest {
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
-        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(identifiedItem)));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
         when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
                 .thenReturn(List.of(productVuln1, productVuln2, bundledVuln));
 
         Model model = new ExtendedModelMap();
-        newController().detail(userDetails("owner@example.com"), 10L, model);
+        newController().detail(userDetails("owner@example.com"), 10L, 0, model);
 
         @SuppressWarnings("unchecked")
         var productCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("productCountsByItemId");
@@ -406,13 +416,14 @@ class JobControllerTest {
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
-        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(identifiedItem)));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
         when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
                 .thenReturn(List.of());
 
         Model model = new ExtendedModelMap();
-        newController().detail(userDetails("owner@example.com"), 10L, model);
+        newController().detail(userDetails("owner@example.com"), 10L, 0, model);
 
         @SuppressWarnings("unchecked")
         var productCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("productCountsByItemId");
@@ -436,18 +447,81 @@ class JobControllerTest {
 
         when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
         when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
-        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(identifiedItem)));
         when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
         when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
                 .thenReturn(List.of());
 
         Model model = new ExtendedModelMap();
-        newController().detail(userDetails("owner@example.com"), 10L, model);
+        newController().detail(userDetails("owner@example.com"), 10L, 0, model);
 
         // Package-visible (not private) specifically so this test can pin the model attribute to
         // the controller's own constant rather than a literal that could silently drift from it.
         assertThat(model.getAttribute("htmlDetailFindingCap")).isEqualTo(JobController.HTML_DETAIL_FINDING_CAP);
         assertThat(model.getAttribute("csvExportFindingCap")).isEqualTo(JobController.CSV_EXPORT_FINDING_CAP);
+    }
+
+    // --- closed-mode backlog item 267: JobController#detail's HTML item-list pagination -----------
+
+    @Test
+    void detailRequestsTheGivenPageFromTheRepositoryAndExposesPaginationModelAttributes() {
+        User owner = user(1L, "owner@example.com");
+        ResearchJob job = job(10L, 1L);
+        // Simulates page 1 (0-based -- the second page) of a 120-item job at ITEMS_PAGE_SIZE=50:
+        // 50 items on page 0, 50 on page 1, the remaining 20 on page 2 -> 3 total pages.
+        ResearchJobItem itemOnPage2 = item(200L, 10L, "express", "4.18.0", null, ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(itemOnPage2),
+                        PageRequest.of(1, JobController.ITEMS_PAGE_SIZE), 120));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(200L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(200L)), anyInt()))
+                .thenReturn(List.of());
+
+        Model model = new ExtendedModelMap();
+        newController().detail(userDetails("owner@example.com"), 10L, 1, model);
+
+        @SuppressWarnings("unchecked")
+        List<ResearchJobItem> items = (List<ResearchJobItem>) model.getAttribute("items");
+        assertThat(items).containsExactly(itemOnPage2);
+        assertThat(model.getAttribute("currentPage")).isEqualTo(1);
+        assertThat(model.getAttribute("totalPages")).isEqualTo(3);
+        assertThat(model.getAttribute("totalItems")).isEqualTo(120L);
+
+        // The repository must actually receive the requested page number/size, not always page 0.
+        ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
+        verify(researchJobItemRepository).findByJobIdOrderById(eq(10L), pageableCaptor.capture());
+        assertThat(pageableCaptor.getValue().getPageNumber()).isEqualTo(1);
+        assertThat(pageableCaptor.getValue().getPageSize()).isEqualTo(JobController.ITEMS_PAGE_SIZE);
+    }
+
+    @Test
+    void detailClampsANegativePageNumberToZeroInsteadOfPropagatingIt() {
+        // Boundary case: PageRequest.of itself throws IllegalArgumentException for a negative page
+        // index, and no in-app link ever generates a negative ?page= value -- only a hand-edited
+        // URL could. detail() must clamp rather than let that propagate as a 500.
+        User owner = user(1L, "owner@example.com");
+        ResearchJob job = job(10L, 1L);
+        ResearchJobItem onlyItem = item(100L, 10L, "lodash", "4.17.21", null, ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(onlyItem)));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
+                .thenReturn(List.of());
+
+        Model model = new ExtendedModelMap();
+        newController().detail(userDetails("owner@example.com"), 10L, -5, model);
+
+        assertThat(model.getAttribute("currentPage")).isEqualTo(0);
+        ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
+        verify(researchJobItemRepository).findByJobIdOrderById(eq(10L), pageableCaptor.capture());
+        assertThat(pageableCaptor.getValue().getPageNumber()).isEqualTo(0);
     }
 
     // --- REVISE item 10 (senior review 2026-08-27): the CSV export must reflect CSAF vendor status --
