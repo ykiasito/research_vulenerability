@@ -104,12 +104,40 @@ import org.springframework.web.util.UriComponentsBuilder;
  * mirror ("round 5")</b> — see the {@code @Disabled} reason below for exactly what's confirmed (via
  * the senior-reviewer's own direct NVD queries) versus what still needs a real run to measure.
  *
+ * <p><b>Round 5 blocker (2026-09-03)</b>: the first attempt to actually run round 5 against the real
+ * dev DB failed on the very first golden-300 row with {@code AEADBadTagException}. Root cause: (a)
+ * this class's {@code compareLiveAndMirrorForEveryIdentifiedCpeGoldenRow} test method was passing
+ * {@link #REAL_USER_ID} into {@link Stage1IdentificationService#identify}, and that user already has
+ * a real NVD API key registered in that DB, encrypted under the app's real, production secret
+ * encryption key; (b) this harness's {@code @TestPropertySource} does not (and per (d) below, must
+ * not) supply that real key, so {@code UserApiKeyService#getNvdApiKey}'s decryption attempt against
+ * whatever dummy/test key is in effect fails hard rather than silently. (c) The fix is not to bring a
+ * real key into the test config — it's to stop routing {@code identify} through {@link
+ * #REAL_USER_ID} at all: {@code identify} now takes {@link #UNKEYED_USER_ID} instead, the same
+ * structurally-keyless id every other live call in this class already uses, so {@code getNvdApiKey}
+ * has nothing to decrypt for that call either, regardless of what's registered against user 5 in
+ * whatever DB this runs against. {@link #REAL_USER_ID} is now used only where an FK to a real user
+ * row is unavoidable, i.e. {@link ResearchJobService#createJob}. (d) A side effect worth recording:
+ * rounds 1 through 4 above never hit this exception only because user 5 happened to have no NVD key
+ * registered at the time they ran (see the now-removed javadoc paragraph on {@link #REAL_USER_ID}
+ * that used to require re-confirming that by hand before every run) — had a key existed then, {@code
+ * identify}'s NVD lookups in those rounds would have silently used keyed pacing (~700ms/request)
+ * instead of this gate's required unkeyed 6.5s/request, a latent violation of the gate's own pacing
+ * requirement that this fix now makes structurally impossible rather than dependent on remembering
+ * to check a database row by hand.
+ *
  * <p>Uses the same {@code @Transactional} rollback trick as {@link ChocolateyRemovalGolden300RecallTest}
  * (job creation joins this test method's own transaction and is rolled back at the end, never
  * durably written) and the same real-dev-DB {@code @TestPropertySource} as every other class in
  * this package. Disabled by default; re-enable by hand, run once, restore {@code @Disabled}.
  */
 @SpringBootTest
+// Never override app.secret-encryption-key here, literal or via ${APP_SECRET_ENCRYPTION_KEY} --
+// this DB may hold real, production-encrypted secrets (see the class javadoc's "Round 5 blocker"
+// and the removed FRESHNESS_STALE-style unproven-assumption mistakes it cites): a test-only key
+// here would either fail to decrypt them (as happened) or, worse, silently succeed against
+// differently-encrypted data. The fix for the AEADBadTagException below is routing calls through
+// UNKEYED_USER_ID instead, not bringing a real/dummy key into this test config.
 @TestPropertySource(properties = {
         "spring.datasource.url=jdbc:postgresql://postgres:5432/vulncheck",
         "spring.datasource.username=vulncheck",
@@ -145,17 +173,23 @@ import org.springframework.web.util.UriComponentsBuilder;
         + "run -- see class javadoc.")
 class NvdMirrorAbVerificationRunner {
 
-    /** Round 3 (2026-09-03) ran with no Claude key registered for user 5, so the 65 {@link
-     *  Stage1IdentificationService#identify} calls below completed for free (static-only, no Stage1
-     *  AI arbitration). Anyone re-enabling this class must re-confirm that's still true before
-     *  running it again — if user 5 has since gained a registered key, {@code identify} will fire a
-     *  billed Stage1 AI arbitration call per row instead. */
+    /** Used only as the job-owner foreign key for {@link ResearchJobService#createJob} — job
+     *  ownership requires a real, existing {@code users} row. Never pass this to {@link
+     *  Stage1IdentificationService#identify} or {@link NvdVulnerabilitySource#fetchFromNvdCached}
+     *  (see {@link #UNKEYED_USER_ID}'s own javadoc for why: this user id may have a real, live
+     *  encrypted secret registered against it in whatever DB this runs against, and this harness's
+     *  test config cannot decrypt that). */
     private static final Long REAL_USER_ID = 5L;
-    /** Deliberately not a real user id (no {@code user_secrets} row can exist for it) — forces
-     *  {@link com.vulncheck.app.service.UserApiKeyService#getNvdApiKey} to return empty so every
-     *  live call here goes through {@code NvdRateLimiter}'s unkeyed 6.5s/request pacing, exactly as
-     *  the task brief for this gate requires, regardless of what key (if any) is registered against
-     *  {@link #REAL_USER_ID} at the time this happens to run. */
+    /** Deliberately not a real user id (no {@code user_secrets} row can exist for it). Passed to
+     *  both {@link NvdVulnerabilitySource#fetchFromNvdCached} and {@link
+     *  Stage1IdentificationService#identify} so that, structurally and regardless of whatever is or
+     *  isn't registered against {@link #REAL_USER_ID} in whatever DB this happens to run against:
+     *  (i) every NVD access those two call sites make goes through {@code NvdRateLimiter}'s unkeyed
+     *  6.5s/request pacing, exactly as this gate's task brief requires (the other live path, {@link
+     *  #fetchAuthoritativeCveData}, takes no user id at all and always paces unkeyed by construction),
+     *  and (ii) zero billed Claude calls are possible, since {@code identify} can only reach Stage1
+     *  AI arbitration via a registered key this user id structurally cannot have. See the class
+     *  javadoc's "Round 5 blocker" section for the incident this design replaced. */
     private static final Long UNKEYED_USER_ID = -1L;
 
     @Autowired
@@ -203,7 +237,7 @@ class NvdMirrorAbVerificationRunner {
             if (!identifiedCpeKeys.contains(key(item.getRawProductName(), item.getVersion()))) {
                 continue;
             }
-            Optional<IdentifiedProduct> identified = stage1IdentificationService.identify(item, REAL_USER_ID);
+            Optional<IdentifiedProduct> identified = stage1IdentificationService.identify(item, UNKEYED_USER_ID);
             if (identified.isEmpty() || identified.get().getCpe() == null) {
                 System.out.println("SKIP (Stage1 did not produce a CPE for this row): "
                         + item.getRawProductName() + " " + item.getVersion());
