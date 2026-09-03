@@ -521,6 +521,7 @@ class NvdMirrorAbVerificationRunner {
         try {
             URI uri = UriComponentsBuilder.fromHttpUrl(NVD_CVE_API)
                     .queryParam("cveId", cveId)
+                    .encode()
                     .build()
                     .toUri();
             nvdRateLimiter.awaitTurn(false);
