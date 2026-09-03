@@ -58,9 +58,17 @@ import org.springframework.transaction.annotation.Transactional;
  * which is the only thing the current schema supports — see this run's own diff findings for whether
  * that gap actually manifested against golden-300's IDENTIFIED_CPE rows in practice.
  *
- * <p><b>Round 3 result (2026-09-03)</b>: the gap above did not manifest — DASH_FAIL_CLOSED was 0
- * across all 65 rows, i.e. no golden-300 IDENTIFIED_CPE row actually hit a bare {@code -} version
- * segment in this run. See the {@code @Disabled} reason below for the full numeric breakdown.
+ * <p><b>Round 3 result (2026-09-03)</b>: of the 38 {@code liveOnly} CVEs found across the mismatched
+ * rows, 0 were attributable to the {@code -} fail-closed rule in {@link #versionApplies}
+ * (DASH_FAIL_CLOSED was 0 across all 65 rows) — i.e. this run's remaining {@code liveOnly} gap
+ * wasn't caused by the AND-node/{@code -} schema gap described above. This does <em>not</em> mean
+ * no row's {@code cpe_match} data contained a bare {@code -} version segment: {@link
+ * #classifyLiveOnly}'s DASH_FAIL_CLOSED count is only computed over the {@code liveOnly} CVEs of
+ * already-mismatched rows, so a {@code -} segment on a CVE that {@link #mirrorLookup} and the live
+ * query already agreed on (or one attached to a {@code mirrorOnly} CVE) is invisible to this
+ * counter. The round 1 (39/65 matched, {@code -} treated as {@code *}) vs. round 2 (43/65 matched,
+ * {@code -} fail-closed) delta is itself evidence that this branch does fire in practice. See the
+ * {@code @Disabled} reason below for the full numeric breakdown.
  *
  * <p>Uses the same {@code @Transactional} rollback trick as {@link ChocolateyRemovalGolden300RecallTest}
  * (job creation joins this test method's own transaction and is rolled back at the end, never
@@ -92,6 +100,11 @@ import org.springframework.transaction.annotation.Transactional;
         + "routine mvn test run -- see class javadoc.")
 class NvdMirrorAbVerificationRunner {
 
+    /** Round 3 (2026-09-03) ran with no Claude key registered for user 5, so the 65 {@link
+     *  Stage1IdentificationService#identify} calls below completed for free (static-only, no Stage1
+     *  AI arbitration). Anyone re-enabling this class must re-confirm that's still true before
+     *  running it again — if user 5 has since gained a registered key, {@code identify} will fire a
+     *  billed Stage1 AI arbitration call per row instead. */
     private static final Long REAL_USER_ID = 5L;
     /** Deliberately not a real user id (no {@code user_secrets} row can exist for it) — forces
      *  {@link com.vulncheck.app.service.UserApiKeyService#getNvdApiKey} to return empty so every
@@ -263,7 +276,16 @@ class NvdMirrorAbVerificationRunner {
 
     /** Looks up every CVE id in {@code nvd_cve_cpe_match} whose (part, vendor, product) matches
      *  {@code cpeName} and whose version-applicability (own OR semantics only, see class javadoc)
-     *  covers {@code cpeName}'s own version segment. */
+     *  covers {@code cpeName}'s own version segment.
+     *
+     *  <p><b>Not a reference implementation for backlog item 241 (B4, the production mirror-backed
+     *  {@code NvdVulnerabilitySource} rewrite)</b>: this method fetches every (part, vendor, product)
+     *  row with no {@code LIMIT}, no version predicate, and no {@code vulnerable} filter, then
+     *  applies {@link #versionApplies} in Java over the full result set — for a broad-surface
+     *  product like {@code google:chrome} that's thousands of rows per call. That's an acceptable
+     *  simplification for this disposable A/B harness (run once, against a handful of golden-300
+     *  rows), but B4 must push version-applicability filtering into SQL (or use a two-stage query)
+     *  rather than copying this fetch-everything-then-filter shape as-is. */
     private Set<String> mirrorLookup(String cpeName) {
         List<String> segments = splitCpeSegments(cpeName);
         String part = segments.get(2);
