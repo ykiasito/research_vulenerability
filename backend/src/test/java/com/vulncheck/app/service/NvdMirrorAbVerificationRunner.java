@@ -84,6 +84,26 @@ import org.springframework.web.util.UriComponentsBuilder;
  * CVE that {@link #mirrorLookup} and the live query already agreed on (or one attached to a {@code
  * mirrorOnly} CVE) is still invisible to those counters.
  *
+ * <p><b>Round 4 finding, corrected (round 5, 2026-09-03)</b>: round 4 above left one {@code
+ * liveOnly} CVE — CVE-2026-18301, golden-300's GIMP 2.10.38 row — as {@code UNEXPLAINED}, and
+ * classified the other 37 as {@code FRESHNESS_STALE} purely on "zero matching {@code
+ * nvd_cve_cpe_match} rows", assumed (never checked against NVD's own authoritative data) to mean
+ * "not synced yet" — the same unproven-freshness mistake round 3 made in a different shape. A
+ * senior-reviewer direct, unauthenticated, non-destructive query of NVD's public {@code ?cveId=}
+ * endpoint for CVE-2026-18301 found its authoritative record's own {@code lastModified=2026-09-02}
+ * (NVD had just reanalyzed this CVE) carries exactly one {@code gimp:gimp} {@code cpeMatch} — a
+ * fixed {@code criteria} version of {@code 3.2.2}, no range fields — which does not cover
+ * golden-300's queried {@code 2.10.38} at all. Live's {@code ?cpeName=} search endpoint (queried by
+ * {@link NvdVulnerabilitySource#fetchFromNvdCached} above) simply hadn't caught up with that
+ * reanalysis yet and returned this CVE anyway: a live-side search-index lag, not a mirror defect.
+ * {@link #classifyLiveOnly} now checks this authoritative {@code ?cveId=} data first (see its own
+ * javadoc and {@link #fetchAuthoritativeCveData}) for every {@code liveOnly} CVE, splitting what
+ * round 4 lumped into one unproven {@code FRESHNESS_STALE} bucket into a proven {@code
+ * LIVE_ONLY_FALSE_POSITIVE}/{@code FRESHNESS_MISSING}/{@code FRESHNESS_LAG}/{@code
+ * INGEST_GAP_OR_LOGIC_BUG} breakdown instead. <b>This fix has not yet been run against the real
+ * mirror ("round 5")</b> — see the {@code @Disabled} reason below for exactly what's confirmed (via
+ * the senior-reviewer's own direct NVD queries) versus what still needs a real run to measure.
+ *
  * <p>Uses the same {@code @Transactional} rollback trick as {@link ChocolateyRemovalGolden300RecallTest}
  * (job creation joins this test method's own transaction and is rolled back at the end, never
  * durably written) and the same real-dev-DB {@code @TestPropertySource} as every other class in
@@ -95,27 +115,34 @@ import org.springframework.web.util.UriComponentsBuilder;
         "spring.datasource.username=vulncheck",
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Round 4 (2026-09-03, senior-reviewer REVISE fix for round 3's unreachable-counter bug) "
-        + "RUN, GATE NOT PASSED: 65 golden-300.csv IDENTIFIED_CPE rows compared (64 with a "
-        + "successful live query, 1 -- Notepad++ -- had a live-query failure and was excluded as "
-        + "inconclusive). 53/65 matched exactly; of the remaining 12 mismatched rows (including the "
-        + "1 inconclusive one), totalMirrorOnly=0 (no false positives, still holds) and "
-        + "totalLiveOnly=38: freshnessMissing=0, freshnessStale=37 (nvd_cve_cpe_match has no row at "
-        + "all yet for that CVE/part/vendor/product -- enrichment lag, now measured via cpe_match "
-        + "row presence instead of the broken last_modified_at/backfill-timestamp comparison round 3 "
-        + "used), dashFailClosedOnly=0, unexplained=1 (CVE-2026-18301 against GIMP 2.10.38: the only "
-        + "gimp:gimp cpe_match row for this CVE in the mirror is version 3.2.2, not 2.10.38 -- "
-        + "either a genuinely missing cpe_match row for this CVE's 2.10.38-covering criteria, or a "
-        + "real applicability-logic gap, not yet root-caused). GATE criterion (totalMirrorOnly==0 && "
-        + "unexplained==0 && dashFailClosedOnly==0) now genuinely evaluates all three terms (round "
-        + "3's version always had unexplained==0 and dashFailClosedOnly==0 vacuously, since "
-        + "classifyLiveOnly's old freshness check absorbed every liveOnly CVE before either could "
-        + "fire) -- this run is GATE NOT PASSED on the unexplained=1 term; totalMirrorOnly=0 remains "
-        + "the one confirmed-valid finding carried over from round 3. Per-row live finding counts "
-        + "across the 64 successfully queried rows unchanged from round 3 (live-side query logic "
-        + "wasn't touched by this fix): sum 4676, average ~73.1, top 3 by count: Google Chrome "
-        + "127.0.6533.100 (2739), Mozilla Firefox 128.0 (681), GitLab 17.2.1 (282). Left disabled so "
-        + "it can never re-fire on a routine mvn test run -- see class javadoc.")
+@Disabled("Round 5 code (2026-09-03, senior-reviewer finding on round 4's PR: classifyLiveOnly's "
+        + "FRESHNESS_STALE bucket was itself an unproven assumption -- the same failure shape as "
+        + "round 3's unreachable-counter bug, see class javadoc) has NOT yet been run against the "
+        + "real mirror. Round 4's last real measurement (2026-09-03) is the most recent actual run: "
+        + "65 golden-300.csv IDENTIFIED_CPE rows compared (64 with a successful live query, 1 -- "
+        + "Notepad++ -- excluded as inconclusive). 53/65 matched exactly; totalMirrorOnly=0 across "
+        + "the 12 mismatched rows (no false positives -- mirrorOnly classification logic wasn't "
+        + "touched by this round's fix, so this is expected to still hold). totalLiveOnly=38 was "
+        + "split by round 4's own (now-replaced) logic into freshnessStale=37/unexplained=1, without "
+        + "ever checking authoritative NVD data for any of the 38. The one unexplained CVE, "
+        + "CVE-2026-18301 against GIMP 2.10.38, is now understood via a senior-reviewer direct, "
+        + "unauthenticated, non-destructive query of NVD's public ?cveId=CVE-2026-18301 endpoint: "
+        + "the authoritative record's own lastModified=2026-09-02 carries exactly one gimp:gimp "
+        + "cpeMatch, a fixed criteria version of 3.2.2 with no range, which does not cover 2.10.38 -- "
+        + "a live search-index lag (?cpeName= search hadn't caught up with that reanalysis yet), not "
+        + "a mirror defect. Under round 5's logic this specific CVE is expected to classify as "
+        + "LIVE_ONLY_FALSE_POSITIVE (explained, does not gate); the other 37 formerly-freshnessStale "
+        + "CVEs have NOT been individually re-verified against authoritative data and may split "
+        + "across LIVE_ONLY_FALSE_POSITIVE/FRESHNESS_MISSING/FRESHNESS_LAG/DASH_FAIL_CLOSED/"
+        + "INGEST_GAP_OR_LOGIC_BUG once round 5 actually runs. This round's new unit test "
+        + "(NvdMirrorAbVerificationRunnerTest) covers the new authoritativeConfigurationsCover "
+        + "predicate in isolation with fixture JSON, but does not substitute for an actual round-5 "
+        + "run against the real mirror and live NVD -- no GATE PASSED/NOT PASSED verdict is claimed "
+        + "here for round 5. Per-row live finding counts across the 64 successfully queried rows "
+        + "unchanged from round 4 (live-side query logic wasn't touched by this fix): sum 4676, "
+        + "average ~73.1, top 3 by count: Google Chrome 127.0.6533.100 (2739), Mozilla Firefox 128.0 "
+        + "(681), GitLab 17.2.1 (282). Left disabled so it can never re-fire on a routine mvn test "
+        + "run -- see class javadoc.")
 class NvdMirrorAbVerificationRunner {
 
     /** Round 3 (2026-09-03) ran with no Claude key registered for user 5, so the 65 {@link
