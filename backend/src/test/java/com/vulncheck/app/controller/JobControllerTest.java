@@ -355,6 +355,74 @@ class JobControllerTest {
         assertThat(items.get(0).getMaxFixedVersion()).isEqualTo("3.0.7");
     }
 
+    // --- Second REVISE round (closed-mode backlog item 251, item 1): detail.html must be able to
+    // tell the user a category's findings list was capped, and by how much -- this asserts the model
+    // attributes detail.html's notice reads (productCountsByItemId/bundledCountsByItemId), since this
+    // test suite has no MockMvc/Thymeleaf rendering infrastructure to assert the rendered HTML
+    // itself against ------------------------------------------------------------------------------
+
+    @Test
+    void detailComputesPerCategoryShownAndTrueCountsSeparatelyForProductAndBundledFindings() {
+        User owner = user(1L, "owner@example.com");
+        ResearchJob job = job(10L, 1L);
+        ResearchJobItem identifiedItem =
+                item(100L, 10L, "Google Chrome", "127.0.6533.100", null, ResearchJobItem.STATUS_IDENTIFIED);
+
+        // 2 product findings returned (out of a true total of 2739) and 1 bundled finding returned
+        // (out of a true total of 3) -- two independently-capped categories, same item.
+        JobItemVulnerabilityCappedView productVuln1 = cappedView(
+                100L, "CVE-2024-0001", "nvd", "CRITICAL", "u", "nvd", null, null, null, null, null, null, null, 2739L);
+        JobItemVulnerabilityCappedView productVuln2 = cappedView(
+                100L, "CVE-2024-0002", "nvd", "CRITICAL", "u", "nvd", null, null, null, null, null, null, null, 2739L);
+        JobItemVulnerabilityCappedView bundledVuln = cappedView(
+                100L, "CVE-2026-11111", "nvd", "HIGH", "u", "bundled_component", null, "26.03", "7-Zip", "26.02",
+                null, null, null, 3L);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
+                .thenReturn(List.of(productVuln1, productVuln2, bundledVuln));
+
+        Model model = new ExtendedModelMap();
+        newController().detail(userDetails("owner@example.com"), 10L, model);
+
+        @SuppressWarnings("unchecked")
+        var productCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("productCountsByItemId");
+        @SuppressWarnings("unchecked")
+        var bundledCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("bundledCountsByItemId");
+
+        assertThat(productCountsByItemId.get(100L)).isEqualTo(new JobController.CategoryCounts(2, 2739L));
+        assertThat(bundledCountsByItemId.get(100L)).isEqualTo(new JobController.CategoryCounts(1, 3L));
+    }
+
+    @Test
+    void detailOmitsCategoryCountsForAnItemWithNoFindingsAtAllInThatCategory() {
+        User owner = user(1L, "owner@example.com");
+        ResearchJob job = job(10L, 1L);
+        ResearchJobItem identifiedItem =
+                item(100L, 10L, "lodash", "4.17.21", null, ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
+                .thenReturn(List.of());
+
+        Model model = new ExtendedModelMap();
+        newController().detail(userDetails("owner@example.com"), 10L, model);
+
+        @SuppressWarnings("unchecked")
+        var productCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("productCountsByItemId");
+        @SuppressWarnings("unchecked")
+        var bundledCountsByItemId = (java.util.Map<Long, JobController.CategoryCounts>) model.getAttribute("bundledCountsByItemId");
+
+        assertThat(productCountsByItemId).doesNotContainKey(100L);
+        assertThat(bundledCountsByItemId).doesNotContainKey(100L);
+    }
+
     // --- REVISE item 10 (senior review 2026-08-27): the CSV export must reflect CSAF vendor status --
 
     @Test

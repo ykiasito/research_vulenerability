@@ -22,6 +22,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -271,6 +272,16 @@ public class JobController {
      *  {@code vulnerabilities} cell's own listed ids are. */
     private static final int CSV_EXPORT_FINDING_CAP = 200;
 
+    /** How many of a category's (product or bundled-component) findings the job detail view is
+     *  actually showing for one item ({@code shown}, i.e. the capped list's own size) versus how
+     *  many genuinely exist ({@code total}, from {@link JobItemVulnerabilityCappedView#getTotalCount()}).
+     *  Closed-mode backlog item 251, second REVISE round (item 1): {@code detail.html} renders a
+     *  "他N件" notice per category whenever {@code total > shown} — computed here (not inline in the
+     *  template) so it's directly assertable from {@code JobControllerTest} without needing to render
+     *  Thymeleaf. */
+    public record CategoryCounts(int shown, long total) {
+    }
+
     @GetMapping("/jobs/{id}")
     public String detail(@AuthenticationPrincipal UserDetails userDetails, @PathVariable Long id, Model model) {
         User user = currentUser(userDetails);
@@ -292,11 +303,35 @@ public class JobController {
                 jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(itemIds, HTML_DETAIL_FINDING_CAP)
                         .stream()
                         .collect(Collectors.groupingBy(JobItemVulnerabilityCappedView::getJobItemId));
+        // Second REVISE round (item 1): the cap above hides findings without saying so anywhere in
+        // the HTML view — product findings and bundled-component findings are capped independently
+        // (see findCappedViewsByJobItemIdIn's javadoc), so the "hidden count" notice needs its own
+        // shown/total pair per category, not just per item. totalCount is identical across every row
+        // of the same (item, category) — see that view's own javadoc — so reading it off the first
+        // row of each filtered sublist is correct, not an approximation.
+        Map<Long, CategoryCounts> productCountsByItemId = new HashMap<>();
+        Map<Long, CategoryCounts> bundledCountsByItemId = new HashMap<>();
+        for (Map.Entry<Long, List<JobItemVulnerabilityCappedView>> entry : vulnerabilitiesByItemId.entrySet()) {
+            List<JobItemVulnerabilityCappedView> productViews = entry.getValue().stream()
+                    .filter(v -> v.getBundledComponentName() == null).collect(Collectors.toList());
+            List<JobItemVulnerabilityCappedView> bundledViews = entry.getValue().stream()
+                    .filter(v -> v.getBundledComponentName() != null).collect(Collectors.toList());
+            if (!productViews.isEmpty()) {
+                productCountsByItemId.put(entry.getKey(),
+                        new CategoryCounts(productViews.size(), productViews.get(0).getTotalCount()));
+            }
+            if (!bundledViews.isEmpty()) {
+                bundledCountsByItemId.put(entry.getKey(),
+                        new CategoryCounts(bundledViews.size(), bundledViews.get(0).getTotalCount()));
+            }
+        }
 
         model.addAttribute("job", job);
         model.addAttribute("items", items);
         model.addAttribute("identifiedByItemId", identifiedByItemId);
         model.addAttribute("vulnerabilitiesByItemId", vulnerabilitiesByItemId);
+        model.addAttribute("productCountsByItemId", productCountsByItemId);
+        model.addAttribute("bundledCountsByItemId", bundledCountsByItemId);
         return "jobs/detail";
     }
 

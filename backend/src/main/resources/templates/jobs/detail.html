@@ -46,6 +46,8 @@
         th:with="identified=${identifiedByItemId.get(item.id)},
                   vulns=${vulnerabilitiesByItemId.get(item.id)},
                   maxFixedVersion=${item.maxFixedVersion},
+                  productCounts=${productCountsByItemId.get(item.id)},
+                  bundledCounts=${bundledCountsByItemId.get(item.id)},
                   level=${identified == null
                       ? (item.hintIdentifier != null ? 'hint' : 'none')
                       : ((identified.versionConfirmed != null and identified.versionConfirmed)
@@ -102,7 +104,12 @@
             </div>
         </td>
         <td>
-            <span th:if="${vulns != null and !vulns.isEmpty()}" style="color: #b00020; font-weight: bold;" title="既知の脆弱性が見つかりました">🔴 影響あり</span>
+            <span th:if="${vulns != null and !vulns.isEmpty() and item.researchIncompleteReason != 'FINDINGS_TRUNCATED'}" style="color: #b00020; font-weight: bold;" title="既知の脆弱性が見つかりました">🔴 影響あり</span>
+            <!-- closed-mode backlog item 251 REVISE(2回目)項目2: NvdVulnerabilitySourceの書き込み安全上限で
+                 一部findingsが切り捨てられたアイテム専用のマーカー。このアイテムは実際にfindingsを持っている
+                 （＝「何も調査されなかった」ケースの⚠ 要再確認（調査失敗）とは別物）ため、既存の🔴とも
+                 ⚠とも異なる文言・色にする。 -->
+            <span th:if="${vulns != null and !vulns.isEmpty() and item.researchIncompleteReason == 'FINDINGS_TRUNCATED'}" style="color: #b00020; font-weight: bold;" title="既知の脆弱性が見つかりましたが、件数が多すぎるため一部のみ記録されています">🔴 影響あり（一部件数省略）</span>
             <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'SOURCES_FAILED'}" style="color: #b8860b; font-weight: bold;" title="脆弱性情報源への問い合わせがすべて失敗し、実際には未確認です">⚠ 要再確認（調査失敗）</span>
             <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'IDENTIFICATION_TOO_WEAK'}" style="color: #7a5c00; font-weight: bold;" title="識別信頼度が低いため、AIによる脆弱性調査は実施していません">🟡 未検証（識別信頼度低）</span>
             <span th:if="${(vulns == null or vulns.isEmpty()) and item.status == 'IDENTIFIED' and item.researchIncompleteReason == 'AI_NOT_AVAILABLE'}" style="color: #7a5c00; font-weight: bold;" title="AI用のAPIキーが未登録のため、AIによる脆弱性調査は実施していません">🟡 未調査（AI調査未実施）</span>
@@ -157,6 +164,15 @@
                         </div>
                     </li>
                 </ul>
+                <!-- closed-mode backlog item 251 REVISE(2回目)項目1: 製品自体の脆弱性・同梱コンポーネントの
+                     脆弱性はそれぞれ独立にキャップされている（JobItemVulnerabilityRepository#findCappedViewsByJobItemIdIn）
+                     ため、キャップで隠れている件数もカテゴリごとに個別に通知する。1アイテムにつき1回ではない。 -->
+                <div th:if="${productCounts != null and productCounts.total > productCounts.shown}"
+                     style="font-size: 0.85em; color: #555; margin-top: 0.3em;"
+                     th:text="'他' + (${productCounts.total} - ${productCounts.shown}) + '件（表示は製品自体の脆弱性のうち上位' + ${productCounts.shown} + '件、CVSS優先度順。全件はCSVエクスポートで確認できます）'"></div>
+                <div th:if="${bundledCounts != null and bundledCounts.total > bundledCounts.shown}"
+                     style="font-size: 0.85em; color: #555; margin-top: 0.3em;"
+                     th:text="'他' + (${bundledCounts.total} - ${bundledCounts.shown}) + '件（表示は同梱コンポーネントの脆弱性のうち上位' + ${bundledCounts.shown} + '件。全件はCSVエクスポートで確認できます）'"></div>
             </div>
         </td>
     </tr>
@@ -170,7 +186,8 @@
     <code>IDENTIFICATION_TOO_WEAK</code> = 識別信頼度が低いためAI調査を実施していない /
     <code>AI_NOT_AVAILABLE</code> = AI用のAPIキーが未登録のためAI調査を実施していない /
     <code>BUDGET_EXHAUSTED</code> = ジョブの予算上限に達しAI調査を実施していない /
-    <code>AI_CALL_FAILED</code> = AI調査を試みたが呼び出しに失敗し、実際には未確認。
+    <code>AI_CALL_FAILED</code> = AI調査を試みたが呼び出しに失敗し、実際には未確認 /
+    <code>FINDINGS_TRUNCATED</code> = 脆弱性は実際に見つかったが、件数が多すぎるため一部のみ記録されている（上位優先度のもののみ）。
     画面上の「影響」列と同じ区別を、エクスポートしたCSVでも確認できるようにしたものです。
 </p>
 
