@@ -41,12 +41,16 @@ public class UserApiKeyService {
      * encryption key rotation — item 248) would otherwise log the exact same WARN line up to 2,000
      * times for a single 1,000-item job. Tracks which {@code userId}s have already been warned
      * about a decrypt failure, process-wide (not per-job — simpler, and still accurate: the
-     * underlying cause is permanent, not something a later job for the same user could ever fix
-     * without the user re-registering their key), so only the first failure per user logs at WARN;
-     * every later one downgrades to DEBUG. {@link ConcurrentHashMap#newKeySet()} rather than a
-     * plain {@code HashSet} since {@link #getNvdApiKey(Long)} runs concurrently across {@code
-     * itemProcessingExecutor}'s threads within one job (and potentially across concurrently-running
-     * jobs, since this service is a singleton).
+     * underlying cause is permanent, and re-registering a fresh key is the intended recovery path —
+     * but as of this writing that path is itself blocked by an unrelated bug in the key-registration
+     * screen, {@code GET /settings/secrets} throwing via {@code SecretsController#maskOrNull}
+     * (task-backlog item 279, REVISE note added senior-reviewer 2026-09-04), so there is currently
+     * no way for a later job to legitimately need a fresh WARN for the same user anyway), so only
+     * the first failure per user logs at WARN; every later one downgrades to DEBUG. {@link
+     * ConcurrentHashMap#newKeySet()} rather than a plain {@code HashSet} since {@link
+     * #getNvdApiKey(Long)} runs concurrently across {@code itemProcessingExecutor}'s threads within
+     * one job (and potentially across concurrently-running jobs, since this service is a
+     * singleton).
      */
     private final Set<Long> nvdKeyDecryptFailureWarnedUserIds = ConcurrentHashMap.newKeySet();
 
