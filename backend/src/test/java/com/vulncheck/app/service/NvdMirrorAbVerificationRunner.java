@@ -1,18 +1,27 @@
 package com.vulncheck.app.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJob;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.ResearchJobItemRepository;
 import com.vulncheck.app.service.nvd.CpeUtils;
+import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.vuln.NvdVulnerabilitySource;
 import com.vulncheck.app.service.vuln.SourceResult;
 import com.vulncheck.app.service.vuln.VersionUtils;
 import com.vulncheck.app.service.vuln.VulnFinding;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +38,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.util.UriComponentsBuilder;
 
 /**
  * Closed-mode backlog item 202's Phase 3b mandatory A/B gate (docs/spec/closed-mode-plan.md
@@ -130,6 +141,19 @@ class NvdMirrorAbVerificationRunner {
     private NvdVulnerabilitySource nvdVulnerabilitySource;
     @Autowired
     private JdbcTemplate jdbcTemplate;
+    @Autowired
+    private RestClient externalApiRestClient;
+    @Autowired
+    private NvdRateLimiter nvdRateLimiter;
+
+    private static final String NVD_CVE_API = "https://services.nvd.nist.gov/rest/json/cves/2.0";
+
+    /** Memoizes {@link #fetchAuthoritativeCveData} per CVE id across this test run -- the liveOnly
+     *  CVEs recur across mismatched golden-300 rows (round 4: 38 liveOnly CVEs across 12 mismatched
+     *  rows), and every fetch already pays {@link NvdRateLimiter}'s unkeyed 6.5s pacing, so
+     *  refetching the same id would multiply an already-slow run's wall time for no new
+     *  information. */
+    private final Map<String, AuthoritativeCveData> authoritativeCveCache = new HashMap<>();
 
     private record GoldenCpeRow(String rawProductName, String version, String cpeName) {
     }
@@ -341,19 +365,26 @@ class NvdMirrorAbVerificationRunner {
         String criteria = (String) matchRow.get("criteria");
         List<String> segments = splitCpeSegments(criteria);
         String criteriaVersion = segments.size() > 5 ? segments.get(5) : "*";
+        return versionInRange(itemVersion, criteriaVersion,
+                (String) matchRow.get("version_start_including"),
+                (String) matchRow.get("version_start_excluding"),
+                (String) matchRow.get("version_end_including"),
+                (String) matchRow.get("version_end_excluding"));
+    }
 
+    /** The actual version-applicability rule shared by {@link #versionApplies} (mirror DB rows,
+     *  snake_case columns) and {@link #authoritativeConfigurationsCover} (live {@code ?cveId=} JSON,
+     *  camelCase fields) -- pulled out so both consult the exact same fail-closed-on-{@code -}
+     *  semantics rather than two independently-maintained copies drifting apart. Package-private
+     *  static, no DB/network access, directly unit-testable. */
+    static boolean versionInRange(String itemVersion, String criteriaVersion, String startIncluding,
+            String startExcluding, String endIncluding, String endExcluding) {
         if ("-".equals(criteriaVersion)) {
             return false;
         }
         if (!"*".equals(criteriaVersion)) {
             return criteriaVersion.equalsIgnoreCase(itemVersion);
         }
-
-        String startIncluding = (String) matchRow.get("version_start_including");
-        String startExcluding = (String) matchRow.get("version_start_excluding");
-        String endIncluding = (String) matchRow.get("version_end_including");
-        String endExcluding = (String) matchRow.get("version_end_excluding");
-
         if (startIncluding != null && VersionUtils.compare(itemVersion, startIncluding) < 0) {
             return false;
         }
@@ -367,6 +398,147 @@ class NvdMirrorAbVerificationRunner {
             return false;
         }
         return true;
+    }
+
+    private record AuthoritativeCveData(boolean fetchSucceeded, String lastModified, JsonNode configurations) {
+    }
+
+    /** Fetches one CVE's authoritative ground truth via NVD's {@code ?cveId=} endpoint (the single,
+     *  fully-current record NVD has for that id) -- unlike {@code ?cpeName=} search, which round 4
+     *  found can lag behind a CVE's own {@code lastModified} reanalysis by at least a day (see class
+     *  javadoc for the CVE-2026-18301/GIMP case this exists to catch). Memoized via {@link
+     *  #authoritativeCveCache}.
+     *
+     *  <p>Sequential only, through the same shared {@link NvdRateLimiter} (unkeyed, 6.5s/request)
+     *  every other live call in this class already goes through -- deliberately not parallelized:
+     *  this round's task brief is explicit that parallelizing would trip NVD's 5 req/30s unkeyed
+     *  limit and produce a wave of fetch failures that would corrupt the very comparison this class
+     *  exists to run.
+     *
+     *  <p>Any failure to get a usable record back -- network/parse error, zero {@code vulnerabilities}
+     *  entries, or a missing/unparseable {@code lastModified} -- is reported as {@code
+     *  fetchSucceeded=false} rather than silently treated as "no data" or "covers nothing": {@link
+     *  #classifyLiveOnly} turns that into {@link LiveOnlyCause#UNEXPLAINED}, which fails the gate,
+     *  per this round's task brief ("取得失敗時はUNEXPLAINED扱いにしてゲートを落とす"). */
+    private AuthoritativeCveData fetchAuthoritativeCveData(String cveId) {
+        if (authoritativeCveCache.containsKey(cveId)) {
+            return authoritativeCveCache.get(cveId);
+        }
+        AuthoritativeCveData data;
+        try {
+            URI uri = UriComponentsBuilder.fromHttpUrl(NVD_CVE_API)
+                    .queryParam("cveId", cveId)
+                    .build()
+                    .toUri();
+            nvdRateLimiter.awaitTurn(false);
+            JsonNode body = externalApiRestClient.get().uri(uri).retrieve().body(JsonNode.class);
+            JsonNode vulnerabilities = body == null ? null : body.path("vulnerabilities");
+            if (vulnerabilities == null || !vulnerabilities.isArray() || vulnerabilities.isEmpty()) {
+                System.out.println("AUTHORITATIVE FETCH: ?cveId=" + cveId
+                        + " returned zero vulnerabilities entries -- treating as a fetch failure");
+                data = new AuthoritativeCveData(false, null, null);
+            } else {
+                JsonNode cve = vulnerabilities.get(0).path("cve");
+                String lastModified = cve.path("lastModified").asText(null);
+                if (lastModified == null) {
+                    System.out.println("AUTHORITATIVE FETCH: ?cveId=" + cveId
+                            + " response has no cve.lastModified -- treating as a fetch failure");
+                    data = new AuthoritativeCveData(false, null, null);
+                } else {
+                    data = new AuthoritativeCveData(true, lastModified, cve.path("configurations"));
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("AUTHORITATIVE FETCH FAILED: ?cveId=" + cveId + " -- " + e);
+            data = new AuthoritativeCveData(false, null, null);
+        }
+        authoritativeCveCache.put(cveId, data);
+        return data;
+    }
+
+    /** NVD's {@code lastModified} field is ISO-8601 without a zone/offset (e.g. {@code
+     *  "2019-10-03T13:15:10.947"}, implicitly UTC) -- same fallback shape {@code
+     *  NvdCveSyncService#parseNvdTimestamp} uses, deliberately duplicated rather than reused here
+     *  (see class javadoc for why this class doesn't lean on production parsing code beyond the bare
+     *  minimum). */
+    private static OffsetDateTime parseNvdTimestamp(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return OffsetDateTime.parse(value);
+        } catch (DateTimeParseException e) {
+            try {
+                return LocalDateTime.parse(value).atOffset(ZoneOffset.UTC);
+            } catch (DateTimeException e2) {
+                return null;
+            }
+        }
+    }
+
+    /** Pure predicate, no DB/network access -- exercised directly by {@code
+     *  NvdMirrorAbVerificationRunnerTest} with fixture JSON (this class itself is a disabled,
+     *  DB/network-backed integration harness whose own {@code @Test} can't double as that unit
+     *  test). Does the authoritative {@code configurations} JSON (from a {@code ?cveId=} response's
+     *  {@code cve.configurations}) contain at least one {@code cpeMatch} entry for the given (part,
+     *  vendor, product) whose version-applicability covers {@code itemVersion}? Same OR-only,
+     *  fail-closed-on-{@code -} semantics as {@link #versionApplies} (see {@link #versionInRange}),
+     *  deliberately duplicated field-extraction from the live JSON shape rather than reused, since
+     *  it differs from {@link #mirrorLookup}'s flattened DB-row shape. */
+    static boolean authoritativeConfigurationsCover(JsonNode configurations, String part, String vendor,
+            String product, String itemVersion) {
+        for (JsonNode cpeMatch : matchingCriteriaNodes(configurations, part, vendor, product)) {
+            List<String> segments = splitCpeSegments(cpeMatch.path("criteria").asText(""));
+            String criteriaVersion = segments.size() > 5 ? segments.get(5) : "*";
+            if (versionInRange(itemVersion, criteriaVersion,
+                    cpeMatch.path("versionStartIncluding").asText(null),
+                    cpeMatch.path("versionStartExcluding").asText(null),
+                    cpeMatch.path("versionEndIncluding").asText(null),
+                    cpeMatch.path("versionEndExcluding").asText(null))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Every {@code cpeMatch} node across {@code configurations[].nodes[]} whose own {@code
+     *  criteria} parses to the given (part, vendor, product) -- regardless of version applicability.
+     *  Shared by {@link #authoritativeConfigurationsCover} (checks version applicability over this
+     *  set) and {@link #authoritativeCriteriaSummary} (dumps this set for the human-readable
+     *  report). */
+    private static List<JsonNode> matchingCriteriaNodes(JsonNode configurations, String part, String vendor,
+            String product) {
+        List<JsonNode> result = new ArrayList<>();
+        if (configurations == null || configurations.isMissingNode() || configurations.isNull()) {
+            return result;
+        }
+        for (JsonNode config : configurations) {
+            for (JsonNode node : config.path("nodes")) {
+                for (JsonNode cpeMatch : node.path("cpeMatch")) {
+                    List<String> segments = splitCpeSegments(cpeMatch.path("criteria").asText(""));
+                    if (segments.size() > 4 && part.equals(segments.get(2)) && vendor.equals(segments.get(3))
+                            && product.equals(segments.get(4))) {
+                        result.add(cpeMatch);
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    /** Human-readable dump of every authoritative {@code cpeMatch}'s own {@code criteria} string for
+     *  the given (part, vendor, product) -- used in {@link LiveOnlyCause#LIVE_ONLY_FALSE_POSITIVE}
+     *  report detail so the printed record carries NVD's own ground-truth criteria, not just this
+     *  class's verdict. */
+    private static String authoritativeCriteriaSummary(JsonNode configurations, String part, String vendor,
+            String product) {
+        List<String> criteriaStrings = new ArrayList<>();
+        for (JsonNode cpeMatch : matchingCriteriaNodes(configurations, part, vendor, product)) {
+            criteriaStrings.add(cpeMatch.path("criteria").asText());
+        }
+        return criteriaStrings.isEmpty()
+                ? "(no cpeMatch entries at all for this part/vendor/product)"
+                : criteriaStrings.toString();
     }
 
     /** Why a live-only CVE (returned by the live NVD query, not by {@link #mirrorLookup}) diverges
