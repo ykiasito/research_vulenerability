@@ -73,7 +73,8 @@ public class Stage4WebSearchResearchService {
             return new Stage4ResearchResult(0, ResearchJobItem.INCOMPLETE_REASON_BUDGET_EXHAUSTED);
         }
 
-        log.info("Stage4 firing for item {} (ecosystem={}, package={})", item.getId(), ecosystem, packageName);
+        log.info("Stage4 firing for item {} (ecosystem={}, package={})", item.getId(), ecosystem,
+                LogSanitizer.sanitize(packageName));
 
         Optional<List<WebSearchVulnFindingDto>> findingsResult = llmServiceClient.webSearchResearch(
                 apiKey.get(), item, ecosystem, packageName, JobCostBudgetService.STAGE4_WEB_SEARCH_RESEARCH_COST_USD);
@@ -86,7 +87,7 @@ public class Stage4WebSearchResearchService {
         // that signal explicitly.
         if (findingsResult.isEmpty()) {
             log.error("Stage4 web-search research call failed for item {} (ecosystem={}, package={})",
-                    item.getId(), ecosystem, packageName);
+                    item.getId(), ecosystem, LogSanitizer.sanitize(packageName));
             return new Stage4ResearchResult(0, ResearchJobItem.INCOMPLETE_REASON_AI_CALL_FAILED);
         }
         List<WebSearchVulnFindingDto> findings = findingsResult.get();
