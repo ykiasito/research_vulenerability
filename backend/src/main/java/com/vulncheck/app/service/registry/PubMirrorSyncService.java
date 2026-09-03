@@ -2,6 +2,7 @@ package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
 import java.util.ArrayList;
@@ -115,15 +116,15 @@ public class PubMirrorSyncService {
             }
             if (versions.isEmpty()) {
                 log.warn("pub.dev registry returned a package body with no parseable version entries "
-                        + "for package={}", packageName);
+                        + "for package={}", LogSanitizer.sanitize(packageName));
                 return Optional.empty();
             }
             return Optional.of(versions);
         } catch (HttpClientErrorException.NotFound e) {
-            log.debug("pub.dev registry has no entry for package={}", packageName);
+            log.debug("pub.dev registry has no entry for package={}", LogSanitizer.sanitize(packageName));
             return Optional.empty();
         } catch (Exception e) {
-            log.warn("pub.dev registry package fetch failed for package={}", packageName, e);
+            log.warn("pub.dev registry package fetch failed for package={}", LogSanitizer.sanitize(packageName), e);
             return Optional.empty();
         }
     }

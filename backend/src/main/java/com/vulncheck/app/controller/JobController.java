@@ -33,6 +33,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -272,6 +274,19 @@ public class JobController {
      *  {@code vulnerabilities} cell's own listed ids are. */
     static final int CSV_EXPORT_FINDING_CAP = 200;
 
+    /** How many job items {@link #detail}'s HTML item table shows per page (closed-mode backlog
+     *  item 267). Before this, {@code detail} loaded and rendered every item of a job in one page,
+     *  and {@link JobItemVulnerabilityRepository#findCappedViewsByJobItemIdIn}'s window-function
+     *  rank/cap sort ran over every one of those items' findings at once — for a 1,000-item job at
+     *  the ~73 findings/item average item 251 measured (see {@link #HTML_DETAIL_FINDING_CAP}'s own
+     *  javadoc), that's roughly 73,000 rows sorted for a single page view. Paginating the item list
+     *  itself (not just the findings-per-item cap, which was already in place) bounds that sort to
+     *  one page's worth of items' findings. 50 is a plain, unmeasured "reasonable table page size"
+     *  choice — no throughput/latency measurement backs this exact number, unlike {@link
+     *  #HTML_DETAIL_FINDING_CAP}'s. {@link #exportCsv} is deliberately NOT paginated (task scope) —
+     *  a CSV download is expected to contain every item regardless of how the HTML view paginates. */
+    static final int ITEMS_PAGE_SIZE = 50;
+
     /** How many of a category's (product or bundled-component) findings the job detail view is
      *  actually showing for one item ({@code shown}, i.e. the capped list's own size) versus how
      *  many genuinely exist ({@code total}, from {@link JobItemVulnerabilityCappedView#getTotalCount()}).
@@ -283,13 +298,20 @@ public class JobController {
     }
 
     @GetMapping("/jobs/{id}")
-    public String detail(@AuthenticationPrincipal UserDetails userDetails, @PathVariable Long id, Model model) {
+    public String detail(@AuthenticationPrincipal UserDetails userDetails, @PathVariable Long id,
+            @RequestParam(name = "page", defaultValue = "0") int page, Model model) {
         User user = currentUser(userDetails);
         ResearchJob job = researchJobRepository.findById(id)
                 .filter(j -> j.getUserId().equals(user.getId()))
                 .orElseThrow(() -> new IllegalArgumentException("ジョブが見つかりません。"));
 
-        List<ResearchJobItem> items = researchJobItemRepository.findByJobIdOrderById(id);
+        // Negative page numbers only ever arrive via a hand-edited URL (no in-app link ever
+        // generates one) -- clamped rather than rejected, since PageRequest.of itself throws for a
+        // negative index and there's nothing here worth a 400/error page over.
+        int currentPage = Math.max(page, 0);
+        Page<ResearchJobItem> itemsPage = researchJobItemRepository.findByJobIdOrderById(
+                id, PageRequest.of(currentPage, ITEMS_PAGE_SIZE));
+        List<ResearchJobItem> items = itemsPage.getContent();
         List<Long> itemIds = items.stream().map(ResearchJobItem::getId).collect(Collectors.toList());
         Map<Long, IdentifiedProduct> identifiedByItemId = identifiedProductRepository.findByJobItemIdIn(itemIds)
                 .stream()
@@ -337,6 +359,11 @@ public class JobController {
         // constant changes here.
         model.addAttribute("htmlDetailFindingCap", HTML_DETAIL_FINDING_CAP);
         model.addAttribute("csvExportFindingCap", CSV_EXPORT_FINDING_CAP);
+        // Item-list pagination (closed-mode backlog item 267) -- see ITEMS_PAGE_SIZE's own javadoc.
+        // currentPage/totalPages are both 0-based internally; detail.html adds 1 only for display.
+        model.addAttribute("currentPage", currentPage);
+        model.addAttribute("totalPages", itemsPage.getTotalPages());
+        model.addAttribute("totalItems", itemsPage.getTotalElements());
         return "jobs/detail";
     }
 

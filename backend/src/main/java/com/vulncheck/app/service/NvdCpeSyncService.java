@@ -5,18 +5,16 @@ import com.vulncheck.app.entity.CpeDictionaryEntry;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
 import com.vulncheck.app.service.nvd.CpeUtils;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
+import com.vulncheck.app.service.nvd.NvdUriBuilder;
 import java.net.URI;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
-import org.springframework.web.util.UriComponentsBuilder;
 
 /**
  * Mirrors (a subset of) the NVD CPE Dictionary into the local {@code cpe_dictionary} table, which
@@ -168,7 +166,8 @@ public class NvdCpeSyncService {
 
             int fetched = products.size();
             startIndex += fetched;
-            log.info("NVD CPE sync progress: {}/{} (keyword={})", startIndex, totalResults, keyword);
+            log.info("NVD CPE sync progress: {}/{} (keyword={})", startIndex, totalResults,
+                    LogSanitizer.sanitize(keyword));
 
             if (fetched == 0) {
                 break;
@@ -190,27 +189,19 @@ public class NvdCpeSyncService {
         // let CSV input override resultsPerPage/startIndex above -- same class of bug as
         // NvdVulnerabilitySource's cpeName case (PR#163).
         //
-        // Encoding it via expand-then-encode rather than builder.encode() (backlog item 254,
-        // senior review of PR#166): UriComponentsBuilder#encode() is URI *template* encoding, so
-        // "{" / "}" are left alone as template-variable delimiters instead of being percent-encoded
-        // -- and NVD keywords routinely contain literal braces (e.g. MSI ProductCode GUIDs like
-        // "{90160000-008C-0000-1000-0000000FF1CE}", which show up verbatim in Windows installed-
-        // software listings). A balanced brace pair then survives .encode() untouched and trips the
-        // single-argument java.net.URI constructor inside build().toUri() with "Illegal character
-        // in query". Passing the keyword through as a URI template variable and expanding it before
-        // encoding avoids that: by the time encode() runs there is no template syntax left to
-        // preserve, so literal braces get percent-encoded like any other reserved character.
-        UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromHttpUrl(NVD_CPE_API)
+        // NvdUriBuilder (task-backlog item 254) percent-encodes keyword -- including literal
+        // braces (e.g. MSI ProductCode GUIDs like "{90160000-008C-0000-1000-0000000FF1CE}", which
+        // show up verbatim in Windows installed-software listings) and "+" (item 255) -- see its
+        // own javadoc for why and how.
+        NvdUriBuilder uriBuilder = NvdUriBuilder.fromHttpUrl(NVD_CPE_API)
                 .queryParam("resultsPerPage", resultsPerPage)
                 .queryParam("startIndex", startIndex);
-        Map<String, Object> templateVars = new HashMap<>();
         if (keyword != null && !keyword.isBlank()) {
-            uriBuilder.queryParam("keywordSearch", "{keywordSearch}");
-            templateVars.put("keywordSearch", keyword);
+            uriBuilder.queryParam("keywordSearch", keyword);
         }
 
         try {
-            URI uri = uriBuilder.build().expand(templateVars).encode().toUri();
+            URI uri = uriBuilder.build();
             return restClient.get()
                     .uri(uri)
                     .headers(headers -> apiKey.ifPresent(key -> headers.set("apiKey", key)))

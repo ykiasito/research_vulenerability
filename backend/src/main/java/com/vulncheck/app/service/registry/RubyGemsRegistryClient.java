@@ -2,6 +2,7 @@ package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
 import java.math.BigDecimal;
@@ -87,7 +88,7 @@ public class RubyGemsRegistryClient implements PackageRegistryLookup {
 
             return Optional.of(new RegistryMatch(ECOSYSTEM, productName, purl, confidence, versionExists, versions));
         } catch (Exception e) {
-            log.debug("RubyGems registry lookup failed for product={}", productName, e);
+            log.debug("RubyGems registry lookup failed for product={}", LogSanitizer.sanitize(productName), e);
             return Optional.empty();
         }
     }

@@ -1,6 +1,7 @@
 package com.vulncheck.app.service.vuln;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.vulncheck.app.service.LogSanitizer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -94,7 +95,8 @@ public class OsvLiveQueryClient {
             }
             return SourceResult.success(findings);
         } catch (Exception e) {
-            log.warn("OSV query failed for ecosystem={} package={} version={}", osvEcosystem, packageName, version, e);
+            log.warn("OSV query failed for ecosystem={} package={} version={}", osvEcosystem,
+                    LogSanitizer.sanitize(packageName), LogSanitizer.sanitize(version), e);
             return SourceResult.failure();
         }
     }

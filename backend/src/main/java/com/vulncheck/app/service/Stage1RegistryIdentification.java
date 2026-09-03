@@ -230,7 +230,8 @@ public class Stage1RegistryIdentification {
             return registryLookupCache.get(lookup.ecosystem(), productName, version,
                     () -> lookup.lookup(productName, version));
         } catch (Exception e) {
-            log.warn("Registry lookup {} threw unexpectedly for product {}", lookup.getClass().getSimpleName(), productName, e);
+            log.warn("Registry lookup {} threw unexpectedly for product {}", lookup.getClass().getSimpleName(),
+                    LogSanitizer.sanitize(productName), e);
             return Optional.empty();
         }
     }
