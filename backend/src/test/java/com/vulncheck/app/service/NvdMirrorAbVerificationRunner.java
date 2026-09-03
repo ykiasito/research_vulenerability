@@ -276,7 +276,16 @@ class NvdMirrorAbVerificationRunner {
 
     /** Looks up every CVE id in {@code nvd_cve_cpe_match} whose (part, vendor, product) matches
      *  {@code cpeName} and whose version-applicability (own OR semantics only, see class javadoc)
-     *  covers {@code cpeName}'s own version segment. */
+     *  covers {@code cpeName}'s own version segment.
+     *
+     *  <p><b>Not a reference implementation for backlog item 241 (B4, the production mirror-backed
+     *  {@code NvdVulnerabilitySource} rewrite)</b>: this method fetches every (part, vendor, product)
+     *  row with no {@code LIMIT}, no version predicate, and no {@code vulnerable} filter, then
+     *  applies {@link #versionApplies} in Java over the full result set — for a broad-surface
+     *  product like {@code google:chrome} that's thousands of rows per call. That's an acceptable
+     *  simplification for this disposable A/B harness (run once, against a handful of golden-300
+     *  rows), but B4 must push version-applicability filtering into SQL (or use a two-stage query)
+     *  rather than copying this fetch-everything-then-filter shape as-is. */
     private Set<String> mirrorLookup(String cpeName) {
         List<String> segments = splitCpeSegments(cpeName);
         String part = segments.get(2);
