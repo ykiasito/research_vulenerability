@@ -182,13 +182,18 @@ public class NvdCpeSyncService {
 
     private JsonNode fetchPage(String keyword, int startIndex, int resultsPerPage, Optional<String> apiKey,
             RestClient restClient) {
+        // .encode() is required here: keyword is the CSV-supplied product name (see
+        // Stage1IdentificationService's syncKeywordSinglePage / AdminController's syncByKeyword),
+        // so a product cell like "foo&resultsPerPage=1" would otherwise inject an unencoded "&"
+        // into the query string and let CSV input override resultsPerPage/startIndex above --
+        // same class of bug as NvdVulnerabilitySource's cpeName case (PR#163).
         UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromHttpUrl(NVD_CPE_API)
                 .queryParam("resultsPerPage", resultsPerPage)
                 .queryParam("startIndex", startIndex);
         if (keyword != null && !keyword.isBlank()) {
             uriBuilder.queryParam("keywordSearch", keyword);
         }
-        URI uri = uriBuilder.build().toUri();
+        URI uri = uriBuilder.encode().build().toUri();
 
         try {
             return restClient.get()
