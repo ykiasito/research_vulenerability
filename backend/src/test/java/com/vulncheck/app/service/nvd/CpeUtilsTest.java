@@ -125,4 +125,62 @@ class CpeUtilsTest {
         assertThat(CpeUtils.parsePart("cpe:2.3")).isEqualTo("a");
         assertThat(CpeUtils.parsePart("not-a-cpe-string")).isEqualTo("a");
     }
+
+    // --- parseVersion/versionInRange (closed-mode backlog item 251, senior-reviewer REVISE item 10:
+    // moved from NvdMirrorAbVerificationRunner's disposable A/B harness into production, since
+    // NvdVulnerabilitySource's mirror-backed rewrite needs the exact same, already-hardened logic
+    // that harness's GATE PASSED conclusion validated) -----------------------------------------------
+
+    @Test
+    void parseVersionExtractsTheVersionSegment() {
+        assertThat(CpeUtils.parseVersion("cpe:2.3:a:apache:log4j:2.15.0:*:*:*:*:*:*:*")).isEqualTo("2.15.0");
+    }
+
+    @Test
+    void parseVersionDefaultsToWildcardWhenTheCpeStringIsNullOrTooShortToCarryAVersion() {
+        assertThat(CpeUtils.parseVersion(null)).isEqualTo("*");
+        assertThat(CpeUtils.parseVersion("cpe:2.3:a:apache:log4j")).isEqualTo("*");
+    }
+
+    @Test
+    void parseVersionHandlesADashSegmentAsNotApplicableRatherThanWildcard() {
+        assertThat(CpeUtils.parseVersion("cpe:2.3:o:cisco:ios_xe:-:*:*:*:*:*:*:*")).isEqualTo("-");
+    }
+
+    @Test
+    void versionInRangeMatchesAConcreteCriteriaVersionExactlyCaseInsensitive() {
+        assertThat(CpeUtils.versionInRange("2.15.0", "2.15.0", null, null, null, null)).isTrue();
+        assertThat(CpeUtils.versionInRange("2.15.0", "2.15.1", null, null, null, null)).isFalse();
+    }
+
+    @Test
+    void versionInRangeNeverMatchesABareDashCriteriaVersionEvenWithNoRangeColumnsSet() {
+        // CPE 2.3's own "not applicable" marker, not a synonym for "*" (any version) -- a
+        // version-less platform entry like cpe:2.3:o:cisco:ios_xe:-:*:*:*:*:*:*:* has all four range
+        // columns null (there's no range to describe for a field that doesn't apply), which would
+        // otherwise fall into the "unconditionally vulnerable at every version" branch and match
+        // every queried version indiscriminately -- the exact false-positive shape
+        // NvdMirrorAbVerificationRunner's own REVISE history (see its versionApplies javadoc) found
+        // and fixed. The only safe, fail-closed treatment is to never match on a bare "-".
+        assertThat(CpeUtils.versionInRange("17.3.1", "-", null, null, null, null)).isFalse();
+        assertThat(CpeUtils.versionInRange("1.0.0", "-", null, null, null, null)).isFalse();
+    }
+
+    @Test
+    void versionInRangeWithWildcardCriteriaVersionAndNoRangeColumnsMatchesEveryVersion() {
+        assertThat(CpeUtils.versionInRange("1.0.0", "*", null, null, null, null)).isTrue();
+        assertThat(CpeUtils.versionInRange("999.999.999", "*", null, null, null, null)).isTrue();
+    }
+
+    @Test
+    void versionInRangeRespectsAllFourRangeBoundsInclusiveAndExclusive() {
+        assertThat(CpeUtils.versionInRange("2.0.0", "*", "2.0.0", null, null, null)).isTrue();
+        assertThat(CpeUtils.versionInRange("1.9.9", "*", "2.0.0", null, null, null)).isFalse();
+        assertThat(CpeUtils.versionInRange("2.0.0", "*", null, "2.0.0", null, null)).isFalse();
+        assertThat(CpeUtils.versionInRange("2.0.1", "*", null, "2.0.0", null, null)).isTrue();
+        assertThat(CpeUtils.versionInRange("3.0.0", "*", null, null, "3.0.0", null)).isTrue();
+        assertThat(CpeUtils.versionInRange("3.0.1", "*", null, null, "3.0.0", null)).isFalse();
+        assertThat(CpeUtils.versionInRange("2.9.9", "*", null, null, null, "3.0.0")).isTrue();
+        assertThat(CpeUtils.versionInRange("3.0.0", "*", null, null, null, "3.0.0")).isFalse();
+    }
 }
