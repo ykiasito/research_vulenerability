@@ -6,6 +6,8 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.queryParam;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
@@ -13,6 +15,7 @@ import com.vulncheck.app.repository.CpeDictionaryRepository;
 import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import java.util.Optional;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
@@ -100,6 +103,48 @@ class NvdCpeSyncServiceTest {
         assertThat(service.tryBeginFullSync())
                 .as("the slot must be free again after an explicit release")
                 .isTrue();
+    }
+
+    @Test
+    void encodesCsvSuppliedKeywordCharactersInTheQueryStringToPreventParameterInjection() {
+        // Backlog item 253 (senior review, 2026-09-03, PR#158 follow-up): keyword is the
+        // CSV-supplied product name (see Stage1IdentificationService#syncKeywordSinglePage and
+        // AdminController#syncByKeyword), and fetchPage() used to build the query string without
+        // UriComponentsBuilder#encode() -- a product cell containing "&resultsPerPage=1" would
+        // inject its own resultsPerPage ahead of the real one. Same class of bug as
+        // NvdVulnerabilitySource's cpeName case (PR#163); confirms the "&" stays percent-encoded
+        // (%26) and resultsPerPage keeps the app's real value.
+        syncServer.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("%26")))
+                .andExpect(queryParam("resultsPerPage", "10000"))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        int upserted = service.syncByKeyword("apache&resultsPerPage=1", Optional.empty());
+
+        assertThat(upserted).isZero();
+        syncServer.verify();
+    }
+
+    @Test
+    void balancedBraceKeywordIsPercentEncodedInsteadOfThrowing() {
+        // Backlog item 254 (senior review of PR#166, 2026-09-03): the item-253 fix above switched
+        // fetchPage() to builder.encode(), which is URI *template* encoding -- "{"/"}" are left
+        // alone as template-variable delimiters, not percent-encoded. A keyword with a balanced
+        // brace pair (e.g. an MSI ProductCode GUID like "{90160000-008C}", which shows up verbatim
+        // in Windows installed-software listings) then survives .encode() untouched and trips the
+        // single-arg java.net.URI constructor inside build().toUri() with "Illegal character in
+        // query", silently discarding the whole Stage1 identification for that item. Confirms the
+        // expand-then-encode fix instead percent-encodes the literal braces and completes normally.
+        syncServer.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("%7B")))
+                .andExpect(requestTo(Matchers.containsString("%7D")))
+                .andExpect(queryParam("resultsPerPage", "10000"))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        int upserted = service.syncByKeyword("Office {90160000-008C}", Optional.empty());
+
+        assertThat(upserted).isZero();
+        syncServer.verify();
     }
 
     @Test
