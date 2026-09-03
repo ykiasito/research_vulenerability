@@ -167,7 +167,7 @@
                 <!-- closed-mode backlog item 251 REVISE(2回目)項目1: 製品自体の脆弱性・同梱コンポーネントの
                      脆弱性はそれぞれ独立にキャップされている（JobItemVulnerabilityRepository#findCappedViewsByJobItemIdIn）
                      ため、キャップで隠れている件数もカテゴリごとに個別に通知する。1アイテムにつき1回ではない。
-                     REVISE(3回目、PR#170): 「全件はCSVエクスポートで確認できます」は事実と異なる——CSVも
+                     REVISE(3回目、PR#170): CSVエクスポートに全件が含まれるという旧案内は事実と異なる——CSVも
                      csvExportFindingCap件でキャップされており（vulnerability_count列のみ真の総数）、同梱側に
                      至ってはCSVのbundled_component_findings列がそもそもCVE IDを含まずコンポーネント名・
                      バージョンのみなので、CSVへの案内自体が的外れ。両方とも実態に即した文言へ書き換え、
@@ -178,7 +178,7 @@
                      th:text="'他' + (${productCounts.total} - ${productCounts.shown}) + '件（表示は上位' + ${productCounts.shown} + '件、CVSS優先度順。CSVエクスポートには1アイテムあたり最大' + ${csvExportFindingCap} + '件まで含まれます〔同じ優先順位、超過分は同様に「他N件」と表記〕。vulnerability_count列には常に脆弱性の真の総数が入ります）'"></div>
                 <div th:if="${bundledCounts != null and bundledCounts.total > bundledCounts.shown}"
                      style="font-size: 0.85em; color: #555; margin-top: 0.3em;"
-                     th:text="'同梱コンポーネントの脆弱性は、コンポーネント名順で上位' + ${htmlDetailFindingCap} + '件の同梱コンポーネントまでを表示しています（表示' + ${bundledCounts.shown} + '件、他に' + (${bundledCounts.total} - ${bundledCounts.shown}) + '件のfindingが未表示）。CSVエクスポートの bundled_component_findings 列にはコンポーネント名・バージョンのみが含まれ、個別のCVE IDは含まれません）'"></div>
+                     th:text="'同梱コンポーネントの脆弱性は、コンポーネント名順で上位' + ${htmlDetailFindingCap} + '件の同梱コンポーネントまでを表示しています（表示中のfinding ' + ${bundledCounts.shown} + '件、未表示のfinding ' + (${bundledCounts.total} - ${bundledCounts.shown}) + '件）。CSVエクスポートの bundled_component_findings 列にはコンポーネント名・バージョンのみが含まれ、個別のCVE IDは含まれません。'"></div>
             </div>
         </td>
     </tr>
