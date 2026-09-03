@@ -2,6 +2,7 @@ package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
 import java.net.URI;
@@ -90,7 +91,7 @@ public class PackagistMirrorSyncService {
             String packageName = rawName.trim();
             if (!packageName.contains("/")) {
                 log.debug("Packagist mirror sync skipping package name with no vendor/package slash: {}",
-                        packageName);
+                        LogSanitizer.sanitize(packageName));
                 unresolved++;
                 continue;
             }
@@ -103,7 +104,7 @@ public class PackagistMirrorSyncService {
             // #isValidSeedName's wider, upload-time gate.
             if (!RegistryMirrorPackageNameValidator.isValidVendorSlashPackageName(packageName)) {
                 log.warn("Packagist mirror sync rejected package name as invalid for URL assembly: "
-                        + "package={}", packageName);
+                        + "package={}", LogSanitizer.sanitize(packageName));
                 unresolved++;
                 continue;
             }
@@ -159,15 +160,15 @@ public class PackagistMirrorSyncService {
             }
             if (versions.isEmpty()) {
                 log.warn("Packagist p2 index returned a body with no parseable version entries for "
-                        + "package={}", packageName);
+                        + "package={}", LogSanitizer.sanitize(packageName));
                 return Optional.empty();
             }
             return Optional.of(versions);
         } catch (HttpClientErrorException.NotFound e) {
-            log.debug("Packagist p2 index has no entry for package={}", packageName);
+            log.debug("Packagist p2 index has no entry for package={}", LogSanitizer.sanitize(packageName));
             return Optional.empty();
         } catch (Exception e) {
-            log.warn("Packagist p2 index fetch failed for package={}", packageName, e);
+            log.warn("Packagist p2 index fetch failed for package={}", LogSanitizer.sanitize(packageName), e);
             return Optional.empty();
         }
     }

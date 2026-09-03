@@ -168,7 +168,8 @@ public class NvdCpeSyncService {
 
             int fetched = products.size();
             startIndex += fetched;
-            log.info("NVD CPE sync progress: {}/{} (keyword={})", startIndex, totalResults, keyword);
+            log.info("NVD CPE sync progress: {}/{} (keyword={})", startIndex, totalResults,
+                    LogSanitizer.sanitize(keyword));
 
             if (fetched == 0) {
                 break;
