@@ -7,6 +7,7 @@ import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.ResearchJobItemRepository;
 import com.vulncheck.app.service.nvd.CpeUtils;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
+import com.vulncheck.app.service.nvd.NvdUriBuilder;
 import com.vulncheck.app.service.vuln.NvdVulnerabilitySource;
 import com.vulncheck.app.service.vuln.SourceResult;
 import com.vulncheck.app.service.vuln.VulnFinding;
@@ -38,7 +39,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClient;
-import org.springframework.web.util.UriComponentsBuilder;
 
 /**
  * Closed-mode backlog item 202's Phase 3b mandatory A/B gate (docs/spec/closed-mode-plan.md
@@ -496,11 +496,11 @@ class NvdMirrorAbVerificationRunner {
         }
         AuthoritativeCveData data;
         try {
-            URI uri = UriComponentsBuilder.fromHttpUrl(NVD_CVE_API)
+            // NvdUriBuilder (task-backlog item 254) is the shared, encoding-safe builder every
+            // other NVD call site in this codebase uses -- see its own javadoc.
+            URI uri = NvdUriBuilder.fromHttpUrl(NVD_CVE_API)
                     .queryParam("cveId", cveId)
-                    .encode()
-                    .build()
-                    .toUri();
+                    .build();
             nvdRateLimiter.awaitTurn(false);
             JsonNode body = externalApiRestClient.get().uri(uri).retrieve().body(JsonNode.class);
             JsonNode vulnerabilities = body == null ? null : body.path("vulnerabilities");
