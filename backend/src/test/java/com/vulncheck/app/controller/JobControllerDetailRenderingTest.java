@@ -224,6 +224,13 @@ class JobControllerDetailRenderingTest {
         assertThat(bundledNotice).contains(String.valueOf(JobController.HTML_DETAIL_FINDING_CAP) + "件");
         assertThat(body).contains(String.valueOf(JobController.CSV_EXPORT_FINDING_CAP) + "件");
 
+        // 5. Task-backlog item 269: the notice's own unit wording ("表示中のfinding N件、未表示の
+        //    finding N件") must actually appear with the right figures attached to the right label
+        //    -- 2 shown, 3 hidden (5 true total - 2 returned), not just the bare numbers checked
+        //    elsewhere in this test, which wouldn't catch the labels themselves silently drifting
+        //    or getting swapped.
+        assertThat(bundledNotice).contains("表示中のfinding 2件、未表示のfinding 3件");
+
         // Regression guard for the round-3 bug itself: every full-width paren opened in the
         // bundled notice must be closed within it (round 3 shipped one unmatched trailing "）").
         assertThat(countOccurrences(bundledNotice, '（')).isEqualTo(countOccurrences(bundledNotice, '）'));
