@@ -6,6 +6,8 @@ import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.repository.UserSecretRepository;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,6 +32,23 @@ public class UserApiKeyService {
      *  see application.yml. Unset/blank means "no admin", not an error. */
     @Value("${app.admin-email:}")
     private String adminEmail;
+
+    /**
+     * Task-backlog item 274: {@link #getNvdApiKey(Long)} is called once per job item (up to twice
+     * — {@code Stage1IdentificationService}'s live CPE fallback and {@code
+     * NvdVulnerabilitySource}'s live CVE lookup each call it independently for the same item), so a
+     * user whose NVD key permanently fails to decrypt (e.g. registered before the 2026-08-28
+     * encryption key rotation — item 248) would otherwise log the exact same WARN line up to 2,000
+     * times for a single 1,000-item job. Tracks which {@code userId}s have already been warned
+     * about a decrypt failure, process-wide (not per-job — simpler, and still accurate: the
+     * underlying cause is permanent, not something a later job for the same user could ever fix
+     * without the user re-registering their key), so only the first failure per user logs at WARN;
+     * every later one downgrades to DEBUG. {@link ConcurrentHashMap#newKeySet()} rather than a
+     * plain {@code HashSet} since {@link #getNvdApiKey(Long)} runs concurrently across {@code
+     * itemProcessingExecutor}'s threads within one job (and potentially across concurrently-running
+     * jobs, since this service is a singleton).
+     */
+    private final Set<Long> nvdKeyDecryptFailureWarnedUserIds = ConcurrentHashMap.newKeySet();
 
     /**
      * Intentionally left to throw on decrypt failure (key rotation, AAD mismatch, row corruption),
@@ -59,6 +78,12 @@ public class UserApiKeyService {
      * {@code AdminController}, aborting the entire pipeline over what is only a rate-limit
      * optimization — confirmed in practice via an {@code AEADBadTagException} on keys registered
      * before the 2026-08-28 encryption key rotation (task-backlog item 248).
+     *
+     * <p>Only the first decrypt failure for a given {@code userId} logs at WARN — every later one
+     * (this method is called once per job item, up to twice per item across its different callers)
+     * downgrades to DEBUG, since the underlying cause is permanent and repeating the same WARN up
+     * to 2,000 times for one 1,000-item job added nothing but noise (task-backlog item 274). See
+     * {@link #nvdKeyDecryptFailureWarnedUserIds}'s own javadoc.
      */
     public Optional<String> getNvdApiKey(Long userId) {
         try {
@@ -66,7 +91,12 @@ public class UserApiKeyService {
                     .map(secret -> secretEncryptionService.decrypt(
                             secret.getEncryptedKey(), userId, UserSecret.PROVIDER_NVD));
         } catch (Exception e) {
-            log.warn("Failed to decrypt NVD API key for userId={} — falling back to unkeyed", userId);
+            if (nvdKeyDecryptFailureWarnedUserIds.add(userId)) {
+                log.warn("Failed to decrypt NVD API key for userId={} — falling back to unkeyed", userId);
+            } else {
+                log.debug("Failed to decrypt NVD API key for userId={} — falling back to unkeyed "
+                        + "(already logged at WARN for this user)", userId);
+            }
             return Optional.empty();
         }
     }
