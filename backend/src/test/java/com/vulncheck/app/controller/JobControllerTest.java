@@ -423,6 +423,33 @@ class JobControllerTest {
         assertThat(bundledCountsByItemId).doesNotContainKey(100L);
     }
 
+    // --- Third REVISE round (PR#170): detail.html must never hardcode the 10/200 cap values itself
+    // -- pinning these model attributes to the controller's own constants means the template's
+    // notice text can never silently drift from the actual cap. ------------------------------------
+
+    @Test
+    void detailExposesTheCapConstantsAsModelAttributesMatchingTheControllersOwnValues() {
+        User owner = user(1L, "owner@example.com");
+        ResearchJob job = job(10L, 1L);
+        ResearchJobItem identifiedItem =
+                item(100L, 10L, "lodash", "4.17.21", null, ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdOrderById(10L)).thenReturn(List.of(identifiedItem));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(100L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(100L)), anyInt()))
+                .thenReturn(List.of());
+
+        Model model = new ExtendedModelMap();
+        newController().detail(userDetails("owner@example.com"), 10L, model);
+
+        // Package-visible (not private) specifically so this test can pin the model attribute to
+        // the controller's own constant rather than a literal that could silently drift from it.
+        assertThat(model.getAttribute("htmlDetailFindingCap")).isEqualTo(JobController.HTML_DETAIL_FINDING_CAP);
+        assertThat(model.getAttribute("csvExportFindingCap")).isEqualTo(JobController.CSV_EXPORT_FINDING_CAP);
+    }
+
     // --- REVISE item 10 (senior review 2026-08-27): the CSV export must reflect CSAF vendor status --
 
     @Test
