@@ -178,7 +178,7 @@
                      th:text="'他' + (${productCounts.total} - ${productCounts.shown}) + '件（表示は上位' + ${productCounts.shown} + '件、CVSS優先度順。CSVエクスポートには1アイテムあたり最大' + ${csvExportFindingCap} + '件まで含まれます〔同じ優先順位、超過分は同様に「他N件」と表記〕。vulnerability_count列には常に脆弱性の真の総数が入ります）'"></div>
                 <div th:if="${bundledCounts != null and bundledCounts.total > bundledCounts.shown}"
                      style="font-size: 0.85em; color: #555; margin-top: 0.3em;"
-                     th:text="'同梱コンポーネントの脆弱性は、優先度の高い上位' + ${htmlDetailFindingCap} + '件の同梱コンポーネントまでを表示しています（表示' + ${bundledCounts.shown} + '件、他に' + (${bundledCounts.total} - ${bundledCounts.shown}) + '件のfindingが未表示）。CSVエクスポートの bundled_component_findings 列にはコンポーネント名・バージョンのみが含まれ、個別のCVE IDは含まれません）'"></div>
+                     th:text="'同梱コンポーネントの脆弱性は、コンポーネント名順で上位' + ${htmlDetailFindingCap} + '件の同梱コンポーネントまでを表示しています（表示' + ${bundledCounts.shown} + '件、他に' + (${bundledCounts.total} - ${bundledCounts.shown}) + '件のfindingが未表示）。CSVエクスポートの bundled_component_findings 列にはコンポーネント名・バージョンのみが含まれ、個別のCVE IDは含まれません）'"></div>
             </div>
         </td>
     </tr>
