@@ -333,4 +333,130 @@ class JobControllerDetailRenderingTest {
         assertThat(body).contains("← 前のページ");
         assertThat(body).doesNotContain("次のページ →");
     }
+
+    // --- closed-mode backlog item 275: abbreviated page-number links ("1 2 3 … 20"), boundary
+    // cases -- a 20-page job (1,000 items at ITEMS_PAGE_SIZE=50) is exactly the scenario that
+    // motivated this feature (prev/next-only pagination needed up to 19 clicks to reach the end) --
+
+    private ResearchJob multiPageJob() {
+        ResearchJob job = new ResearchJob();
+        job.setId(10L);
+        job.setUserId(1L);
+        job.setCsvFilename("test.csv");
+        job.setStatus(ResearchJob.STATUS_COMPLETED);
+        return job;
+    }
+
+    private ResearchJobItem oneItem(Long id) {
+        ResearchJobItem item = new ResearchJobItem();
+        item.setId(id);
+        item.setJobId(10L);
+        item.setProductName("item-" + id);
+        item.setVersion("1.0.0");
+        item.setUsageText("used somewhere");
+        item.setStatus(ResearchJobItem.STATUS_IDENTIFIED);
+        return item;
+    }
+
+    @Test
+    @WithMockUser(username = "owner@example.com")
+    void detailFirstPageOfA20PageJobShowsTheHeadAndAnEllipsisBeforeTheLastPage() throws Exception {
+        User owner = new User();
+        owner.setId(1L);
+        owner.setEmail("owner@example.com");
+        owner.setPasswordHash("hash");
+        ResearchJob job = multiPageJob();
+        ResearchJobItem firstItem = oneItem(400L);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        // 1,000 items at ITEMS_PAGE_SIZE=50 -> exactly 20 pages.
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(firstItem), PageRequest.of(0, JobController.ITEMS_PAGE_SIZE), 1000));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(400L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(400L)), anyInt()))
+                .thenReturn(List.of());
+
+        MvcResult result = mockMvc.perform(get("/jobs/10"))
+                .andExpect(status().isOk())
+                .andReturn();
+        String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        // Page 1 (the current page) is not itself a link.
+        assertThat(body).contains("<strong>1</strong>");
+        // 2 and 3 stay spelled out, then a gap, then the always-present last page (20).
+        assertThat(body).contains("…");
+        assertThat(body).contains("page=19\"");
+        // No link ever points back to page 1 itself.
+        assertThat(body).doesNotContain("page=0\"");
+    }
+
+    @Test
+    @WithMockUser(username = "owner@example.com")
+    void detailLastPageOfA20PageJobShowsAnEllipsisAfterTheFirstPageThenTheTail() throws Exception {
+        User owner = new User();
+        owner.setId(1L);
+        owner.setEmail("owner@example.com");
+        owner.setPasswordHash("hash");
+        ResearchJob job = multiPageJob();
+        ResearchJobItem lastItem = oneItem(419L);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(lastItem), PageRequest.of(19, JobController.ITEMS_PAGE_SIZE), 1000));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(419L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(419L)), anyInt()))
+                .thenReturn(List.of());
+
+        MvcResult result = mockMvc.perform(get("/jobs/10").param("page", "19"))
+                .andExpect(status().isOk())
+                .andReturn();
+        String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        assertThat(body).contains("20 / 20");
+        // Page 20 (the current page) is not itself a link; page 1 is always still a link.
+        assertThat(body).contains("<strong>20</strong>");
+        assertThat(body).contains("…");
+        assertThat(body).contains(">1<");
+        // No link ever points back to page 20 itself.
+        assertThat(body).doesNotContain("page=19\"");
+    }
+
+    @Test
+    @WithMockUser(username = "owner@example.com")
+    void detailMiddlePageOfA20PageJobShowsAnEllipsisOnBothSidesOfTheCurrentPageWindow() throws Exception {
+        User owner = new User();
+        owner.setId(1L);
+        owner.setEmail("owner@example.com");
+        owner.setPasswordHash("hash");
+        ResearchJob job = multiPageJob();
+        ResearchJobItem middleItem = oneItem(410L);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        // 0-based page 9 -> 1-based page 10, dead center of a 20-page job.
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(middleItem), PageRequest.of(9, JobController.ITEMS_PAGE_SIZE), 1000));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(410L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(410L)), anyInt()))
+                .thenReturn(List.of());
+
+        MvcResult result = mockMvc.perform(get("/jobs/10").param("page", "9"))
+                .andExpect(status().isOk())
+                .andReturn();
+        String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        assertThat(body).contains("10 / 20");
+        // Current page (10) is not a link; the window (8,9,11,12) and both endpoints (1, 20) are.
+        assertThat(body).contains("<strong>10</strong>");
+        assertThat(body).contains("page=7\""); // page 8
+        assertThat(body).contains("page=8\""); // page 9
+        assertThat(body).contains("page=10\""); // page 11
+        assertThat(body).contains("page=11\""); // page 12
+        assertThat(body).contains(">1<"); // page 1 link text
+        assertThat(body).contains("page=19\""); // page 20 link
+        // Both gaps (before page 8, and after page 12) must render.
+        assertThat(countOccurrences(body, '…')).isGreaterThanOrEqualTo(2);
+    }
 }

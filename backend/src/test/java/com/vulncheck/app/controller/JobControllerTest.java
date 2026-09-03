@@ -524,6 +524,62 @@ class JobControllerTest {
         assertThat(pageableCaptor.getValue().getPageNumber()).isEqualTo(0);
     }
 
+    // --- closed-mode backlog item 275: abbreviated page-number links ("1 2 3 … 20") ----------------
+
+    @Test
+    void computeVisiblePageNumbersReturnsEmptyForASinglePageJob() {
+        assertThat(JobController.computeVisiblePageNumbers(1, 1)).isEmpty();
+        assertThat(JobController.computeVisiblePageNumbers(1, 0)).isEmpty();
+    }
+
+    @Test
+    void computeVisiblePageNumbersShowsNoEllipsisWhenEveryPageAlreadyFitsInTheWindow() {
+        // 5 total pages, PAGE_LINK_WINDOW=2 around page 3 already covers 1..5 -- no gap to abbreviate.
+        assertThat(JobController.computeVisiblePageNumbers(3, 5)).containsExactly(1, 2, 3, 4, 5);
+    }
+
+    @Test
+    void computeVisiblePageNumbersOnTheFirstPageOmitsTheTailUpToTheLastPage() {
+        // Page 1 of 20: window covers 1..3, plus the always-included last page 20 -- one gap.
+        assertThat(JobController.computeVisiblePageNumbers(1, 20)).containsExactly(1, 2, 3, null, 20);
+    }
+
+    @Test
+    void computeVisiblePageNumbersOnTheLastPageOmitsTheHeadDownFromTheFirstPage() {
+        // Page 20 of 20: window covers 18..20, plus the always-included first page 1 -- one gap.
+        assertThat(JobController.computeVisiblePageNumbers(20, 20)).containsExactly(1, null, 18, 19, 20);
+    }
+
+    @Test
+    void computeVisiblePageNumbersOnAMiddlePageOmitsBothTheHeadAndTheTail() {
+        // Page 10 of 20: window covers 8..12, plus the always-included 1 and 20 -- two gaps.
+        assertThat(JobController.computeVisiblePageNumbers(10, 20))
+                .containsExactly(1, null, 8, 9, 10, 11, 12, null, 20);
+    }
+
+    @Test
+    void detailExposesVisiblePageNumbersOnTheModelForAMultiPageJob() {
+        User owner = user(1L, "owner@example.com");
+        ResearchJob job = job(10L, 1L);
+        ResearchJobItem itemOnPage2 = item(200L, 10L, "express", "4.18.0", null, ResearchJobItem.STATUS_IDENTIFIED);
+
+        when(userRepository.findByEmail("owner@example.com")).thenReturn(Optional.of(owner));
+        when(researchJobRepository.findById(10L)).thenReturn(Optional.of(job));
+        // 120 items at ITEMS_PAGE_SIZE=50 -> 3 pages; page=1 (0-based, the middle page).
+        when(researchJobItemRepository.findByJobIdOrderById(eq(10L), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(itemOnPage2), PageRequest.of(1, JobController.ITEMS_PAGE_SIZE), 120));
+        when(identifiedProductRepository.findByJobItemIdIn(List.of(200L))).thenReturn(List.of());
+        when(jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(eq(List.of(200L)), anyInt()))
+                .thenReturn(List.of());
+
+        Model model = new ExtendedModelMap();
+        newController().detail(userDetails("owner@example.com"), 10L, 1, model);
+
+        @SuppressWarnings("unchecked")
+        List<Integer> visiblePageNumbers = (List<Integer>) model.getAttribute("visiblePageNumbers");
+        assertThat(visiblePageNumbers).containsExactly(1, 2, 3);
+    }
+
     // --- REVISE item 10 (senior review 2026-08-27): the CSV export must reflect CSAF vendor status --
 
     @Test
