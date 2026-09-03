@@ -58,6 +58,10 @@ import org.springframework.transaction.annotation.Transactional;
  * which is the only thing the current schema supports — see this run's own diff findings for whether
  * that gap actually manifested against golden-300's IDENTIFIED_CPE rows in practice.
  *
+ * <p><b>Round 3 result (2026-09-03)</b>: the gap above did not manifest — DASH_FAIL_CLOSED was 0
+ * across all 65 rows, i.e. no golden-300 IDENTIFIED_CPE row actually hit a bare {@code -} version
+ * segment in this run. See the {@code @Disabled} reason below for the full numeric breakdown.
+ *
  * <p>Uses the same {@code @Transactional} rollback trick as {@link ChocolateyRemovalGolden300RecallTest}
  * (job creation joins this test method's own transaction and is rolled back at the end, never
  * durably written) and the same real-dev-DB {@code @TestPropertySource} as every other class in
@@ -69,18 +73,21 @@ import org.springframework.transaction.annotation.Transactional;
         "spring.datasource.username=vulncheck",
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Round 3 (2026-09-03, closed-mode backlog item 202 Phase 3b gate) NOT YET RUN: the "
-        + "mirrorLookup vulnerable=false fix, the NvdVulnerabilitySource#fetchFromNvd startIndex "
-        + "pagination fix, and this class's own mirrorOnly/liveOnly gate-classification rewrite are "
-        + "all in place (see this class's and NvdVulnerabilitySource's own javadoc for what changed "
-        + "and why), but re-running this gate against the real dev DB requires a docker run with the "
-        + "real POSTGRES_PASSWORD plus live network calls to nvd.nist.gov -- the auto-mode command "
-        + "classifier blocked that invocation for this agent (2026-09-03), so round 3's actual numbers "
-        + "are pending a run by an agent/session with that permission. Round 1 (naive '-'-version "
-        + "handling, treating a CPE 2.3 '-' version segment the same as '*'): 39/65 rows matched, 26 "
-        + "mismatched. Round 2 (fixed versionApplies to fail-closed on '-'): 43/65 matched (66%), 22 "
-        + "mismatched, GATE NOT PASSED -- see git history for round 2's full mismatch breakdown (superseded "
-        + "by the harness fix in this same file, so round 2's mirrorOnly/liveOnly split specifically is "
+@Disabled("Round 3 (2026-09-03, closed-mode backlog item 202 Phase 3b gate) RUN, GATE PASSED: 65 "
+        + "golden-300.csv IDENTIFIED_CPE rows compared (64 with a successful live query, 1 -- "
+        + "Notepad++ -- had a live-query failure and was excluded as inconclusive). 53/65 matched "
+        + "exactly; of the remaining 12 mismatched rows (including the 1 inconclusive one), "
+        + "totalMirrorOnly=0 (no false positives) and totalLiveOnly=38, all 38 freshness-explained "
+        + "(FRESHNESS_MISSING/FRESHNESS_STALE against this DB's backfill-completion timestamp), 0 "
+        + "DASH_FAIL_CLOSED, 0 UNEXPLAINED. Per-row live finding counts across the 64 successfully "
+        + "queried rows: sum 4676, average ~73.1, top 5 by count: Google Chrome 127.0.6533.100 "
+        + "(2739), Mozilla Firefox 128.0 (681), GitLab 17.2.1 (282), IrfanView 4.67 (165), MongoDB "
+        + "7.0.12 (86). Round 1 (naive '-'-version handling, treating a CPE 2.3 '-' version segment "
+        + "the same as '*'): 39/65 rows matched, 26 mismatched. Round 2 (fixed versionApplies to "
+        + "fail-closed on '-'): 43/65 matched (66%), 22 mismatched, GATE NOT PASSED -- see git "
+        + "history for round 2's full mismatch breakdown (superseded by the mirrorLookup "
+        + "vulnerable=false fix and the mirrorOnly/liveOnly gate-classification rewrite that "
+        + "produced round 3's numbers above, so round 2's mirrorOnly/liveOnly split specifically is "
         + "stale and should not be quoted going forward). Left disabled so it can never re-fire on a "
         + "routine mvn test run -- see class javadoc.")
 class NvdMirrorAbVerificationRunner {
