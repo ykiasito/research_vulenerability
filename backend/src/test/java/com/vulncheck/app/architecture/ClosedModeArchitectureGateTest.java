@@ -432,7 +432,10 @@ class ClosedModeArchitectureGateTest {
             "V35__users_email_lower_unique_index.sql",
             "V36__normalize_users_email_lowercase.sql",
             "V37__registry_package_mirror.sql",
-            "V38__registry_mirror_seed_name.sql");
+            "V38__registry_mirror_seed_name.sql",
+            "V39__nvd_cve_mirror.sql",
+            "V40__vulnerabilities_cvss_score_and_max_fixed_version.sql",
+            "V41__backfill_max_fixed_version.sql");
 
     /**
      * SHA-256 (hex-encoded) of every file in {@link #MASTER_MIGRATION_BASELINE}, taken from the
@@ -559,6 +562,19 @@ class ClosedModeArchitectureGateTest {
         MASTER_MIGRATION_CONTENT_SHA256.put(
                 "V38__registry_mirror_seed_name.sql",
                 "a31d70a275e6556c73e77b7747eb914d619ec9f6e0f36bbba7fbf924c0695736");
+        // Closed-mode backlog item 264 (B4, 2026-09-04): refreshed together with
+        // MASTER_MIGRATION_BASELINE in the same commit as the master-sync merge that brought
+        // V39-V41 in (item 251's NVD CVE mirror + CSV export/pagination fixes), per this map's own
+        // maintenance discipline above.
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V39__nvd_cve_mirror.sql",
+                "5ce742070aa8e46a7e6e7c5676ede24222af53f85f963a897bd10dd3ddc06d17");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V40__vulnerabilities_cvss_score_and_max_fixed_version.sql",
+                "d48f9e027c31c9e8f84aed553b14482b71198b38748a10caec9c660269a0ca19");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V41__backfill_max_fixed_version.sql",
+                "df81fc55149557542c9f903f33def2ee8d24dc917ddcf25da4b45d667ad34699");
     }
 
     private static final Pattern VERSIONED_MIGRATION = Pattern.compile("V\\d+__.*\\.sql");
