@@ -142,9 +142,11 @@ app:
   # Keep spring.datasource.hikari.maximum-pool-size comfortably above this value plus any
   # concurrently-running sync workers and the web layer's own connection needs.
   item-processing-pool-size: ${ITEM_PROCESSING_POOL_SIZE:8}
-  # Weekly automatic sync of the 9 registry mirrors from every package name this app has ever
-  # resolved via a live registry lookup — closed-mode backlog item 183,
-  # RegistryMirrorSyncService/RegistryMirrorScheduledSync. This is the WRITE path: it makes live
+  # Weekly automatic sync of the 9 registry mirrors from the union of two seed sources — closed-mode
+  # backlog item 183, RegistryMirrorSyncService/RegistryMirrorScheduledSync (see
+  # RegistryMirrorSyncService#collectSeedNames' javadoc): every package name this app has ever
+  # resolved via a live registry lookup (identified_products), plus any operator-uploaded name in
+  # registry_mirror_seed_name (closed-mode backlog item 185). This is the WRITE path: it makes live
   # outbound HTTP calls to each ecosystem's registry to populate registry_package_mirror. It is
   # independent of the closed-mode.*-mirror-enabled flags above, which are the separate READ path
   # (whether Tier1 lookups consult the mirror table instead of a live call) — neither flag group
