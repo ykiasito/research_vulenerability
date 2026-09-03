@@ -259,7 +259,7 @@ public class JobController {
      *  cap: {@code maxFixedVersion} is computed separately (see {@code
      *  Stage2VulnerabilityResearchService}) from the item's full, uncapped finding set, so the
      *  "recommended upgrade version" is never affected by which 10 findings happen to render here. */
-    private static final int HTML_DETAIL_FINDING_CAP = 10;
+    static final int HTML_DETAIL_FINDING_CAP = 10;
 
     /** Same idea as {@link #HTML_DETAIL_FINDING_CAP} but for {@link #exportCsv} (REVISE item 4) —
      *  deliberately much larger (200, not 10): a CSV is a downloaded artifact a user may audit
@@ -270,7 +270,7 @@ public class JobController {
      *  127.0.6533.100's 2,739-id unbounded cell measured at ~41,000 characters, already over the
      *  limit). {@code vulnerability_count} itself is never capped (REVISE item 4(a)) — only the
      *  {@code vulnerabilities} cell's own listed ids are. */
-    private static final int CSV_EXPORT_FINDING_CAP = 200;
+    static final int CSV_EXPORT_FINDING_CAP = 200;
 
     /** How many of a category's (product or bundled-component) findings the job detail view is
      *  actually showing for one item ({@code shown}, i.e. the capped list's own size) versus how
@@ -332,6 +332,11 @@ public class JobController {
         model.addAttribute("vulnerabilitiesByItemId", vulnerabilitiesByItemId);
         model.addAttribute("productCountsByItemId", productCountsByItemId);
         model.addAttribute("bundledCountsByItemId", bundledCountsByItemId);
+        // Third REVISE round (PR#170): the template must never hardcode these numbers itself, or
+        // detail.html's own notice text can silently drift from the actual cap the moment either
+        // constant changes here.
+        model.addAttribute("htmlDetailFindingCap", HTML_DETAIL_FINDING_CAP);
+        model.addAttribute("csvExportFindingCap", CSV_EXPORT_FINDING_CAP);
         return "jobs/detail";
     }
 
