@@ -2059,9 +2059,9 @@ public class Stage1IdentificationService {
 
         while (wordsToTry >= 1 && attempts < MAX_LIVE_NVD_QUERY_ATTEMPTS) {
             String attempt = String.join(" ", Arrays.copyOfRange(words, 0, wordsToTry));
-            log.info("Querying NVD CPE API live for '{}' (apiKey={})", attempt, nvdApiKey.isPresent());
+            log.info("Querying NVD CPE API live for '{}' (apiKey={})", LogSanitizer.sanitize(attempt), nvdApiKey.isPresent());
             int upserted = nvdCpeSyncService.syncKeywordSinglePage(attempt, LIVE_NVD_LOOKUP_RESULTS_PER_PAGE, nvdApiKey);
-            log.info("Live NVD CPE lookup for '{}' upserted {} dictionary entries", attempt, upserted);
+            log.info("Live NVD CPE lookup for '{}' upserted {} dictionary entries", LogSanitizer.sanitize(attempt), upserted);
             if (upserted > 0) {
                 return Optional.of(attempt);
             }
