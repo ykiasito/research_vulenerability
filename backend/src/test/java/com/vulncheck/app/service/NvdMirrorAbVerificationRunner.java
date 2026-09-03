@@ -100,6 +100,11 @@ import org.springframework.transaction.annotation.Transactional;
         + "routine mvn test run -- see class javadoc.")
 class NvdMirrorAbVerificationRunner {
 
+    /** Round 3 (2026-09-03) ran with no Claude key registered for user 5, so the 65 {@link
+     *  Stage1IdentificationService#identify} calls below completed for free (static-only, no Stage1
+     *  AI arbitration). Anyone re-enabling this class must re-confirm that's still true before
+     *  running it again — if user 5 has since gained a registered key, {@code identify} will fire a
+     *  billed Stage1 AI arbitration call per row instead. */
     private static final Long REAL_USER_ID = 5L;
     /** Deliberately not a real user id (no {@code user_secrets} row can exist for it) — forces
      *  {@link com.vulncheck.app.service.UserApiKeyService#getNvdApiKey} to return empty so every
