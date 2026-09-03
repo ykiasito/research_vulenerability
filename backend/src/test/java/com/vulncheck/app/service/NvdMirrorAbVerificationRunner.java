@@ -213,11 +213,17 @@ class NvdMirrorAbVerificationRunner {
                         + "WHERE part = ? AND vendor = ? AND product = ?",
                 part, vendor, product);
 
+        // No vulnerable=true filter here (removed 2026-09-03, closed-mode backlog item 202 Phase 3b
+        // re-run): live NVD's cpeName search doesn't take an isVulnerable parameter, so it returns
+        // every CVE that names this CPE in ANY node of its configuration, including vulnerable=false
+        // "environment" nodes (e.g. an AND-node pairing a vulnerable component with a non-vulnerable
+        // platform/runtime it ships alongside) -- confirmed live for cpe:2.3:a:nodejs:node.js:16.0.0
+        // returning CVE-2021-43803/CVE-2022-36046, where node.js itself is the vulnerable:false side
+        // of the match. The earlier vulnerable=true-only filter here made mirrorLookup diverge from
+        // what live actually returns, which was mischaracterized as a mirror data gap rather than a
+        // harness bug against its own A/B baseline.
         Set<String> ids = new TreeSet<>();
         for (Map<String, Object> matchRow : matchRows) {
-            if (!Boolean.TRUE.equals(matchRow.get("vulnerable"))) {
-                continue;
-            }
             if (versionApplies(matchRow, itemVersion)) {
                 ids.add((String) matchRow.get("cve_id"));
             }
