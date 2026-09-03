@@ -61,9 +61,9 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
 
     private final JdbcTemplate jdbcTemplate;
 
-    // ConcurrentHashMap, not a Spring-cache abstraction: same reasoning as RegistryLookupCache /
-    // NvdResponseCache in service.registry / service.vuln -- a handful of ecosystem keys, read by up
-    // to itemProcessingExecutor's 8 parallel threads, doesn't need anything heavier.
+    // ConcurrentHashMap, not a Spring-cache abstraction: same reasoning as RegistryLookupCache in
+    // service.registry -- a handful of ecosystem keys, read by up to itemProcessingExecutor's 8
+    // parallel threads, doesn't need anything heavier.
     private final Map<String, HasAnyEntriesCacheEntry> hasAnyEntriesCache = new ConcurrentHashMap<>();
 
     @Override
