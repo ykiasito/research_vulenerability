@@ -45,7 +45,7 @@
     <tr th:each="item : ${items}"
         th:with="identified=${identifiedByItemId.get(item.id)},
                   vulns=${vulnerabilitiesByItemId.get(item.id)},
-                  maxFixedVersion=${maxFixedVersionByItemId.get(item.id)},
+                  maxFixedVersion=${item.maxFixedVersion},
                   level=${identified == null
                       ? (item.hintIdentifier != null ? 'hint' : 'none')
                       : ((identified.versionConfirmed != null and identified.versionConfirmed)
