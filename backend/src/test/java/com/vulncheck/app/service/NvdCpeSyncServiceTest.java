@@ -148,6 +148,44 @@ class NvdCpeSyncServiceTest {
     }
 
     @Test
+    void unbalancedBraceKeywordIsPercentEncodedInsteadOfThrowing() {
+        // Closed-mode backlog item 259 (senior review, 2026-09-03, PR#166 final review): the
+        // balanced-brace test above ("{90160000-008C}") only fixes the pair. A keyword can just as
+        // easily carry an unbalanced brace on its own (e.g. "Office {90160000", a truncated MSI
+        // ProductCode GUID column) -- expand() substitutes the whole keyword value for the
+        // "{keywordSearch}" template placeholder in one shot, so the value's own internal braces
+        // never need to be balanced for that substitution to work; encode() then percent-encodes
+        // whatever literal "{" survived, same as the balanced case.
+        syncServer.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("%7B")))
+                .andExpect(requestTo(Matchers.not(Matchers.containsString("{"))))
+                .andExpect(queryParam("resultsPerPage", "10000"))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        int upserted = service.syncByKeyword("Office {90160000", Optional.empty());
+
+        assertThat(upserted).isZero();
+        syncServer.verify();
+    }
+
+    @Test
+    void literalPercentSignKeywordIsPercentEncodedInsteadOfThrowing() {
+        // Closed-mode backlog item 259: a keyword can contain a literal "%" (e.g. a free-text
+        // product cell like "Foo 50% Off Edition") -- since expand-then-encode runs encode() on the
+        // fully-substituted value, "%" itself gets percent-encoded like any other reserved character
+        // (to "%25") rather than being misread as the start of an existing percent-escape.
+        syncServer.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("%25")))
+                .andExpect(queryParam("resultsPerPage", "10000"))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        int upserted = service.syncByKeyword("Foo 50%", Optional.empty());
+
+        assertThat(upserted).isZero();
+        syncServer.verify();
+    }
+
+    @Test
     void syncReportsIncompleteWhenAPageFetchFailsPartWayThrough() {
         // fetchPage() treats a failed HTTP request as an empty result (caught, logged, returns
         // null) rather than throwing — sync() must not report that as a clean finish, since the

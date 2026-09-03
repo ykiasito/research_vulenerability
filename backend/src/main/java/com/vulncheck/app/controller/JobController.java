@@ -5,6 +5,7 @@ import com.vulncheck.app.entity.ResearchJob;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.entity.User;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
+import com.vulncheck.app.repository.JobItemVulnerabilityCappedView;
 import com.vulncheck.app.repository.JobItemVulnerabilityRepository;
 import com.vulncheck.app.repository.ResearchJobItemRepository;
 import com.vulncheck.app.repository.ResearchJobRepository;
@@ -12,11 +13,9 @@ import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.ColumnMapping;
 import com.vulncheck.app.service.CsvParseException;
 import com.vulncheck.app.service.CsvParsingService;
-import com.vulncheck.app.service.JobItemVulnerabilityView;
 import com.vulncheck.app.service.PendingCsvUploadStore;
 import com.vulncheck.app.service.ResearchJobProcessingService;
 import com.vulncheck.app.service.ResearchJobService;
-import com.vulncheck.app.service.vuln.VersionUtils;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import java.io.ByteArrayInputStream;
@@ -250,6 +249,39 @@ public class JobController {
         private String installUrlColumn;
     }
 
+    /** How many findings the HTML job-detail view renders per item, per category (product findings
+     *  and bundled-component findings each capped independently — see {@link
+     *  JobItemVulnerabilityRepository#findCappedViewsByJobItemIdIn}'s javadoc). Closed-mode backlog
+     *  item 251 (REVISE item 4): item 241's real distribution (64 rows, average ~73 findings/row,
+     *  Chrome alone at 2,739) showed the mean already far exceeds anything an HTML table row can
+     *  usefully show — 10 keeps the majority of rows (which have far fewer findings than the mean)
+     *  fully visible while bounding the worst-case row's rendered size. A CVE never dropped by this
+     *  cap: {@code maxFixedVersion} is computed separately (see {@code
+     *  Stage2VulnerabilityResearchService}) from the item's full, uncapped finding set, so the
+     *  "recommended upgrade version" is never affected by which 10 findings happen to render here. */
+    static final int HTML_DETAIL_FINDING_CAP = 10;
+
+    /** Same idea as {@link #HTML_DETAIL_FINDING_CAP} but for {@link #exportCsv} (REVISE item 4) —
+     *  deliberately much larger (200, not 10): a CSV is a downloaded artifact a user may audit
+     *  offline, not a live page render, so it's worth keeping far more detail per cell while still
+     *  bounding it well clear of Excel's 32,767-character cell limit (200 CVE ids at ~15-17 chars
+     *  each plus separators stays in the low thousands of characters, roughly 1/10 of that ceiling —
+     *  see {@link #exportCsv}'s own javadoc for the real overflow this replaces: Chrome
+     *  127.0.6533.100's 2,739-id unbounded cell measured at ~41,000 characters, already over the
+     *  limit). {@code vulnerability_count} itself is never capped (REVISE item 4(a)) — only the
+     *  {@code vulnerabilities} cell's own listed ids are. */
+    static final int CSV_EXPORT_FINDING_CAP = 200;
+
+    /** How many of a category's (product or bundled-component) findings the job detail view is
+     *  actually showing for one item ({@code shown}, i.e. the capped list's own size) versus how
+     *  many genuinely exist ({@code total}, from {@link JobItemVulnerabilityCappedView#getTotalCount()}).
+     *  Closed-mode backlog item 251, second REVISE round (item 1): {@code detail.html} renders a
+     *  "他N件" notice per category whenever {@code total > shown} — computed here (not inline in the
+     *  template) so it's directly assertable from {@code JobControllerTest} without needing to render
+     *  Thymeleaf. */
+    public record CategoryCounts(int shown, long total) {
+    }
+
     @GetMapping("/jobs/{id}")
     public String detail(@AuthenticationPrincipal UserDetails userDetails, @PathVariable Long id, Model model) {
         User user = currentUser(userDetails);
@@ -262,19 +294,35 @@ public class JobController {
         Map<Long, IdentifiedProduct> identifiedByItemId = identifiedProductRepository.findByJobItemIdIn(itemIds)
                 .stream()
                 .collect(Collectors.toMap(IdentifiedProduct::getJobItemId, p -> p));
-        Map<Long, List<JobItemVulnerabilityView>> vulnerabilitiesByItemId =
-                jobItemVulnerabilityRepository.findViewsByJobItemIdIn(itemIds)
+        // Closed-mode backlog items 245/251 (REVISE item 4): capped, not the item's full finding
+        // set — see JobItemVulnerabilityRepository#findCappedViewsByJobItemIdIn's javadoc. The
+        // "recommended upgrade version" shown per item comes from ResearchJobItem#maxFixedVersion
+        // (Stage2-computed from the item's uncapped findings, see that field's own javadoc), not
+        // from this capped list, so it's unaffected by which findings happen to be shown here.
+        Map<Long, List<JobItemVulnerabilityCappedView>> vulnerabilitiesByItemId =
+                jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(itemIds, HTML_DETAIL_FINDING_CAP)
                         .stream()
-                        .collect(Collectors.groupingBy(JobItemVulnerabilityView::jobItemId));
-        // A plain loop, not a stream collector: both Map.entry(...) and Collectors.toMap's
-        // merge-based implementation throw NullPointerException on a null value, and most items
-        // have no fixedVersion at all across their findings (a source didn't provide one) — the
-        // common case here, not a rare edge case worth routing around with extra collector steps.
-        Map<Long, String> maxFixedVersionByItemId = new HashMap<>();
-        for (Map.Entry<Long, List<JobItemVulnerabilityView>> entry : vulnerabilitiesByItemId.entrySet()) {
-            String highest = highestFixedVersion(entry.getValue());
-            if (highest != null) {
-                maxFixedVersionByItemId.put(entry.getKey(), highest);
+                        .collect(Collectors.groupingBy(JobItemVulnerabilityCappedView::getJobItemId));
+        // Second REVISE round (item 1): the cap above hides findings without saying so anywhere in
+        // the HTML view — product findings and bundled-component findings are capped independently
+        // (see findCappedViewsByJobItemIdIn's javadoc), so the "hidden count" notice needs its own
+        // shown/total pair per category, not just per item. totalCount is identical across every row
+        // of the same (item, category) — see that view's own javadoc — so reading it off the first
+        // row of each filtered sublist is correct, not an approximation.
+        Map<Long, CategoryCounts> productCountsByItemId = new HashMap<>();
+        Map<Long, CategoryCounts> bundledCountsByItemId = new HashMap<>();
+        for (Map.Entry<Long, List<JobItemVulnerabilityCappedView>> entry : vulnerabilitiesByItemId.entrySet()) {
+            List<JobItemVulnerabilityCappedView> productViews = entry.getValue().stream()
+                    .filter(v -> v.getBundledComponentName() == null).collect(Collectors.toList());
+            List<JobItemVulnerabilityCappedView> bundledViews = entry.getValue().stream()
+                    .filter(v -> v.getBundledComponentName() != null).collect(Collectors.toList());
+            if (!productViews.isEmpty()) {
+                productCountsByItemId.put(entry.getKey(),
+                        new CategoryCounts(productViews.size(), productViews.get(0).getTotalCount()));
+            }
+            if (!bundledViews.isEmpty()) {
+                bundledCountsByItemId.put(entry.getKey(),
+                        new CategoryCounts(bundledViews.size(), bundledViews.get(0).getTotalCount()));
             }
         }
 
@@ -282,7 +330,13 @@ public class JobController {
         model.addAttribute("items", items);
         model.addAttribute("identifiedByItemId", identifiedByItemId);
         model.addAttribute("vulnerabilitiesByItemId", vulnerabilitiesByItemId);
-        model.addAttribute("maxFixedVersionByItemId", maxFixedVersionByItemId);
+        model.addAttribute("productCountsByItemId", productCountsByItemId);
+        model.addAttribute("bundledCountsByItemId", bundledCountsByItemId);
+        // Third REVISE round (PR#170): the template must never hardcode these numbers itself, or
+        // detail.html's own notice text can silently drift from the actual cap the moment either
+        // constant changes here.
+        model.addAttribute("htmlDetailFindingCap", HTML_DETAIL_FINDING_CAP);
+        model.addAttribute("csvExportFindingCap", CSV_EXPORT_FINDING_CAP);
         return "jobs/detail";
     }
 
@@ -340,23 +394,31 @@ public class JobController {
         Map<Long, IdentifiedProduct> identifiedByItemId = identifiedProductRepository.findByJobItemIdIn(itemIds)
                 .stream()
                 .collect(Collectors.toMap(IdentifiedProduct::getJobItemId, p -> p));
-        Map<Long, List<JobItemVulnerabilityView>> vulnerabilitiesByItemId =
-                jobItemVulnerabilityRepository.findViewsByJobItemIdIn(itemIds)
+        // Closed-mode backlog items 245/251 (REVISE item 4): capped at CSV_EXPORT_FINDING_CAP, not
+        // the item's full finding set — see findCappedViewsByJobItemIdIn's javadoc. totalCount
+        // (below) still reports the TRUE count for vulnerability_count, so capping the listed ids
+        // never understates that column.
+        Map<Long, List<JobItemVulnerabilityCappedView>> vulnerabilitiesByItemId =
+                jobItemVulnerabilityRepository.findCappedViewsByJobItemIdIn(itemIds, CSV_EXPORT_FINDING_CAP)
                         .stream()
-                        .collect(Collectors.groupingBy(JobItemVulnerabilityView::jobItemId));
+                        .collect(Collectors.groupingBy(JobItemVulnerabilityCappedView::getJobItemId));
 
         String csvBody;
         try (StringWriter writer = new StringWriter();
                 CSVPrinter printer = new CSVPrinter(writer, EXPORT_CSV_FORMAT)) {
             for (ResearchJobItem item : items) {
                 IdentifiedProduct identified = identifiedByItemId.get(item.getId());
-                List<JobItemVulnerabilityView> vulns = vulnerabilitiesByItemId.getOrDefault(item.getId(), List.of());
-                List<JobItemVulnerabilityView> productVulns =
-                        vulns.stream().filter(v -> v.bundledComponentName() == null).collect(Collectors.toList());
-                List<JobItemVulnerabilityView> bundledVulns =
-                        vulns.stream().filter(v -> v.bundledComponentName() != null).collect(Collectors.toList());
-                List<JobItemVulnerabilityView> csafAnnotatedVulns =
-                        vulns.stream().filter(v -> v.csafAdvisoryId() != null).collect(Collectors.toList());
+                List<JobItemVulnerabilityCappedView> vulns = vulnerabilitiesByItemId.getOrDefault(item.getId(), List.of());
+                List<JobItemVulnerabilityCappedView> productVulns =
+                        vulns.stream().filter(v -> v.getBundledComponentName() == null).collect(Collectors.toList());
+                List<JobItemVulnerabilityCappedView> bundledVulns =
+                        vulns.stream().filter(v -> v.getBundledComponentName() != null).collect(Collectors.toList());
+                List<JobItemVulnerabilityCappedView> csafAnnotatedVulns =
+                        vulns.stream().filter(v -> v.getCsafAdvisoryId() != null).collect(Collectors.toList());
+                // The TRUE total (REVISE item 4(a)) — every row in the same category (product here)
+                // carries the same totalCount value from the window query, so the first row's is
+                // representative; 0 when there are no product findings for this item at all.
+                long trueProductCount = productVulns.isEmpty() ? 0 : productVulns.get(0).getTotalCount();
                 String packageOrCpe = identified == null
                         ? null
                         : (identified.getPackageName() != null ? identified.getPackageName() : identified.getCpe());
@@ -368,14 +430,15 @@ public class JobController {
                         identified != null ? identified.getEcosystem() : null,
                         packageOrCpe,
                         identified != null ? identified.getConfidence() : null,
-                        productVulns.size(),
-                        productVulns.stream().map(JobItemVulnerabilityView::cveOrGhsaId).collect(Collectors.joining("; ")),
+                        trueProductCount,
+                        capNotice(productVulns.stream().map(JobItemVulnerabilityCappedView::getCveOrGhsaId)
+                                .collect(Collectors.joining("; ")), productVulns.size(), trueProductCount),
                         bundledVulns.stream()
-                                .map(v -> v.bundledComponentName() + " " + v.bundledComponentVersion())
+                                .map(v -> v.getBundledComponentName() + " " + v.getBundledComponentVersion())
                                 .distinct()
                                 .collect(Collectors.joining("; ")),
                         csafAnnotatedVulns.stream()
-                                .map(v -> v.cveOrGhsaId() + ": " + v.csafStatus() + " (" + v.csafAdvisoryId() + ")")
+                                .map(v -> v.getCveOrGhsaId() + ": " + v.getCsafStatus() + " (" + v.getCsafAdvisoryId() + ")")
                                 .collect(Collectors.joining("; ")),
                         item.getResearchIncompleteReason() != null ? item.getResearchIncompleteReason() : "");
             }
@@ -409,52 +472,18 @@ public class JobController {
                 .orElseThrow(() -> new IllegalStateException("Authenticated user not found: " + userDetails.getUsername()));
     }
 
-    /** An item can have several findings (different CVEs/GHSAs, or the same one surfaced by
-     *  multiple sources) each with their own recommended fix version — showing every one of them
-     *  was noise for this app's non-engineer users. Upgrading to the single highest version among
-     *  them resolves every finding that has one (assuming later releases carry forward earlier
-     *  fixes, true for the vast majority of real-world software), so that's the one number shown.
-     *
-     *  <p>REVISE item 3 (senior review 2026-08-26): a bundled-component finding ({@code
-     *  bundledComponentName != null}) must never contribute here — its {@code fixedVersion} (if
-     *  any) belongs to the bundled component itself (e.g. "7-Zip 26.03"), not to this row's own
-     *  product, and rendering it as "推奨アップデート版" (the product's own recommended upgrade
-     *  version) would tell the user to upgrade their actual product to a version of unrelated
-     *  software. Bundled findings are surfaced separately, as a plain "go check this yourself"
-     *  prompt rather than a precise fix-version claim — see {@code detail.html}. */
-    private String highestFixedVersion(List<JobItemVulnerabilityView> vulns) {
-        String highest = null;
-        for (JobItemVulnerabilityView vuln : vulns) {
-            if (vuln.bundledComponentName() != null) {
-                continue;
-            }
-            // CSAF (plan §8-2(b); REVISE item 1, senior review 2026-08-27 — this replaces an earlier,
-            // incorrect version of this comment that asserted a path-2 row's own fixedVersion write
-            // is NULL and therefore no guard was needed beyond that). That original write IS always
-            // NULL — but vulnerabilities is a GLOBAL table keyed by cve_or_ghsa_id UNIQUE, shared
-            // across every item/job/user, and VulnerabilityRepository#upsertAndGetId does
-            // `fixed_version = COALESCE(EXCLUDED.fixed_version, vulnerabilities.fixed_version)`: the
-            // first non-null write from ANY item, anywhere, sticks. So even though THIS row's own
-            // path-2 write is NULL, some completely unrelated item's finding for the SAME CVE (e.g.
-            // an OpenSSL CVE embedded in this item's product, where another CSV row is literally
-            // "OpenSSL" and NVD gives it a real fixed_version) can land on that shared vulnerabilities
-            // row afterward — and that unrelated version would then render here as this row's own
-            // "推奨アップデート版" if not excluded. A path-2 (CSAF-only) row is identifiable after the
-            // fact by discoveredViaTier starting with "csaf_" (set to csaf.source() = "csaf_" + vendor
-            // in Stage2VulnerabilityResearchService's path 2) — path-1 rows (CSAF merely annotating an
-            // existing row) keep the ORIGINAL discovering source's own tier, so this guard excludes
-            // exactly the CSAF-only rows and still correctly counts path-1 rows' legitimate fixed
-            // versions.
-            if (vuln.discoveredViaTier() != null && vuln.discoveredViaTier().startsWith("csaf_")) {
-                continue;
-            }
-            if (vuln.fixedVersion() == null) {
-                continue;
-            }
-            if (highest == null || VersionUtils.compare(vuln.fixedVersion(), highest) > 0) {
-                highest = vuln.fixedVersion();
-            }
+    /** Appends a {@code "; 他N件"} suffix to {@code joinedIds} when {@code trueTotal} exceeds {@code
+     *  shownCount} (closed-mode backlog item 251, REVISE item 4) — the CSV cell only ever lists the
+     *  capped set of ids, but the reader should still be told how many more exist beyond what's
+     *  listed (distinct from {@code vulnerability_count}, which is always the true total regardless
+     *  of this cell's own cap — REVISE item 4(a)). No-op (returns {@code joinedIds} unchanged) when
+     *  every finding is already shown. */
+    private String capNotice(String joinedIds, int shownCount, long trueTotal) {
+        long hidden = trueTotal - shownCount;
+        if (hidden <= 0) {
+            return joinedIds;
         }
-        return highest;
+        String notice = "他" + hidden + "件";
+        return joinedIds.isEmpty() ? notice : joinedIds + "; " + notice;
     }
 }
