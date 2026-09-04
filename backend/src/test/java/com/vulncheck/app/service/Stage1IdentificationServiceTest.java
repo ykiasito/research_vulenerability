@@ -150,6 +150,14 @@ class Stage1IdentificationServiceTest {
 
     @Test
     void registryMatchSkipsNameVariantSearchWhenLocalDictionaryIsEmpty() {
+        // REVISE (senior-reviewer, PR#196): "express" is a single token, so
+        // expandLeadingInitialism/contractToAcronym/stripLeadingVendor all early-return on their
+        // own regardless of whether the registry-match skip fires -- getCpe() would be null either
+        // way, so the original version of this test didn't actually prove the skip does anything.
+        // "VM Player" (proven elsewhere in this file, e.g.
+        // aLoneNameVariantDerivedCpeCandidateIsDroppedRatherThanAutoAcceptedWithNoApiKey, to
+        // tokenize to ["vm","player"] and reach findByLeadingInitialismMatch when the skip is NOT
+        // in play) makes the explicit never() verification below meaningful.
         PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
             @Override
             public Optional<RegistryMatch> lookup(String name, String version) {
@@ -164,11 +172,12 @@ class Stage1IdentificationServiceTest {
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
         stubSaveReturnsArgument();
 
-        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item("express"), USER_ID);
+        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item("VM Player"), USER_ID);
 
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("npm");
         assertThat(result.get().getCpe()).isNull();
+        verify(cpeDictionaryRepository, never()).findByLeadingInitialismMatch(anyString(), anyString(), anyInt());
     }
 
     @Test
