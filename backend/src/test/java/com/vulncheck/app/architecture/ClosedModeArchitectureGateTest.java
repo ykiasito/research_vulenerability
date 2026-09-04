@@ -22,7 +22,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Assumptions;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.env.YamlPropertySourceLoader;
@@ -101,9 +100,14 @@ class ClosedModeArchitectureGateTest {
     // 264/B4, 2026-09-04): it stays on the classpath as a mirror-only VulnerabilitySource rather
     // than being deleted outright, since (unlike OsvLiveQueryClient, whose sole caller was already
     // gutted to a no-op) it also implements Stage2's real, still-needed NVD CVE mirror lookup —
-    // only its live NVD CVE API path (fetchFromNvd) was removed. See
-    // osvLiveQueryClientIsAbsentFromClasspath()'s own @Disabled note below for what item 261 should
-    // decide to assert about it instead.
+    // only its live NVD CVE API path (fetchFromNvd) was removed. Item 261 (B7, 2026-09-04)
+    // re-enabled the OsvLiveQueryClient half unchanged and added
+    // nvdVulnerabilitySourceHasNoEgressCapableMembers() below as the "no live-egress capability"
+    // check this class's own field/constructor-parameter scan can express for a class that
+    // deliberately still exists (mirroring liveRegistryClientsHaveNoLookupLiveMethod()'s approach
+    // for the 10 registry clients) — confirmed today that NvdVulnerabilitySource only holds
+    // jdbcTemplate/transactionManager fields, no RestClient or other egress-capable member,
+    // now that item 263 deleted RestClientConfig#externalApiRestClient outright.
     //
     // Note on "live *RegistryClient": §3-6's original text was written expecting B3 to delete the
     // 10 *RegistryClient classes outright (same treatment as LlmServiceClient for B1). B3 (item
@@ -175,24 +179,39 @@ class ClosedModeArchitectureGateTest {
     }
 
     @Test
-    @Disabled(
-            "Left disabled as part of item 261 (B7)'s own scope, not re-enabled here (closed-mode "
-                    + "backlog item 264/B4, 2026-09-04): the assertion below is corrected to match how B4 "
-                    + "was actually implemented, so item 261 doesn't inherit a stale premise when it "
-                    + "eventually re-enables this test. OsvLiveQueryClient is now genuinely gone (its sole "
-                    + "caller, BundledComponentResearchService, was already gutted to a no-op in B2), so "
-                    + "that half is ready to assert absence. NvdVulnerabilitySource, unlike "
-                    + "OsvLiveQueryClient, was deliberately NOT deleted -- it still exists as a "
-                    + "mirror-only VulnerabilitySource (fetchFromMirror is Stage2's real NVD CVE lookup "
-                    + "on this branch), just with its live NVD CVE API path (fetchFromNvd) physically "
-                    + "removed. Item 261 should still decide whether/how to assert \"NvdVulnerabilitySource "
-                    + "has no live-egress capability\" (e.g. no externalApiRestClient-typed field, mirroring "
-                    + "liveRegistryClientsHaveNoLookupLiveMethod()'s approach for the 10 registry clients) "
-                    + "when it re-enables this test, rather than a bare classpath-absence check.")
     void osvLiveQueryClientIsAbsentFromClasspath() {
         assertThrows(
                 ClassNotFoundException.class,
                 () -> Class.forName("com.vulncheck.app.service.vuln.OsvLiveQueryClient"));
+    }
+
+    /**
+     * The "no live-egress capability" half of §3-6 item 1 for {@code NvdVulnerabilitySource} —
+     * deliberately not a classpath-absence check (that class stays, see the section note above).
+     * Reuses the same field/constructor-parameter scan as {@link
+     * #registryClientsHaveNoEgressCapableMembers()} below rather than a hand-rolled reflection walk,
+     * so a future addition to {@link #EGRESS_CAPABLE_TYPES} (e.g. R9's {@code RestClient.Builder}
+     * addition) automatically covers this class too.
+     */
+    @Test
+    void nvdVulnerabilitySourceHasNoEgressCapableMembers() {
+        Class<?> nvdVulnerabilitySource;
+        try {
+            nvdVulnerabilitySource = Class.forName("com.vulncheck.app.service.vuln.NvdVulnerabilitySource");
+        } catch (ClassNotFoundException e) {
+            throw new AssertionError("NvdVulnerabilitySource is missing from the classpath entirely. "
+                    + "It was deliberately kept as a mirror-only VulnerabilitySource (B4, item 264) — "
+                    + "Stage2's real NVD CVE mirror lookup — not deleted outright; if it genuinely "
+                    + "disappeared (e.g. via a master merge, §9-3), Stage2 lost NVD CVE coverage "
+                    + "entirely, not just its live-API fallback.", e);
+        }
+
+        assertThat(findEgressCapableMembers(nvdVulnerabilitySource))
+                .as("NvdVulnerabilitySource holds a field or constructor argument typed as one of "
+                        + "%s — B4 (item 264) was supposed to remove the *capability* to make a live "
+                        + "HTTP call from this class outright, not just leave its live NVD CVE fetch "
+                        + "method (fetchFromNvd) unreachable", EGRESS_CAPABLE_TYPES)
+                .isEmpty();
     }
 
     // ------------------------------------------------------------------------------------------
@@ -678,6 +697,135 @@ class ClosedModeArchitectureGateTest {
                         + "that already ran the original content, so it must be caught here instead. "
                         + "Refresh MASTER_MIGRATION_CONTENT_SHA256 only if this is a legitimate "
                         + "master-sync merge (§9-3); otherwise revert the content edit")
+                .isEmpty();
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Closed-mode-only migrations (item 261, found during PR#200/item 262's senior-reviewer
+    // review, 2026-09-04): the three tests above only ever look at files matching VERSIONED_MIGRATION
+    // (V\d+__*.sql, i.e. files also on master) — a file that ISN'T on master at all, like
+    // R__closed_mode_strip.sql (item 262/B6, the one migration that only exists on closed-mode),
+    // was invisible to both the filename-set gate and the content-hash gate. That is exactly the
+    // blind spot item 205 closed for V*__ files, left open here — and worse for a repeatable
+    // migration specifically: Flyway re-runs an R__ file automatically the moment its checksum
+    // changes, so an unnoticed edit here doesn't just risk a startup FlywayValidateException
+    // (V*__ files' failure mode) -- it risks silently *re-executing* a DELETE against
+    // secret-bearing/data tables with different SQL than what was reviewed. The three tests below
+    // mirror the V*__ trio above, scoped to the complementary file set (anything under
+    // db/migration that ISN'T a V\d+__ file).
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Every {@code closed-mode}-only migration file (i.e. present on this branch but never on
+     * {@code master} — R__ repeatable migrations, or any future U__ undo migration) that is
+     * expected to exist under {@code db/migration}. Currently just {@code R__closed_mode_strip.sql}
+     * (item 262/B6). A future addition here must be a deliberate, reviewed closed-mode-only
+     * migration, not a stray file — see {@link #closedModeOnlyMigrationSetMatchesBaseline()}.
+     */
+    private static final Set<String> CLOSED_MODE_ONLY_MIGRATION_BASELINE =
+            Set.of("R__closed_mode_strip.sql");
+
+    /**
+     * SHA-256 (hex-encoded) of every file in {@link #CLOSED_MODE_ONLY_MIGRATION_BASELINE}. Same
+     * purpose as {@link #MASTER_MIGRATION_CONTENT_SHA256}, but for files that were never on master
+     * to begin with, so there is no "master baseline" to diff against — the reference point here is
+     * simply "the content this was last reviewed/approved with".
+     *
+     * <p><b>Maintenance</b>: unlike {@link #MASTER_MIGRATION_CONTENT_SHA256} (refreshed only on a
+     * master-sync merge), this hash is refreshed whenever {@code R__closed_mode_strip.sql}'s own
+     * content is deliberately, reviewably changed on closed-mode itself (there is no upstream to
+     * sync from) — e.g. adding a third DELETE statement for a newly-identified closed-mode-only
+     * table. If this fails without such a change, treat it as unreviewed drift to investigate and
+     * revert, not as a baseline to casually update.
+     */
+    private static final Map<String, String> CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256 = new LinkedHashMap<>();
+
+    static {
+        CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256.put("R__closed_mode_strip.sql",
+                "285a25258ccd4df3d9cd3ee6ec7f9d3358e8977d0aa17333243988d5f3334cba");
+    }
+
+    @Test
+    void closedModeOnlyMigrationSetMatchesBaseline() throws IOException {
+        Path migrationDir = Path.of("src/main/resources/db/migration");
+        assertThat(Files.isDirectory(migrationDir))
+                .as("expected %s to exist relative to the backend module root", migrationDir)
+                .isTrue();
+
+        try (Stream<Path> files = Files.list(migrationDir)) {
+            Set<String> actualClosedModeOnlyFiles = files
+                    .map(path -> path.getFileName().toString())
+                    .filter(name -> name.endsWith(".sql") && !VERSIONED_MIGRATION.matcher(name).matches())
+                    .collect(Collectors.toSet());
+
+            Set<String> unexpected = actualClosedModeOnlyFiles.stream()
+                    .filter(name -> !CLOSED_MODE_ONLY_MIGRATION_BASELINE.contains(name))
+                    .collect(Collectors.toSet());
+            Set<String> missing = CLOSED_MODE_ONLY_MIGRATION_BASELINE.stream()
+                    .filter(name -> !actualClosedModeOnlyFiles.contains(name))
+                    .collect(Collectors.toSet());
+
+            assertThat(actualClosedModeOnlyFiles)
+                    .as("db/migration's non-V*__ .sql file set must match "
+                            + "CLOSED_MODE_ONLY_MIGRATION_BASELINE exactly (extra: %s | missing: %s) — "
+                            + "every closed-mode-only migration must be a deliberate, reviewed addition "
+                            + "recorded in this baseline, not a silent extra file", unexpected, missing)
+                    .isEqualTo(CLOSED_MODE_ONLY_MIGRATION_BASELINE);
+        }
+    }
+
+    /** Same self-consistency check as {@link #migrationContentBaselineCoversEveryBaselineFile()},
+     *  for the closed-mode-only baseline: a file added to {@link #CLOSED_MODE_ONLY_MIGRATION_BASELINE}
+     *  without a matching hash entry would otherwise go silently un-hashed by {@link
+     *  #closedModeOnlyMigrationContentMatchesBaseline()}. */
+    @Test
+    void closedModeOnlyMigrationContentBaselineCoversEveryBaselineFile() {
+        assertThat(CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256.keySet())
+                .as("CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256 must hold exactly one hash entry per "
+                        + "file in CLOSED_MODE_ONLY_MIGRATION_BASELINE")
+                .isEqualTo(CLOSED_MODE_ONLY_MIGRATION_BASELINE);
+    }
+
+    /**
+     * Content-drift detection for closed-mode-only migrations — the repeatable-migration analogue
+     * of {@link #migrationContentMatchesMasterBaseline()}. Deliberately not folded into that same
+     * test/loop: mixing "diverged from master, investigate" (V*__) and "diverged from its own last
+     * reviewed content, investigate" (R__, no master to diff against) into one assertion message
+     * would blur two different failure meanings.
+     */
+    @Test
+    void closedModeOnlyMigrationContentMatchesBaseline() throws IOException {
+        Path migrationDir = Path.of("src/main/resources/db/migration");
+        assertThat(Files.isDirectory(migrationDir))
+                .as("expected %s to exist relative to the backend module root", migrationDir)
+                .isTrue();
+
+        List<String> mismatches = new ArrayList<>();
+        for (Map.Entry<String, String> baselineEntry : CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256.entrySet()) {
+            String fileName = baselineEntry.getKey();
+            Path file = migrationDir.resolve(fileName);
+            if (!Files.exists(file)) {
+                // A missing baseline file is closedModeOnlyMigrationSetMatchesBaseline()'s
+                // invariant, not this one.
+                continue;
+            }
+            String expectedSha256 = baselineEntry.getValue();
+            String actualSha256 = sha256Hex(file);
+            if (!expectedSha256.equals(actualSha256)) {
+                mismatches.add(fileName + " (expected sha256 " + expectedSha256 + ", actual "
+                        + actualSha256 + ")");
+            }
+        }
+
+        assertThat(mismatches)
+                .as("these closed-mode-only migration files have content that no longer matches "
+                        + "the last-reviewed baseline — for a repeatable (R__) migration this is "
+                        + "especially dangerous: Flyway re-runs it automatically the moment its "
+                        + "checksum changes, so an unreviewed edit here doesn't just risk a startup "
+                        + "validation failure, it risks silently re-executing an unreviewed DELETE "
+                        + "against secret-bearing/data tables. Refresh "
+                        + "CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256 only if this is a deliberate, "
+                        + "reviewed content change; otherwise revert it")
                 .isEmpty();
     }
 
