@@ -28,11 +28,11 @@ import org.springframework.transaction.annotation.Transactional;
  * key, same as {@link Golden300JobCreator}, so Tier2/Tier3 never fire and this costs nothing)
  * against the real dev DB's populated {@code cpe_dictionary} mirror. This is a 100% local-DB-read
  * measurement with zero network calls in Tier1 — see {@link Stage1IdentificationService}'s own
- * class javadoc (closed-mode backlog item 273/B4): the live, single-page NVD CPE API fallback
- * {@link Stage1IdentificationService#fuzzyMatchCpe} used to have has been physically deleted on
- * this branch, not just disabled, so despite this class's name there is no "live NVD fallback" for
- * this test to depend on (a first-pass version of the writeup below incorrectly claimed there was
- * — see the correction paragraph further down).
+ * class javadoc (closed-mode backlog item 273/B4): {@link Stage1IdentificationService#fuzzyMatchCpe}
+ * itself still exists, but the live, single-page NVD CPE API call it used to fall back to has been
+ * physically deleted on this branch, not just disabled, so despite this class's name there is no
+ * "live NVD fallback" for this test to depend on (a first-pass version of the writeup below
+ * incorrectly claimed there was — see the correction paragraph further down).
  *
  * <p>Unlike every prior golden-300 measurement (job191/193/195/196, all created via a throwaway
  * {@code *JobCreator} + {@code research_jobs.status} PROCESSING-spoof + backend restart, i.e. a
@@ -73,35 +73,49 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Breaking down every miss/false positive by cause (see the per-row {@code
  * System.out.println} output this test still just prints for a human to read — no assertions were
- * added, this remains an analysis tool, not a regression gate):
+ * added, this remains an analysis tool, not a regression gate). The old (2026-08-31) measurement
+ * had 2 identification-target misses ({@code Metasploit Framework 6.3.55}, {@code OpenSSL 3.3.1})
+ * out of 266 targets; today's has 21 misses out of 268 targets. The full accounting of that
+ * difference (+2 targets, +19 misses) is three independent effects, not two — one of them not
+ * fully identified when the second-to-last revision of this writeup was reviewed:
  * <ul>
- *   <li>All 21 identification-target misses are the 20 golden-300 rows with {@code
+ *   <li><b>+20 misses, Maven Central (item193/B3):</b> all 20 golden-300 rows with {@code
  *       expected_ecosystem=maven} (raw Maven coordinates like {@code
  *       org.springframework:spring-core} — see {@code MavenCentralRemovalGolden300RecallTest} for
- *       the dedicated per-row breakdown) plus 1 pre-existing, unrelated miss ({@code Metasploit
- *       Framework 6.3.55}, one of 5 static CPE-dictionary vendor/product mismatches tracked
- *       separately in closed-mode backlog item 299). The Maven misses are entirely
- *       attributable to {@link com.vulncheck.app.service.registry.MavenCentralRegistryClient}'s
- *       closed-mode no-op stub (backlog item 193/B3) — a change that landed *after* this class's
- *       2026-08-31 measurement — not to the Chocolatey removal.
- *   <li>The control-row false-positive count dropped from 5/34 (2026-08-31, stale numbers) to
- *       1/32 today, for two independent reasons — neither one Chocolatey-related: (a) the
- *       golden-300.csv sync above moved Blender and Rufus out of the control-row bucket entirely —
- *       they were never real false positives this app produced, they were mis-labeled ground truth
- *       this test was scoring against; both now correctly land in the identification-target bucket
- *       as IDENTIFIED_CPE, and both resolve to exactly the expected CPE ({@code
- *       cpe:2.3:a:blender:blender:...} and {@code cpe:2.3:a:akeo:rufus:...} respectively — see the
- *       {@code BLENDER/RUFUS RESOLVED-CPE CHECK} output this test now prints for these two rows);
- *       (b) Android Studio and Directory Opus separately stopped being false positives due to an
- *       unrelated later code fix that stopped trusting unverified CPE-candidate guesses (see {@link
- *       Stage1IdentificationService}'s "dropping rather than trusting an unverified guess"
- *       logging).
+ *       the dedicated per-row breakdown) are now misses, entirely attributable to {@link
+ *       com.vulncheck.app.service.registry.MavenCentralRegistryClient}'s closed-mode no-op stub — a
+ *       change that landed *after* this class's 2026-08-31 measurement. Not Chocolatey-related.
+ *   <li><b>&minus;1 miss, {@code OpenSSL 3.3.1} (backlog item 176):</b> this was one of the 2
+ *       original misses and is a hit today. Confirmed in code, not guessed: {@link
+ *       Stage1IdentificationService#selectFallbackCpeCandidateAfterRegistryDistrust} (added for
+ *       backlog item 176, job203 root-cause — see that method's own call site's comment, which
+ *       names {@code openssl:openssl} directly as the motivating case) re-checks the remaining CPE
+ *       candidate pool after a registry match is distrusted, instead of silently going
+ *       UNIDENTIFIED the way this class's 2026-08-31 measurement predates. Not Chocolatey-related
+ *       either — {@code Metasploit Framework 6.3.55}, the other original miss, is untouched by this
+ *       fix and is still a miss today (one of 5 static CPE-dictionary vendor/product mismatches
+ *       tracked separately in closed-mode backlog item 299).
+ *   <li><b>+2 targets, 0 net miss change, golden-300.csv ground-truth correction (item300):</b> the
+ *       sync moved Blender and Rufus out of the control-row bucket entirely — they were never real
+ *       false positives this app produced, they were mis-labeled ground truth this test was scoring
+ *       against. Both now correctly land in the identification-target bucket as IDENTIFIED_CPE, and
+ *       both resolve to exactly the expected CPE ({@code cpe:2.3:a:blender:blender:...} and {@code
+ *       cpe:2.3:a:akeo:rufus:...} respectively — see the {@code BLENDER/RUFUS RESOLVED-CPE CHECK}
+ *       output this test now prints for these two rows), so this widens the denominator by 2
+ *       without adding or removing any miss.
  * </ul>
+ * <p>Separately, the control-row false-positive count dropped from 5/34 (2026-08-31, stale
+ * numbers) to 1/32 today, for two reasons — neither Chocolatey-related: the item300 CSV sync
+ * above (Blender/Rufus leaving the control-row bucket, as described above), plus Android Studio
+ * and Directory Opus independently no longer being false positives due to an unrelated later code
+ * fix that stopped trusting unverified CPE-candidate guesses (see {@link
+ * Stage1IdentificationService}'s "dropping rather than trusting an unverified guess" logging).
  * <p>Conclusion: the original item99 finding — Chocolatey removal has ~0pt net accuracy impact,
  * because every Chocolatey-only match already had independent CPE backing before removal — still
- * holds exactly today. 100% of today's gap versus the stale 2026-08-31 numbers is explained by the
- * Maven Central closed-mode stub (item193/B3) and the golden-300.csv ground-truth correction
- * (item300), 0% by Chocolatey.
+ * holds exactly today: 0% of today's gap versus the stale 2026-08-31 numbers is attributable to
+ * Chocolatey. The gap itself is explained by three independent, unrelated-to-each-other causes
+ * (Maven Central item193/B3, the OpenSSL item176 fix, and the item300 ground-truth correction), not
+ * a clean two-factor split.
  *
  * <p>Disabled by default, same convention as every other real-dev-DB test in this package — run
  * once by hand (temporarily remove {@code @Disabled}, {@code mvn -Dtest=ChocolateyRemovalGolden300RecallTest test}),
