@@ -33,17 +33,25 @@ import org.springframework.transaction.annotation.Transactional;
  * same no-cost setup as the sibling Chocolatey test's own javadoc explains), rather than trusting
  * the assumption.
  *
- * <p>Measured 2026-09-05 against the real dev DB (closed-mode branch, current HEAD): all 20 of the
+ * <p>Measured 2026-09-05 against the real dev DB (closed-mode branch, current HEAD, after the
+ * golden-300.csv sync described in {@link ChocolateyRemovalGolden300RecallTest}'s own javadoc —
+ * backlog item 300 — which didn't touch any {@code expected_ecosystem=maven} row): all 20 of the
  * 20 {@code expected_ecosystem=maven} rows in golden-300.csv come back {@code UNIDENTIFIED} — zero
- * CPE-dictionary rescue for any of them. This is expected: these rows' {@code product_name} values
- * are raw Maven coordinates ({@code groupId:artifactId}, e.g. {@code org.springframework:spring-core}),
- * not human-readable product names, so an NVD CPE keyword search over them has nothing to match —
- * there is no coincidental-CPE-match path the way there sometimes is for ordinary desktop-software
- * names. This confirms §6-2 scenario C's assumption is exactly right for the current dataset/code,
- * not merely a plausible projection: closed mode has literally no path back to identifying these 20
- * rows short of standing up an actual Maven Central mirror (ruled out elsewhere in the plan doc on
- * ToS/effort grounds) or teaching the CPE-dictionary path to parse a Maven coordinate into a
- * heuristic product-name guess (not implemented, speculative, out of scope of this investigation).
+ * CPE-dictionary rescue for any of them. There is no live NVD fallback to even consider here — see
+ * {@link Stage1IdentificationService}'s own class javadoc (closed-mode backlog item 273/B4): that
+ * path was physically deleted on this branch. The only CPE-matching paths that exist are local
+ * {@code cpe_dictionary} reads — {@link Stage1IdentificationService#localCpeLookup}'s literal/
+ * pg_trgm-similarity search, falling back to {@link Stage1IdentificationService#findByNameVariants}'s
+ * contraction/expansion/vendor-prefix-strip search — and neither has anything to match against
+ * these rows' {@code product_name} values, which are raw Maven coordinates ({@code
+ * groupId:artifactId}, e.g. {@code org.springframework:spring-core}) rather than human-readable
+ * product names; there is no coincidental-CPE-match path the way there sometimes is for ordinary
+ * desktop-software names. This confirms §6-2 scenario C's assumption is exactly right for the
+ * current dataset/code, not merely a plausible projection: closed mode has literally no path back
+ * to identifying these 20 rows short of standing up an actual Maven Central mirror (ruled out
+ * elsewhere in the plan doc on ToS/effort grounds) or teaching the CPE-dictionary path to parse a
+ * Maven coordinate into a heuristic product-name guess (not implemented, speculative, out of scope
+ * of this investigation).
  *
  * <p>This is an analysis tool, not a regression gate — no assertions, same convention as the
  * sibling {@link ChocolateyRemovalGolden300RecallTest}: it prints a per-row breakdown plus a
@@ -62,11 +70,13 @@ import org.springframework.transaction.annotation.Transactional;
         // same as every other real-dev-DB test in this package.
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Run once by hand against the real dev DB (2026-09-05, backlog item 296 gap analysis) -- "
-        + "all 20/20 golden-300 expected_ecosystem=maven rows come back UNIDENTIFIED, zero rescued "
-        + "via the CPE dictionary -- confirms docs/spec/closed-mode-plan.md's own scenario C "
-        + "assumption is exact, not just a plausible projection. See class javadoc. Left disabled "
-        + "so it can never re-fire on a routine mvn test run.")
+@Disabled("Run once by hand against the real dev DB (2026-09-05, backlog item 296 gap analysis, "
+        + "post golden-300.csv sync -- item300) -- all 20/20 golden-300 expected_ecosystem=maven "
+        + "rows still come back UNIDENTIFIED, zero rescued via the local CPE dictionary (no live "
+        + "NVD fallback exists on this branch to consider either, see class javadoc) -- confirms "
+        + "docs/spec/closed-mode-plan.md's own scenario C assumption is exact, not just a plausible "
+        + "projection. See class javadoc. Left disabled so it can never re-fire on a routine mvn "
+        + "test run.")
 class MavenCentralRemovalGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
@@ -103,11 +113,14 @@ class MavenCentralRemovalGolden300RecallTest {
 
         int mavenRowTotal = 0;
         int mavenRowStillIdentified = 0;
+        Set<String> seenMavenRowKeys = new HashSet<>();
 
         for (ResearchJobItem item : items) {
-            if (!mavenRowKeys.contains(key(item.getRawProductName(), item.getVersion()))) {
+            String itemKey = key(item.getRawProductName(), item.getVersion());
+            if (!mavenRowKeys.contains(itemKey)) {
                 continue;
             }
+            seenMavenRowKeys.add(itemKey);
             mavenRowTotal++;
             Optional<IdentifiedProduct> result = stage1IdentificationService.identify(item, REAL_USER_ID);
             if (result.isPresent()) {
@@ -118,6 +131,19 @@ class MavenCentralRemovalGolden300RecallTest {
             } else {
                 System.out.println("MAVEN ROW NOW UNIDENTIFIED: " + item.getRawProductName() + " " + item.getVersion());
             }
+        }
+
+        // Sanity check, same idea as the sibling Chocolatey test's missingExpected counter: every
+        // key collected from golden-300.csv's expected_ecosystem=maven rows should also show up
+        // among this job's created ResearchJobItems. If it doesn't, something upstream (CSV
+        // parsing, column mapping, job creation) silently dropped or renamed a row, and mavenRowTotal
+        // would undercount without this warning ever being visible.
+        if (mavenRowTotal != mavenRowKeys.size()) {
+            Set<String> missingKeys = new HashSet<>(mavenRowKeys);
+            missingKeys.removeAll(seenMavenRowKeys);
+            System.out.println("WARNING: expected " + mavenRowKeys.size() + " expected_ecosystem=maven rows from "
+                    + "golden-300.csv but only matched " + mavenRowTotal + " ResearchJobItems -- missing keys: "
+                    + missingKeys);
         }
 
         System.out.println("\n=== backlog item 296 (Maven Central closed-mode removal) golden-300 per-row measurement ===");

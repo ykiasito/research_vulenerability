@@ -26,7 +26,13 @@ import org.springframework.transaction.annotation.Transactional;
  * golden-300.csv} through the real {@link Stage1IdentificationService} directly (static Tier1 +
  * CPE dictionary only — {@code REAL_USER_ID}=5 has only an {@code nvd} provider secret, no Claude
  * key, same as {@link Golden300JobCreator}, so Tier2/Tier3 never fire and this costs nothing)
- * against the real dev DB's populated CPE dictionary/live NVD fallback.
+ * against the real dev DB's populated {@code cpe_dictionary} mirror. This is a 100% local-DB-read
+ * measurement with zero network calls in Tier1 — see {@link Stage1IdentificationService}'s own
+ * class javadoc (closed-mode backlog item 273/B4): the live, single-page NVD CPE API fallback
+ * {@link Stage1IdentificationService#fuzzyMatchCpe} used to have has been physically deleted on
+ * this branch, not just disabled, so despite this class's name there is no "live NVD fallback" for
+ * this test to depend on (a first-pass version of the writeup below incorrectly claimed there was
+ * — see the correction paragraph further down).
  *
  * <p>Unlike every prior golden-300 measurement (job191/193/195/196, all created via a throwaway
  * {@code *JobCreator} + {@code research_jobs.status} PROCESSING-spoof + backend restart, i.e. a
@@ -42,13 +48,32 @@ import org.springframework.transaction.annotation.Transactional;
  * against the current closed-mode dev DB to check how much of the gap between the recall recorded
  * below (2026-08-31, 264/266=99.25%) and today's number is actually attributable to the Chocolatey
  * removal this test is named for, versus something else entirely. Answer: none of it. Fresh
- * measurement (4 consecutive runs): identification recall 245/266=92.11% (3 of 4 runs) /
- * 230/266=86.47% (1 of 4 — the live NVD CPE-dictionary fallback this test depends on, see class
- * javadoc above, is a real network call and that one run hit a slow/cold connection), control-row
- * false-positive rate stable at 3/34=8.82% across all 4 runs. Breaking down every miss/false
- * positive by cause (see the per-row {@code System.out.println} output this test still just
- * prints for a human to read — no assertions were added, this remains an analysis tool, not a
- * regression gate):
+ * measurement, taken after also syncing {@code backend/src/test/resources/golden-300.csv} from the
+ * canonical {@code test-data/golden-300.csv} (backlog item 300 — the two copies had drifted: 2
+ * rows, Blender 4.2.1 and Rufus 4.5, were stale here as UNIDENTIFIED control rows from before a
+ * deeper NVD CPE paging re-check corrected them to IDENTIFIED_CPE in the canonical file), run 3
+ * consecutive times with identical results every time (fully deterministic, as expected for a
+ * 100% local-DB-read path — see above): identification recall 247/268=92.16%, control-row
+ * false-positive rate 1/32=3.13% (just {@code Ditto 3.24.234.0}). 247/268=92.16% is an exact match
+ * for the separately-run, full-pipeline job216 measurement recorded in {@code
+ * docs/spec/closed-mode-plan.md} §6-2 — this static-only, no-cost, in-process check cross-verifies
+ * against that job.
+ *
+ * <p><b>Correction (2026-09-05, senior review caught this in the first pass of this writeup):</b>
+ * the first pass claimed a single divergent run seen at the time (230/266, vs. a stable 245/266
+ * the other 3 times, both numbers from before the golden-300.csv sync above) was caused by "live
+ * NVD fallback network flakiness". That mechanism does not exist on this branch — see the opening
+ * paragraph above; {@code identify()}'s CPE-dictionary path ({@link
+ * Stage1IdentificationService#localCpeLookup}/{@link Stage1IdentificationService#findByNameVariants})
+ * is 100% local reads, and re-running 3 times after the CSV sync produced the identical 247/268
+ * every single time, confirming this path really is fully deterministic. The actual cause of that
+ * one earlier divergent run is unknown; the most plausible explanation is a DB-state difference at
+ * the time (e.g. a registry/CPE mirror sync running concurrently against the same dev DB), not
+ * anything intrinsic to this test, to network I/O, or to Chocolatey.
+ *
+ * <p>Breaking down every miss/false positive by cause (see the per-row {@code
+ * System.out.println} output this test still just prints for a human to read — no assertions were
+ * added, this remains an analysis tool, not a regression gate):
  * <ul>
  *   <li>All 21 identification-target misses are the 20 golden-300 rows with {@code
  *       expected_ecosystem=maven} (raw Maven coordinates like {@code
@@ -59,16 +84,24 @@ import org.springframework.transaction.annotation.Transactional;
  *       attributable to {@link com.vulncheck.app.service.registry.MavenCentralRegistryClient}'s
  *       closed-mode no-op stub (backlog item 193/B3) — a change that landed *after* this class's
  *       2026-08-31 measurement — not to the Chocolatey removal.
- *   <li>The control-row false-positive count dropped from 5/34 (2026-08-31) to 3/34 today: 2 of the
- *       original 5 (Android Studio, Directory Opus) are no longer false positives, due to an
- *       unrelated later fix that stopped trusting unverified CPE-candidate guesses (see {@link
+ *   <li>The control-row false-positive count dropped from 5/34 (2026-08-31, stale numbers) to
+ *       1/32 today, for two independent reasons — neither one Chocolatey-related: (a) the
+ *       golden-300.csv sync above moved Blender and Rufus out of the control-row bucket entirely —
+ *       they were never real false positives this app produced, they were mis-labeled ground truth
+ *       this test was scoring against; both now correctly land in the identification-target bucket
+ *       as IDENTIFIED_CPE, and both resolve to exactly the expected CPE ({@code
+ *       cpe:2.3:a:blender:blender:...} and {@code cpe:2.3:a:akeo:rufus:...} respectively — see the
+ *       {@code BLENDER/RUFUS RESOLVED-CPE CHECK} output this test now prints for these two rows);
+ *       (b) Android Studio and Directory Opus separately stopped being false positives due to an
+ *       unrelated later code fix that stopped trusting unverified CPE-candidate guesses (see {@link
  *       Stage1IdentificationService}'s "dropping rather than trusting an unverified guess"
- *       logging), not anything Chocolatey-related either.
+ *       logging).
  * </ul>
  * <p>Conclusion: the original item99 finding — Chocolatey removal has ~0pt net accuracy impact,
  * because every Chocolatey-only match already had independent CPE backing before removal — still
  * holds exactly today. 100% of today's gap versus the stale 2026-08-31 numbers is explained by the
- * later Maven Central closed-mode stub, not by Chocolatey.
+ * Maven Central closed-mode stub (item193/B3) and the golden-300.csv ground-truth correction
+ * (item300), 0% by Chocolatey.
  *
  * <p>Disabled by default, same convention as every other real-dev-DB test in this package — run
  * once by hand (temporarily remove {@code @Disabled}, {@code mvn -Dtest=ChocolateyRemovalGolden300RecallTest test}),
@@ -83,13 +116,14 @@ import org.springframework.transaction.annotation.Transactional;
         // same as every other real-dev-DB test in this package.
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Run once by hand against the real dev DB (2026-09-05, backlog item 296 gap analysis) -- "
-        + "identification recall 245/266=92.11% (3 of 4 runs) / 230/266=86.47% (1 of 4, live NVD "
-        + "fallback network blip), control-row false-positive rate stable at 3/34=8.82% across all "
-        + "4 runs -- 100% of the gap vs. the 2026-08-31 numbers below is attributable to the Maven "
-        + "Central closed-mode stub (item193/B3), 0% to the Chocolatey removal this test is named "
-        + "for (see class javadoc). Left disabled so it can never re-fire on a routine mvn test "
-        + "run.")
+@Disabled("Run once by hand against the real dev DB (2026-09-05, backlog item 296/300 gap analysis, "
+        + "post golden-300.csv sync) -- identification recall 247/268=92.16%, fully deterministic "
+        + "across 3 repeated runs (this path is 100% local DB reads, see class javadoc), and an "
+        + "exact match for job216's full-pipeline measurement (docs/spec/closed-mode-plan.md §6-2). "
+        + "control-row false-positive rate 1/32=3.13% (just Ditto). 0% of the gap vs. the stale "
+        + "2026-08-31 numbers below is attributable to the Chocolatey removal this test is named "
+        + "for -- see class javadoc for the full breakdown. Left disabled so it can never re-fire "
+        + "on a routine mvn test run.")
 class ChocolateyRemovalGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
@@ -152,6 +186,17 @@ class ChocolateyRemovalGolden300RecallTest {
                     targetIdentified++;
                 } else {
                     System.out.println("IDENTIFICATION-TARGET MISS: " + item.getRawProductName() + " " + item.getVersion());
+                }
+                // Backlog item 300: Blender/Rufus only just moved from this file's UNIDENTIFIED
+                // control-row bucket into IDENTIFIED_CPE targets (golden-300.csv re-sync, see class
+                // javadoc) -- result.isPresent() alone can't tell whether they resolved to the
+                // *correct* CPE (blender:blender / akeo:rufus) or merely to some other CPE, so print
+                // the resolved vendor/product explicitly for these two rows.
+                if (("Blender".equals(item.getRawProductName()) && "4.2.1".equals(item.getVersion()))
+                        || ("Rufus".equals(item.getRawProductName()) && "4.5".equals(item.getVersion()))) {
+                    System.out.println("BLENDER/RUFUS RESOLVED-CPE CHECK: " + item.getRawProductName() + " "
+                            + item.getVersion() + " -> identified=" + identified
+                            + " cpe=" + (identified ? result.get().getCpe() : "n/a"));
                 }
             }
         }
