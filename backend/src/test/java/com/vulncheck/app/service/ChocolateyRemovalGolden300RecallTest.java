@@ -54,7 +54,8 @@ import org.springframework.transaction.annotation.Transactional;
  *       expected_ecosystem=maven} (raw Maven coordinates like {@code
  *       org.springframework:spring-core} — see {@code MavenCentralRemovalGolden300RecallTest} for
  *       the dedicated per-row breakdown) plus 1 pre-existing, unrelated miss ({@code Metasploit
- *       Framework 6.3.55}, tracked separately in backlog item 176). The Maven misses are entirely
+ *       Framework 6.3.55}, one of 5 static CPE-dictionary vendor/product mismatches tracked
+ *       separately in closed-mode backlog item 299). The Maven misses are entirely
  *       attributable to {@link com.vulncheck.app.service.registry.MavenCentralRegistryClient}'s
  *       closed-mode no-op stub (backlog item 193/B3) — a change that landed *after* this class's
  *       2026-08-31 measurement — not to the Chocolatey removal.
