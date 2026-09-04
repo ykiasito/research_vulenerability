@@ -1,6 +1,7 @@
 package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -137,7 +138,7 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
             if (System.currentTimeMillis() > deadline) {
                 log.debug("Maven Central version-check loop for productName={} exceeded its time budget "
                         + "after checking some of {} candidates — falling back to the top candidate unconfirmed",
-                        productName, candidates.size());
+                        LogSanitizer.sanitize(productName), candidates.size());
                 break;
             }
             if (solrVersionExists(candidate, version)) {
@@ -153,7 +154,7 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
         for (int i = 0; i < metadataFallbackLimit; i++) {
             if (System.currentTimeMillis() > deadline) {
                 log.debug("Maven Central maven-metadata.xml fallback pass for productName={} exceeded its "
-                        + "time budget — falling back to the top candidate unconfirmed", productName);
+                        + "time budget — falling back to the top candidate unconfirmed", LogSanitizer.sanitize(productName));
                 break;
             }
             CanonicalArtifact candidate = candidates.get(i);
@@ -215,7 +216,7 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                     .reversed());
             return candidates;
         } catch (Exception e) {
-            log.debug("Maven Central candidate search failed for productName={}", productName, e);
+            log.debug("Maven Central candidate search failed for productName={}", LogSanitizer.sanitize(productName), e);
             return List.of();
         }
     }
@@ -298,7 +299,8 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                 return solrSearch(query, core, rows);
             } catch (Exception e) {
                 lastError = e;
-                log.debug("Maven Central request failed (attempt {}/{}): query={}", attempt, MAX_ATTEMPTS, query, e);
+                log.debug("Maven Central request failed (attempt {}/{}): query={}", attempt, MAX_ATTEMPTS,
+                        LogSanitizer.sanitize(query), e);
                 if (attempt < MAX_ATTEMPTS) {
                     try {
                         Thread.sleep(500);
@@ -309,7 +311,8 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
                 }
             }
         }
-        log.debug("Maven Central request failed after {} attempts: query={}", MAX_ATTEMPTS, query, lastError);
+        log.debug("Maven Central request failed after {} attempts: query={}", MAX_ATTEMPTS,
+                LogSanitizer.sanitize(query), lastError);
         return null;
     }
 
@@ -351,6 +354,9 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
      * value reaching a {@code q} parameter here goes through this first, not just the ones that
      * look adversarial today, and not just the ones with a live-confirmed exploit.
      */
+    // Lucene/Solr-syntax escaping only, not CR/LF stripping — the resulting query can still forge
+    // fake log lines when logged, so call sites sanitize the built query string separately (see
+    // LogSanitizer usages below) rather than relying on this method for that.
     private static String escapeLuceneQueryValue(String value) {
         StringBuilder escaped = new StringBuilder(value.length());
         for (int i = 0; i < value.length(); i++) {

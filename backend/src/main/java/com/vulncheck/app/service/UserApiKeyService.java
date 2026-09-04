@@ -31,19 +31,44 @@ public class UserApiKeyService {
     @Value("${app.admin-email:}")
     private String adminEmail;
 
+    /**
+     * Intentionally left to throw on decrypt failure (key rotation, AAD mismatch, row corruption),
+     * unlike {@link #getNvdApiKey(Long)} below. The Claude key gates real API spend and pipeline
+     * accuracy, and a decrypt failure here can also be the detection signal for tampered ciphertext
+     * (AAD mismatch) — silently swallowing it would hide both a cost-relevant misconfiguration and
+     * a potential integrity problem. Callers (Stage1/Stage4) are expected to let this fail the job
+     * rather than silently fall back to a shared/unkeyed path (task-backlog item 248).
+     */
     public Optional<String> getClaudeApiKey(Long userId) {
         return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_CLAUDE)
                 .map(secret -> secretEncryptionService.decrypt(
                         secret.getEncryptedKey(), userId, UserSecret.PROVIDER_CLAUDE));
     }
 
-    /** NVD keys are free (no billing) and only unlock a higher client-side rate limit, so unlike
-     *  the Claude key there's no cost reason to gate this — it's simply "does this user have one
-     *  registered", used by whichever job/admin action happens to be running as them. */
+    /**
+     * NVD keys are free (no billing) and only unlock a higher client-side rate limit, so unlike
+     * the Claude key there's no cost reason to gate this — it's simply "does this user have one
+     * registered", used by whichever job/admin action happens to be running as them.
+     *
+     * <p>Also falls back to {@link Optional#empty()} (logging a warning with only {@code userId},
+     * never the ciphertext/key/exception detail, to avoid leaking secret material into logs) if
+     * decryption itself fails — e.g. a key rotation, AAD mismatch, or row corruption, matching
+     * {@link #getAdminNvdApiKey()}'s existing fail-soft design below. Before this fix, a decrypt
+     * failure here propagated all the way up through {@code Stage1IdentificationService},
+     * {@code NvdVulnerabilitySource}, {@code NvdKeywordVulnerabilitySource}, and
+     * {@code AdminController}, aborting the entire pipeline over what is only a rate-limit
+     * optimization — confirmed in practice via an {@code AEADBadTagException} on keys registered
+     * before the 2026-08-28 encryption key rotation (task-backlog item 248).
+     */
     public Optional<String> getNvdApiKey(Long userId) {
-        return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_NVD)
-                .map(secret -> secretEncryptionService.decrypt(
-                        secret.getEncryptedKey(), userId, UserSecret.PROVIDER_NVD));
+        try {
+            return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_NVD)
+                    .map(secret -> secretEncryptionService.decrypt(
+                            secret.getEncryptedKey(), userId, UserSecret.PROVIDER_NVD));
+        } catch (Exception e) {
+            log.warn("Failed to decrypt NVD API key for userId={} — falling back to unkeyed", userId);
+            return Optional.empty();
+        }
     }
 
     /**
