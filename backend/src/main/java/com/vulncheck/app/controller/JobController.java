@@ -22,9 +22,11 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -287,6 +289,55 @@ public class JobController {
      *  a CSV download is expected to contain every item regardless of how the HTML view paginates. */
     static final int ITEMS_PAGE_SIZE = 50;
 
+    /** How many pages on either side of the current one {@link #computeVisiblePageNumbers} keeps
+     *  fully spelled out (closed-mode backlog item 275) — 2, a plain UI choice with no measurement
+     *  behind it, same as {@link #ITEMS_PAGE_SIZE}. */
+    private static final int PAGE_LINK_WINDOW = 2;
+
+    /**
+     * Which page numbers {@code detail.html} renders as clickable links, in a "1 2 3 … 20"-style
+     * abbreviation rather than every one of a large job's pages (closed-mode backlog item 275 —
+     * senior-reviewer follow-up on item 267's prev/next-only pagination: a 1,000-item job at {@link
+     * #ITEMS_PAGE_SIZE}=50 is 20 pages, up to 19 "次のページ" clicks to reach the end, unreasonable
+     * for this app's non-engineer target users).
+     *
+     * <p>Always includes page 1 and {@code totalPages} (so those two are always one click away —
+     * this is what serves the "先頭/末尾へのジャンプ" requirement, rather than a separate pair of
+     * jump links) plus every page within {@link #PAGE_LINK_WINDOW} of {@code currentPage}. A
+     * {@code null} entry in the returned list marks a gap between two non-adjacent page numbers
+     * (rendered as {@code "…"} by the template) — e.g. {@code [1, null, 8, 9, 10, 11, 12, null, 20]}
+     * for page 10 (0-based 9) of 20. Both parameters are 1-based for this method's own contract
+     * ({@code currentPage} is converted from the 0-based value {@link #detail} otherwise uses
+     * throughout, since page-number arithmetic reads far more naturally 1-based here).
+     *
+     * @return empty for {@code totalPages <= 1} (matching {@code detail.html}'s own {@code
+     *     totalPages > 1} guard around the whole pagination block — nothing to link to with only one
+     *     page)
+     */
+    static List<Integer> computeVisiblePageNumbers(int currentPage1Based, int totalPages) {
+        if (totalPages <= 1) {
+            return List.of();
+        }
+        TreeSet<Integer> pages = new TreeSet<>();
+        pages.add(1);
+        pages.add(totalPages);
+        for (int p = currentPage1Based - PAGE_LINK_WINDOW; p <= currentPage1Based + PAGE_LINK_WINDOW; p++) {
+            if (p >= 1 && p <= totalPages) {
+                pages.add(p);
+            }
+        }
+        List<Integer> result = new ArrayList<>();
+        Integer previous = null;
+        for (Integer p : pages) {
+            if (previous != null && p - previous > 1) {
+                result.add(null);
+            }
+            result.add(p);
+            previous = p;
+        }
+        return result;
+    }
+
     /** How many of a category's (product or bundled-component) findings the job detail view is
      *  actually showing for one item ({@code shown}, i.e. the capped list's own size) versus how
      *  many genuinely exist ({@code total}, from {@link JobItemVulnerabilityCappedView#getTotalCount()}).
@@ -364,6 +415,10 @@ public class JobController {
         model.addAttribute("currentPage", currentPage);
         model.addAttribute("totalPages", itemsPage.getTotalPages());
         model.addAttribute("totalItems", itemsPage.getTotalElements());
+        // closed-mode backlog item 275: abbreviated page-number links -- see
+        // computeVisiblePageNumbers's own javadoc. currentPage+1 converts to that method's 1-based
+        // contract.
+        model.addAttribute("visiblePageNumbers", computeVisiblePageNumbers(currentPage + 1, itemsPage.getTotalPages()));
         return "jobs/detail";
     }
 
