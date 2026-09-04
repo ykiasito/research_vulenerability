@@ -1,11 +1,24 @@
 -- R__closed_mode_strip.sql
 -- Closed-mode backlog item 262 (Phase B6, docs/spec/closed-mode-plan.md §3-2). A repeatable
--- migration (Flyway "R__" prefix), not a versioned one: this doesn't occupy a version number and
--- re-runs automatically whenever its own checksum changes, matching the pattern already used for
--- V32 (Chocolatey ecosystem row removal) but as an ongoing guarantee rather than a one-time cutover
--- -- if either table below is ever repopulated (e.g. a stray INSERT, a future master-branch merge
--- that reintroduces seed data), the next `mvn` build/deploy on this branch strips it again rather
--- than silently drifting.
+-- migration (Flyway "R__" prefix), not a versioned one: this doesn't occupy a version number,
+-- matching the pattern already used for V32 (Chocolatey ecosystem row removal) but without
+-- pinning it to a specific point in the version sequence.
+--
+-- Repeatable-migration semantics (corrected, senior-reviewer REVISE on item 262/PR#200): Flyway
+-- re-runs a repeatable migration only when ITS OWN CHECKSUM CHANGES -- not on every build/deploy,
+-- and not in response to either target table's row count. On a brand-new database this always
+-- runs exactly once, right after the last versioned (V*) migration, so a fresh DB is guaranteed to
+-- start with both tables empty. On an ALREADY-MIGRATED database (i.e. every real deploy after the
+-- first), once this file has been applied and its checksum hasn't changed since, Flyway does
+-- nothing here on subsequent runs -- a row inserted afterward (a stray INSERT, a future
+-- master-branch merge reintroducing seed data) is NOT automatically stripped again just because
+-- `mvn`/a deploy happens to run.
+--
+-- Maintenance note: if a future master-sync merge reintroduces rows into either table below, this
+-- file's own content (not just its DELETE statements, which would already be correct) must change
+-- in that SAME merge commit -- even a comment-only edit changes the checksum and forces Flyway to
+-- re-run this migration on the next deploy. Relying on "the statements are still correct" alone is
+-- not enough; the checksum has to actually move.
 --
 -- Claude API keys: closed-mode has no AI call sites left (B2, docs/spec/closed-mode-plan.md §9-2)
 -- to ever decrypt/use a Claude key, so a row here on this branch is inert data with no legitimate
@@ -16,7 +29,8 @@ DELETE FROM user_secrets WHERE provider = 'claude';
 -- Ecosystem registries: this table only ever backed the "connectable ecosystem registries" guide
 -- page (GuideController/guide-integrations.html) advertising which live registries this app can
 -- query -- closed-mode has no live per-item registry lookups left (B3) for any of those rows to
--- describe. EcosystemRegistry/EcosystemRegistryRepository (the JPA type/repository) are
--- deliberately NOT deleted here -- see this item's own PR description for why the type stays while
--- only its data is stripped.
+-- describe (that guide page section is now a static list instead of a DB-driven table, see
+-- GuideController's own javadoc -- senior-reviewer REVISE on this item). EcosystemRegistry/
+-- EcosystemRegistryRepository (the JPA type/repository) are deliberately NOT deleted here -- see
+-- EcosystemRegistry's own javadoc for why the type stays while only its data is stripped.
 DELETE FROM ecosystem_registries;

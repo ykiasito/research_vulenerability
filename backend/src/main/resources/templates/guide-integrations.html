@@ -10,18 +10,26 @@
 <p><a th:href="@{/guide}">使い方ガイドに戻る</a> | <a th:href="@{/}">ホームに戻る</a></p>
 
 <h2>1. パッケージレジストリ（自動照合対応）</h2>
-<p>製品名から自動的にパッケージの実在・バージョンを照合できるレジストリです。下表はデータベース（<code>ecosystem_registries</code>）の登録内容をそのまま表示しています。</p>
+<p>
+    製品名から自動的にパッケージの実在・バージョンを照合できるレジストリです。このデプロイ（<code>closed-mode</code>）では、
+    これらのレジストリへアイテムごとにライブ照会することはなく、事前にローカルへ同期済みのミラーデータに対して照合します。
+    照合そのものは通常どおり動作しており、以下は対応エコシステムの一覧です。
+</p>
 <table border="1" cellpadding="4">
     <thead>
-    <tr><th>エコシステム</th><th>表示名</th><th>照会先ベースURL</th><th>有効</th></tr>
+    <tr><th>エコシステム</th><th>表示名</th></tr>
     </thead>
     <tbody>
-    <tr th:each="eco : ${ecosystems}">
-        <td th:text="${eco.ecosystem}"></td>
-        <td th:text="${eco.displayName}"></td>
-        <td th:text="${eco.lookupBaseUrl}"></td>
-        <td th:text="${eco.enabled} ? '○' : '×'"></td>
-    </tr>
+    <tr><td>npm</td><td>npm (Node.js)</td></tr>
+    <tr><td>pypi</td><td>PyPI (Python)</td></tr>
+    <tr><td>maven</td><td>Maven Central (Java)</td></tr>
+    <tr><td>go</td><td>Go module proxy</td></tr>
+    <tr><td>nuget</td><td>NuGet (.NET)</td></tr>
+    <tr><td>rubygems</td><td>RubyGems (Ruby)</td></tr>
+    <tr><td>crates.io</td><td>crates.io (Rust)</td></tr>
+    <tr><td>packagist</td><td>Packagist (PHP)</td></tr>
+    <tr><td>hex</td><td>Hex (Erlang/Elixir)</td></tr>
+    <tr><td>pub</td><td>pub.dev (Dart/Flutter)</td></tr>
     </tbody>
 </table>
 
