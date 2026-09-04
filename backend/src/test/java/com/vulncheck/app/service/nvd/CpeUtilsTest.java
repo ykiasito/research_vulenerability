@@ -127,9 +127,11 @@ class CpeUtilsTest {
     }
 
     // --- parseVersion/versionInRange (closed-mode backlog item 251, senior-reviewer REVISE item 10:
-    // moved from NvdMirrorAbVerificationRunner's disposable A/B harness into production, since
-    // NvdVulnerabilitySource's mirror-backed rewrite needs the exact same, already-hardened logic
-    // that harness's GATE PASSED conclusion validated) -----------------------------------------------
+    // moved from the disposable A/B harness's own logic into production, since NvdVulnerabilitySource's
+    // mirror-backed rewrite needs the exact same, already-hardened logic that harness's GATE PASSED
+    // conclusion validated -- item 290, 2026-09-04: that harness, NvdMirrorAbVerificationRunner, was
+    // deleted outright in item 261/B7; see NvdAuthoritativeConfigurationMatcher's javadoc for its
+    // history) -------------------------------------------------------------------------------------
 
     @Test
     void parseVersionExtractsTheVersionSegment() {
@@ -159,9 +161,11 @@ class CpeUtilsTest {
         // version-less platform entry like cpe:2.3:o:cisco:ios_xe:-:*:*:*:*:*:*:* has all four range
         // columns null (there's no range to describe for a field that doesn't apply), which would
         // otherwise fall into the "unconditionally vulnerable at every version" branch and match
-        // every queried version indiscriminately -- the exact false-positive shape
-        // NvdMirrorAbVerificationRunner's own REVISE history (see its versionApplies javadoc) found
-        // and fixed. The only safe, fail-closed treatment is to never match on a bare "-".
+        // every queried version indiscriminately -- the exact false-positive shape the deleted A/B
+        // harness's own REVISE history (item 290, 2026-09-04: NvdMirrorAbVerificationRunner, deleted
+        // outright in item 261/B7 -- see NvdAuthoritativeConfigurationMatcher's javadoc for its
+        // history) found and fixed. The only safe, fail-closed treatment is to never match on a bare
+        // "-".
         assertThat(CpeUtils.versionInRange("17.3.1", "-", null, null, null, null)).isFalse();
         assertThat(CpeUtils.versionInRange("1.0.0", "-", null, null, null, null)).isFalse();
     }

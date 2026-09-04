@@ -145,14 +145,14 @@ public final class CpeUtils {
      * ("any version" -- CPE 2.3's own wildcard) when the string is too short to carry one. Same
      * escape-aware splitting as every other accessor here.
      *
-     * <p>Closed-mode backlog item 251 (B4, senior-reviewer REVISE item 10): moved here from {@code
-     * NvdMirrorAbVerificationRunner}'s disposable A/B verification harness (which duplicated its
-     * own escape-aware splitter rather than depending on production code — see that class's own
-     * javadoc for why) once the harness's GATE PASSED conclusion made this parsing logic a real
-     * production dependency (production {@code NvdVulnerabilitySource} needs the exact same
-     * criteria-version extraction the harness used to compute the numbers senior-reviewer signed off
-     * on) — the harness now delegates here instead of keeping an independent copy, per backlog item
-     * 254's lesson about the same CPE-parsing bug being rediscovered three separate times across
+     * <p>Closed-mode backlog item 251 (B4, senior-reviewer REVISE item 10): moved here from the
+     * disposable A/B verification harness's own escape-aware splitter (item 290, 2026-09-04: that
+     * harness, {@code NvdMirrorAbVerificationRunner}, was deleted outright in item 261/B7 — see
+     * {@code NvdAuthoritativeConfigurationMatcher}'s javadoc for its history) once the harness's
+     * GATE PASSED conclusion made this parsing logic a real production dependency (production
+     * {@code NvdVulnerabilitySource} needs the exact same criteria-version extraction the harness
+     * used to compute the numbers senior-reviewer signed off on), per backlog item 254's lesson
+     * about the same CPE-parsing bug being rediscovered three separate times across
      * independently-maintained copies.
      */
     public static String parseVersion(String cpeString) {
@@ -173,10 +173,13 @@ public final class CpeUtils {
      * <p>A {@code -} version segment is CPE 2.3's own "not applicable" marker, not a synonym for
      * {@code *} ("any version") — this deliberately never matches on a bare {@code -} (fail-closed)
      * rather than guessing at whatever paired AND-node condition a flattened, node-less table like
-     * {@code nvd_cve_cpe_match} has no column to represent. See {@code NvdMirrorAbVerificationRunner}
-     * class javadoc's "Known modeling gap" note (closed-mode backlog item 202) for the schema
-     * limitation this defends against, and item 251 REVISE item 10 for why this predicate now lives
-     * here instead of being duplicated between that disposable test harness and production {@code
+     * {@code nvd_cve_cpe_match} has no column to represent. See {@code docs/spec/closed-mode-backlog.md}
+     * item 202 for the schema limitation this defends against — originally documented on the "Known
+     * modeling gap" note of the now-deleted A/B verification harness's ({@code
+     * NvdMirrorAbVerificationRunner}) own class javadoc (item 290, 2026-09-04: that harness was
+     * deleted outright in item 261/B7; see {@code NvdAuthoritativeConfigurationMatcher}'s javadoc for
+     * its history) — and item 251 REVISE item 10 for why this predicate now lives here instead of
+     * being duplicated between that disposable test harness and production {@code
      * NvdVulnerabilitySource}.
      *
      * @return whether {@code itemVersion} falls within the range/exact-match this one {@code
