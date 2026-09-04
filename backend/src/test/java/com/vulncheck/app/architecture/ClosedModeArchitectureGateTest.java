@@ -24,8 +24,11 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.PropertySource;
+import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.FileSystemResource;
 
 /**
@@ -412,6 +415,13 @@ class ClosedModeArchitectureGateTest {
      * for this test to need a change. If it fails WITHOUT a preceding master-sync merge, that means
      * a {@code V*__} file was added directly on closed-mode, which violates §3-2 and must be
      * reverted, not accommodated by editing this baseline.
+     *
+     * <p>Item 288 (2026-09-04): entries here are actually paths relative to {@code db/migration}
+     * (via {@code migrationDir.relativize(...)}, matched against {@link #migrationSetMatchesMasterBaseline()}'s
+     * now-recursive {@code Files.walk} scan) rather than bare filenames — the two happen to be
+     * identical today because no migration is nested under a subdirectory, but a future nested
+     * migration's baseline entry must include its subdirectory prefix (e.g. {@code
+     * "sub/V50__x.sql"}), not just its filename.
      */
     private static final Set<String> MASTER_MIGRATION_BASELINE = Set.of(
             "V1__init.sql",
@@ -605,10 +615,18 @@ class ClosedModeArchitectureGateTest {
                 .as("expected %s to exist relative to the backend module root", migrationDir)
                 .isTrue();
 
-        try (Stream<Path> files = Files.list(migrationDir)) {
+        // Item 288 (2026-09-04): Files.walk (not Files.list) and a migrationDir-relative path as
+        // the key (not just Path#getFileName()) — Flyway itself (spring.flyway.locations,
+        // classpath:db/migration) scans this directory *recursively*, so a versioned migration
+        // dropped into a subdirectory is executed by Flyway but was previously invisible to this
+        // gate's flat, non-recursive Files.list scan. The VERSIONED_MIGRATION naming-convention
+        // check still matches on the bare filename (Flyway's own naming rule is filename-only,
+        // irrespective of nesting) — only the *key* used for baseline comparison changed.
+        try (Stream<Path> files = Files.walk(migrationDir)) {
             Set<String> actualVersionedFiles = files
-                    .map(path -> path.getFileName().toString())
-                    .filter(name -> VERSIONED_MIGRATION.matcher(name).matches())
+                    .filter(Files::isRegularFile)
+                    .filter(path -> VERSIONED_MIGRATION.matcher(path.getFileName().toString()).matches())
+                    .map(path -> migrationDir.relativize(path).toString())
                     .collect(Collectors.toSet());
 
             // Compute both directions up front (not just for the failure message, but so the
@@ -664,6 +682,14 @@ class ClosedModeArchitectureGateTest {
      * already reported (with a more specific message) by {@link #migrationSetMatchesMasterBaseline()},
      * so this test doesn't re-report that case as a spurious "no baseline hash for this file" or
      * "file present in baseline but absent on disk" failure.
+     *
+     * <p>Item 288 (2026-09-04): unlike {@link #migrationSetMatchesMasterBaseline()}, this test does
+     * not scan {@code migrationDir} at all — it is driven entirely by {@link
+     * #MASTER_MIGRATION_CONTENT_SHA256}'s own keys, resolving each one directly via {@code
+     * migrationDir.resolve(...)}. So it was never subject to that method's non-recursive-{@code
+     * Files.list} bug, and a nested migration is already handled correctly here as long as its
+     * baseline key is the correct {@code db/migration}-relative path (see that field's javadoc) —
+     * no {@code Files.walk} conversion is needed in this method.
      */
     @Test
     void migrationContentMatchesMasterBaseline() throws IOException {
@@ -721,6 +747,9 @@ class ClosedModeArchitectureGateTest {
      * expected to exist under {@code db/migration}. Currently just {@code R__closed_mode_strip.sql}
      * (item 262/B6). A future addition here must be a deliberate, reviewed closed-mode-only
      * migration, not a stray file — see {@link #closedModeOnlyMigrationSetMatchesBaseline()}.
+     *
+     * <p>Item 288 (2026-09-04): same "actually a {@code db/migration}-relative path, not a bare
+     * filename" note as {@link #MASTER_MIGRATION_BASELINE} applies here too.
      */
     private static final Set<String> CLOSED_MODE_ONLY_MIGRATION_BASELINE =
             Set.of("R__closed_mode_strip.sql");
@@ -752,10 +781,15 @@ class ClosedModeArchitectureGateTest {
                 .as("expected %s to exist relative to the backend module root", migrationDir)
                 .isTrue();
 
-        try (Stream<Path> files = Files.list(migrationDir)) {
+        // Item 288 (2026-09-04): same Files.walk + relativize fix as migrationSetMatchesMasterBaseline
+        // above, for the same reason — Flyway scans db/migration recursively, so a repeatable
+        // migration nested in a subdirectory would otherwise be invisible to this gate.
+        try (Stream<Path> files = Files.walk(migrationDir)) {
             Set<String> actualClosedModeOnlyFiles = files
-                    .map(path -> path.getFileName().toString())
-                    .filter(name -> name.endsWith(".sql") && !VERSIONED_MIGRATION.matcher(name).matches())
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(".sql")
+                            && !VERSIONED_MIGRATION.matcher(path.getFileName().toString()).matches())
+                    .map(path -> migrationDir.relativize(path).toString())
                     .collect(Collectors.toSet());
 
             Set<String> unexpected = actualClosedModeOnlyFiles.stream()
@@ -792,6 +826,10 @@ class ClosedModeArchitectureGateTest {
      * test/loop: mixing "diverged from master, investigate" (V*__) and "diverged from its own last
      * reviewed content, investigate" (R__, no master to diff against) into one assertion message
      * would blur two different failure meanings.
+     *
+     * <p>Item 288 (2026-09-04): same "baseline-driven, not a directory scan, so no {@code
+     * Files.walk} conversion needed" note as {@link #migrationContentMatchesMasterBaseline()}
+     * applies here too.
      */
     @Test
     void closedModeOnlyMigrationContentMatchesBaseline() throws IOException {
@@ -871,6 +909,64 @@ class ClosedModeArchitectureGateTest {
             // practice, but MessageDigest.getInstance declares it as checked.
             throw new AssertionError("SHA-256 MessageDigest not available", e);
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Item 289 (2026-09-04): the six migration gates above (§3-6 item 5, item 261, item 288) all
+    // hardcode src/main/resources/db/migration as the directory to scan/hash, but never assert
+    // that Flyway itself is actually configured to read only that directory. If a second entry
+    // were ever added to spring.flyway.locations (e.g. classpath:db/extra-migration) in either
+    // application.yml, Flyway would execute migrations from it while every gate above stayed
+    // completely blind to it — same failure shape as item 288's non-recursive scan, but one level
+    // up (a whole extra Flyway-scanned location, not just a subdirectory of the one already
+    // covered). These two tests close that gap for both the production and test application.yml
+    // (same YamlPropertySourceLoader technique already used by dockerComposeHasNoLlmServiceService
+    // above and PoolSizeConfigBindingTest).
+    // ------------------------------------------------------------------------------------------
+
+    private static final String EXPECTED_FLYWAY_LOCATION = "classpath:db/migration";
+
+    @Test
+    void productionApplicationYamlFlywayLocationsIsExactlyDbMigration() throws IOException {
+        assertFlywayLocationsIsExactlyDbMigration("src/main/resources/application.yml");
+    }
+
+    @Test
+    void testApplicationYamlFlywayLocationsIsExactlyDbMigration() throws IOException {
+        assertFlywayLocationsIsExactlyDbMigration("src/test/resources/application.yml");
+    }
+
+    /**
+     * Loads {@code yamlPath} with {@link YamlPropertySourceLoader} (no {@code ApplicationContext},
+     * same rationale as {@link #dockerComposeHasNoLlmServiceService()} above) and asserts {@code
+     * spring.flyway.locations} binds to exactly {@code [classpath:db/migration]} — one entry, no
+     * more, no fewer. {@code spring.flyway.locations} accepts either a single scalar or a YAML
+     * list; binding it as {@code List<String>} handles both forms (a bare scalar binds to a
+     * single-element list) without the test needing to know which form the YAML uses.
+     */
+    private static void assertFlywayLocationsIsExactlyDbMigration(String yamlPath) throws IOException {
+        YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
+        List<PropertySource<?>> loaded = loader.load("application", new FileSystemResource(yamlPath));
+
+        StandardEnvironment environment = new StandardEnvironment();
+        environment.getPropertySources().remove(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME);
+        environment.getPropertySources().remove(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME);
+        loaded.forEach(propertySource -> environment.getPropertySources().addLast(propertySource));
+
+        List<String> locations = Binder.get(environment)
+                .bind("spring.flyway.locations", Bindable.listOf(String.class))
+                .orElseThrow(() -> new AssertionError(
+                        yamlPath + " must set spring.flyway.locations — its absence means Flyway would fall "
+                                + "back to its own default (classpath:db/migration, same value we require here, "
+                                + "but implicitly rather than explicitly configured), which this gate cannot "
+                                + "distinguish from a deliberate but different configuration"));
+
+        assertThat(locations)
+                .as("%s's spring.flyway.locations must be exactly [%s] — every migration gate above "
+                        + "(§3-6 item 5, item 261, item 288) only scans/hashes that one directory, so a "
+                        + "second location would let Flyway execute migrations none of those gates can see",
+                        yamlPath, EXPECTED_FLYWAY_LOCATION)
+                .containsExactly(EXPECTED_FLYWAY_LOCATION);
     }
 
     // ------------------------------------------------------------------------------------------
