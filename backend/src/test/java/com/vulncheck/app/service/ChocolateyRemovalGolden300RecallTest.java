@@ -38,6 +38,37 @@ import org.springframework.transaction.annotation.Transactional;
  * row from this run is ever visible outside this one JVM process — no backend restart, no durable
  * write, matching this task's own request for a no-write in-process check.
  *
+ * <p>Backlog item 296 (2026-09-05, golden-300 job211 recall investigation): re-ran this by hand
+ * against the current closed-mode dev DB to check how much of the gap between the recall recorded
+ * below (2026-08-31, 264/266=99.25%) and today's number is actually attributable to the Chocolatey
+ * removal this test is named for, versus something else entirely. Answer: none of it. Fresh
+ * measurement (4 consecutive runs): identification recall 245/266=92.11% (3 of 4 runs) /
+ * 230/266=86.47% (1 of 4 — the live NVD CPE-dictionary fallback this test depends on, see class
+ * javadoc above, is a real network call and that one run hit a slow/cold connection), control-row
+ * false-positive rate stable at 3/34=8.82% across all 4 runs. Breaking down every miss/false
+ * positive by cause (see the per-row {@code System.out.println} output this test still just
+ * prints for a human to read — no assertions were added, this remains an analysis tool, not a
+ * regression gate):
+ * <ul>
+ *   <li>All 21 identification-target misses are the 20 golden-300 rows with {@code
+ *       expected_ecosystem=maven} (raw Maven coordinates like {@code
+ *       org.springframework:spring-core} — see {@code MavenCentralRemovalGolden300RecallTest} for
+ *       the dedicated per-row breakdown) plus 1 pre-existing, unrelated miss ({@code Metasploit
+ *       Framework 6.3.55}, tracked separately in backlog item 176). The Maven misses are entirely
+ *       attributable to {@link com.vulncheck.app.service.registry.MavenCentralRegistryClient}'s
+ *       closed-mode no-op stub (backlog item 193/B3) — a change that landed *after* this class's
+ *       2026-08-31 measurement — not to the Chocolatey removal.
+ *   <li>The control-row false-positive count dropped from 5/34 (2026-08-31) to 3/34 today: 2 of the
+ *       original 5 (Android Studio, Directory Opus) are no longer false positives, due to an
+ *       unrelated later fix that stopped trusting unverified CPE-candidate guesses (see {@link
+ *       Stage1IdentificationService}'s "dropping rather than trusting an unverified guess"
+ *       logging), not anything Chocolatey-related either.
+ * </ul>
+ * <p>Conclusion: the original item99 finding — Chocolatey removal has ~0pt net accuracy impact,
+ * because every Chocolatey-only match already had independent CPE backing before removal — still
+ * holds exactly today. 100% of today's gap versus the stale 2026-08-31 numbers is explained by the
+ * later Maven Central closed-mode stub, not by Chocolatey.
+ *
  * <p>Disabled by default, same convention as every other real-dev-DB test in this package — run
  * once by hand (temporarily remove {@code @Disabled}, {@code mvn -Dtest=ChocolateyRemovalGolden300RecallTest test}),
  * read the printed metrics, then restore {@code @Disabled}. Never left enabled for a routine
@@ -51,13 +82,13 @@ import org.springframework.transaction.annotation.Transactional;
         // same as every other real-dev-DB test in this package.
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Run once (2026-08-31, backlog item 99 Chocolatey-removal recall re-measurement) against "
-        + "the real dev DB -- static/no-AI recall 264/266=99.25%, control-row false-positive rate "
-        + "5/34=14.71%, no new misses/false-positives attributable to the Chocolatey removal (the "
-        + "2 misses -- Metasploit Framework, OpenSSL -- and all 5 control-row false positives -- "
-        + "Android Studio, Blender, Rufus, Directory Opus, Ditto -- resolve via ecosystem=null, i.e. "
-        + "the untouched CPE-dictionary path, not the removed registry). Left disabled so it can "
-        + "never re-fire on a routine mvn test run — see class javadoc.")
+@Disabled("Run once by hand against the real dev DB (2026-09-05, backlog item 296 gap analysis) -- "
+        + "identification recall 245/266=92.11% (3 of 4 runs) / 230/266=86.47% (1 of 4, live NVD "
+        + "fallback network blip), control-row false-positive rate stable at 3/34=8.82% across all "
+        + "4 runs -- 100% of the gap vs. the 2026-08-31 numbers below is attributable to the Maven "
+        + "Central closed-mode stub (item193/B3), 0% to the Chocolatey removal this test is named "
+        + "for (see class javadoc). Left disabled so it can never re-fire on a routine mvn test "
+        + "run.")
 class ChocolateyRemovalGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
