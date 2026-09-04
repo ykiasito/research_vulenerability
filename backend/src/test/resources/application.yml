@@ -26,6 +26,14 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
+    # Ignore repeatable migrations that were applied by a branch we're not currently on (e.g.
+    # closed-mode's R__closed_mode_strip.sql, item 262) but are missing locally. Without this,
+    # `validateOnMigrate` (default true) fails ApplicationContext startup with "Detected applied
+    # migration not resolved locally" once the shared vulncheck_test DB's flyway_schema_history
+    # has recorded that repeatable migration from a different branch's test run (item 285, 2026-09-04).
+    # Versioned migrations are unaffected: "repeatable:missing" only covers repeatable (R__) entries,
+    # so a genuinely missing versioned migration still fails validation as before.
+    ignore-migration-patterns: "repeatable:missing"
 
   thymeleaf:
     cache: false
