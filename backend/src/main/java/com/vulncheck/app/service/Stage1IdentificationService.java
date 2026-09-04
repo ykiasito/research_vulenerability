@@ -12,7 +12,6 @@ import com.vulncheck.app.service.nvd.NameVariantGenerator;
 import com.vulncheck.app.service.registry.RegistryMatch;
 import com.vulncheck.app.service.registry.RegistryRoutingPolicy;
 import java.math.BigDecimal;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
@@ -24,11 +23,14 @@ import org.springframework.stereotype.Service;
  * disambiguation among an ambiguous CPE candidate set), and Tier3 (LLM+web_search when Tier1
  * found nothing at all, e.g. marketplace name variance).
  *
- * <p>Tier1's CPE matching is not limited to whatever an admin has pre-synced into the local
- * dictionary: {@link #fuzzyMatchCpe} falls back to a live, single-page NVD CPE API call (via
- * {@link NvdCpeSyncService#syncKeywordSinglePage}) whenever the local mirror has zero candidates,
- * so a product nobody has synced a keyword for yet can still be resolved — the whole point of a
- * research tool is handling products that aren't already known locally.
+ * <p>Closed-mode backlog item 273 (B4): {@link #fuzzyMatchCpe} used to fall back to a live,
+ * single-page NVD CPE API call ({@code NvdCpeSyncService#syncKeywordSinglePage}) whenever the
+ * local mirror had zero candidates for a product nobody had synced a keyword for yet — that live
+ * path has been physically deleted on this branch, not just disabled. Tier1's CPE matching is
+ * therefore limited to whatever the local {@code cpe_dictionary} mirror (a full sync, not
+ * incremental) already has, falling through to the name-variant search ({@link
+ * #findByNameVariants}) as the last local-only resort — see {@link #resolveCpeCandidates}'s own
+ * javadoc.
  *
  * <p>Tier2/3 both go through {@link UserApiKeyService} for the job owner's own Claude key —
  * if it's not configured, both tiers are silently skipped and this degrades to Tier1-only
@@ -75,8 +77,6 @@ public class Stage1IdentificationService {
      * three actually mean "the three best distinct products".
      */
     private static final int CPE_CANDIDATE_POOL = 40;
-    private static final int LIVE_NVD_LOOKUP_RESULTS_PER_PAGE = 20;
-    private static final int MAX_LIVE_NVD_QUERY_ATTEMPTS = 3;
     private static final BigDecimal CPE_MATCH_CONFIDENCE = new BigDecimal("0.6");
     /**
      * Hard cap on how many *extra* local-dictionary queries {@link #findByNameVariants} may issue
@@ -169,11 +169,6 @@ public class Stage1IdentificationService {
     private final CpeDictionaryRepository cpeDictionaryRepository;
     private final CpeNameVariantCache cpeNameVariantCache;
     private final IdentifiedProductRepository identifiedProductRepository;
-    // Only ever consulted here for getNvdApiKey (the live NVD CPE keyword-search fallback in
-    // liveNvdCpeLookupWithFallback) — closed-mode B2 removed the Claude key lookup entirely (see
-    // UserApiKeyService's own javadoc), so this field is now NVD-only.
-    private final UserApiKeyService userApiKeyService;
-    private final NvdCpeSyncService nvdCpeSyncService;
     // Closed-mode B2 (docs/spec/closed-mode-plan.md §9-2): no longer does anything but hand the
     // match back unchanged — see its own javadoc. Left wired in rather than removed outright, since
     // closed-mode backlog item 166 already flagged this class's own registry/AI seams for full
@@ -208,9 +203,10 @@ public class Stage1IdentificationService {
         Stage1RegistryIdentification.RegistryResolution registryResolution =
                 registryIdentification.resolveRegistryMatch(item, userId, item.getProductName(), item.getVersion());
         // A registry match already gives Stage2 vulnerability coverage via OSV/GHSA, so a missing
-        // local CPE cache entry isn't worth a ~6.5s (or ~0.7s with an NVD key) live NVD round trip
-        // here — NVD-via-CPE is a supplementary Stage2 source in that case, not the only signal.
-        // Coverage still wins when nothing else has already confirmed this product is real.
+        // local CPE cache entry isn't worth spending the (local-only, closed-mode backlog item 273)
+        // name-variant search on either — NVD-via-CPE is a supplementary Stage2 source in that
+        // case, not the only signal. Coverage still wins when nothing else has already confirmed
+        // this product is real.
         Optional<String> registryEcosystem = registryResolution.match().map(RegistryMatch::ecosystem);
         Optional<String> registryPackageName = registryResolution.match().map(RegistryMatch::packageName);
         CpeCandidateResult cpeCandidateResult = resolveCpeCandidates(item.getVendor(), item.getProductName(), userId,
@@ -534,11 +530,13 @@ public class Stage1IdentificationService {
      * Shared rescue path for both ways {@link #resolveCandidates} can decide a weak registry match
      * must not be trusted (the pre-existing AI-{@code matched=false} rejection, and REVISE item 3's
      * static no-AI-available rejection): the registry match being present is exactly what earlier
-     * made {@link #fuzzyMatchCpe} skip its live NVD CPE lookup (see that method's own {@code
-     * registryEcosystem} javadoc) — that assumption just broke. Retries now, forcing the live
-     * lookup, so a real product (e.g. "Redis" the server, rejected as the unrelated PyPI "redis"
-     * client) doesn't end up UNIDENTIFIED purely because the skip fired before the registry match
-     * was known to be bogus.
+     * made {@link #fuzzyMatchCpe} skip the name-variant search entirely (see that method's own
+     * {@code registryEcosystem} javadoc — closed-mode backlog item 273: this used to also skip a
+     * live NVD CPE lookup, since deleted) — that assumption just broke. Retries now, with {@code
+     * registryEcosystem} empty, so the name-variant search actually runs this time and a real
+     * product (e.g. "Redis" the server, rejected as the unrelated PyPI "redis" client) doesn't end
+     * up UNIDENTIFIED purely because the skip fired before the registry match was known to be
+     * bogus.
      *
      * <p>Best-effort: takes the first candidate without a further disambiguation round, except for
      * the same "never auto-accept a lone variant-derived candidate" rule the main selection path
@@ -765,14 +763,15 @@ public class Stage1IdentificationService {
 
     /**
      * Fuzzy-matches against the local {@code cpe_dictionary} mirror first (fast, free); if that
-     * mirror has nothing at all for this product — the common case for anything nobody has synced
-     * a keyword for yet — falls back to a single live, rate-limited NVD CPE API call so an unknown
-     * product can still be resolved instead of silently requiring a pre-sync, UNLESS
-     * {@code registryEcosystem} is present (a registry match already confirmed this product is real
-     * and already gives Stage2 vulnerability coverage via OSV/GHSA) — in that case the live round
-     * trip is skipped and this returns empty rather than spending ~6.5s (or ~0.7s with an NVD key)
-     * per item on a source that's merely supplementary here. Hits from the live call are upserted
-     * into the local dictionary, so this also warms the cache for next time.
+     * mirror has nothing at all for this product, falls back to the local-only name-variant search
+     * ({@link #findByNameVariants}) so a product whose exact name isn't already cataloged can still
+     * be resolved via a plausible variant, UNLESS {@code registryEcosystem} is present (a registry
+     * match already confirmed this product is real and already gives Stage2 vulnerability coverage
+     * via OSV/GHSA) — in that case this returns empty rather than spending effort on a source
+     * that's merely supplementary here. Closed-mode backlog item 273: this used to also try a live,
+     * rate-limited NVD CPE API call between the local literal search and the name-variant fallback
+     * (skipped by the same {@code registryEcosystem} check) — that live path has been physically
+     * deleted, not just disabled.
      *
      * <p>{@code registryEcosystem} doubles as the signal {@link #resolveCpeCandidates} needs for
      * the REVISE item 1/3 target_sw gate/ranking preference (empty when there's no registry match at
@@ -834,14 +833,14 @@ public class Stage1IdentificationService {
 
     /**
      * Generalized short-form&lt;-&gt;long-form candidate generation — a genuine last resort, tried
-     * by {@link #resolveCpeCandidates} only after *both* the literal pg_trgm+containment search and
-     * the live NVD fallback have already come back empty for this item (senior review, 2026-08-25:
-     * this used to run one step earlier, inside {@link #localCpeLookup} itself, whenever the literal
-     * search alone found nothing — which meant producing *a* candidate here, even a wrong one, was
-     * enough to make {@link #resolveCpeCandidates} think local matches existed and skip the live NVD
-     * fallback and Tier3 entirely, silently suppressing two strictly better fallback stages). Never
-     * runs in addition to an already-successful literal or live-NVD match, so the common case pays
-     * nothing extra. Confirmed live 2026-08-25 that plain trigram similarity misses this shape of
+     * by {@link #resolveCpeCandidates} only after the literal pg_trgm+containment search has already
+     * come back empty for this item (senior review, 2026-08-25: this used to run one step earlier,
+     * inside {@link #localCpeLookup} itself, whenever the literal search alone found nothing — which
+     * meant producing *a* candidate here, even a wrong one, was enough to make {@link
+     * #resolveCpeCandidates} think local matches existed and skip the live NVD fallback (since
+     * deleted, closed-mode backlog item 273) and Tier3 entirely, silently suppressing two strictly
+     * better fallback stages). Never runs in addition to an already-successful literal match, so the
+     * common case pays nothing extra. Confirmed live 2026-08-25 that plain trigram similarity misses this shape of
      * match in both directions no matter the query text tried ("VS Code", "Code" alone, and the full
      * expanded name all score under threshold against {@code visual_studio_code}), so this needs its
      * own retrieval strategy, not just a lower threshold.
@@ -855,10 +854,11 @@ public class Stage1IdentificationService {
      *       — a synthetic few-letter acronym has no word-boundary protection of its own, see that
      *       method's own javadoc.</li>
      *   <li><b>Vendor-prefix strip</b>: a product name that literally begins with the item's own
-     *       vendor field (e.g. "Broadcom Norton 360") retried on the remainder — the local-dictionary
-     *       counterpart of {@link #liveNvdCpeLookupWithFallback}'s "drop a word, retry" shape. Re-runs
-     *       the same trigram+containment pipeline the literal query already used, since a real vendor
-     *       -stripped remainder is a real (if partial) product name, not a synthetic string.</li>
+     *       vendor field (e.g. "Broadcom Norton 360") retried on the remainder — a "drop a word,
+     *       retry" shape, same idea the now-deleted live NVD keyword-search fallback used to apply
+     *       (closed-mode backlog item 273). Re-runs the same trigram+containment pipeline the
+     *       literal query already used, since a real vendor-stripped remainder is a real (if
+     *       partial) product name, not a synthetic string.</li>
      *   <li><b>Expansion</b> (abbreviation + word -&gt; long form): "VS Code" -&gt; the dictionary's
      *       own {@code visual_studio_code} ({@link #expandLeadingInitialism}) — fundamentally
      *       different from the other two since it can't be reduced to an alternate query string for
@@ -1158,8 +1158,9 @@ public class Stage1IdentificationService {
             // catalogue cpe:2.3:h:corsair:commander_pro alongside every software "commander"-named
             // product, and no text-matching heuristic anywhere else in this class can ever be a
             // legitimate reason to attach a hardware/OS CPE to a software inventory item. Filtered
-            // here, the one choke point every candidate-producing path (literal search, live NVD
-            // fallback, name-variant search) already funnels through via rankAndGate.
+            // here, the one choke point every candidate-producing path (literal search, name-variant
+            // search — the live NVD fallback that used to be a third such path was deleted, closed
+            // -mode backlog item 273) already funnels through via rankAndGate.
             if (isApplicationPart(entry)) {
                 // Candidates arrive in descending trigram-score order, so the first row seen for a
                 // vendor:product pair is already that product's best-scoring row.
@@ -1462,17 +1463,15 @@ public class Stage1IdentificationService {
     /**
      * The rest of {@link #fuzzyMatchCpe} once the local (literal-only) lookup's result is already in
      * hand (whether computed just now or, in {@link #identify}'s case, before the registry fan-out
-     * — see {@link #localCpeLookup}'s own javadoc) — decides whether a live NVD fallback is
-     * warranted at all, and only as a
-     * genuine last resort (after that live fallback has itself been attempted and failed) tries the
-     * name-variant search ({@link #findByNameVariants}).
+     * — see {@link #localCpeLookup}'s own javadoc) — decides whether the name-variant search ({@link
+     * #findByNameVariants}) is warranted as a local-only last resort.
      *
-     * <p>The variant search deliberately does NOT run any earlier than this: it used to live inside
-     * {@link #localCpeLookup} itself, firing whenever the literal search alone found nothing — which
-     * meant producing *a* candidate there, even a wrong one, made this method think local matches
-     * already existed, permanently skipping the live NVD fallback below and, via {@link #identify},
-     * Tier3 as well (both gated on "found literally nothing at all"). Trying it only after the live
-     * fallback has already come back empty preserves both of those strictly-better fallback stages.
+     * <p>Closed-mode backlog item 273 (B4): this used to also try a live, rate-limited NVD CPE
+     * keyword search between the local literal search and the name-variant fallback, retried with
+     * several word-dropped fallback queries — that live path has been physically deleted on this
+     * branch, not just disabled behind a flag, so this method now falls straight through to the
+     * name-variant search whenever the local literal search found nothing (and no registry match
+     * already covers the item — see the early return below).
      *
      * <p>REVISE item 1 (senior review, job 36 root-cause): every candidate list this method can
      * return is passed through {@link #rankAndGate}, which — on top of the existing ranking — hard
@@ -1502,47 +1501,20 @@ public class Stage1IdentificationService {
             return new CpeCandidateResult(gatedLocalMatches, localMatches.usedRelaxedPass(), localMatches.usedRelaxedPass());
         }
 
-        String query = cpeQuery(vendor, productName);
         if (registryEcosystem.isPresent()) {
-            log.info("Local CPE dictionary had no candidates for '{}' — skipping live NVD CPE lookup "
-                    + "since a registry match already covers this item", query);
+            log.info("Local CPE dictionary had no candidates for vendor='{}' productName='{}' — skipping "
+                    + "the name-variant search since a registry match already covers this item",
+                    vendor, productName);
             return new CpeCandidateResult(List.of(), false, false);
         }
 
-        Optional<String> nvdApiKey = userApiKeyService.getNvdApiKey(userId);
-        Optional<String> successfulQuery = liveNvdCpeLookupWithFallback(query, nvdApiKey);
-        if (successfulQuery.isEmpty()) {
-            // Genuine last resort: even the live, rate-limited NVD keyword search (already retried
-            // with several word-dropped fallback queries) found nothing at all for this product.
-            List<CpeDictionaryEntry> variantMatches =
-                    rankAndGate(vendor, findByNameVariants(vendor, productName), targetSwContext, itemVersion);
-            // Name-variant provenance, never relaxed-containment provenance — see
-            // CpeCandidateResult's own javadoc (REVISE item 1) for why this stays false here.
-            return new CpeCandidateResult(variantMatches, !variantMatches.isEmpty(), false);
-        }
-
-        // Re-query with whichever (possibly word-dropped) variant actually found results, not the
-        // original full query — observed live: a live sync for "GitKraken GitLens - Git
-        // supercharged" only succeeded after dropping "supercharged" down to "GitKraken GitLens -
-        // Git", but re-querying the local dictionary with the original, longer string diluted
-        // trigram similarity below both thresholds (0.276/0.286 vs. 0.3/0.6), silently discarding
-        // the very entries the live call had just upserted a moment earlier.
-        LocalCpeMatches refreshedLocal = localCpeLookup(vendor, productName, itemVersion);
-        List<CpeDictionaryEntry> refreshed = rankAndGate(vendor, refreshedLocal.candidates(), targetSwContext, itemVersion);
-        if (!refreshed.isEmpty()) {
-            return new CpeCandidateResult(refreshed, refreshedLocal.usedRelaxedPass(), refreshedLocal.usedRelaxedPass());
-        }
-        ContainmentResult liveContainment = plausibleContainmentOnly(vendor, productName,
-                cpeDictionaryRepository.findFuzzyMatches(successfulQuery.get(),
-                        CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL));
-        return new CpeCandidateResult(
-                rankAndGate(vendor, liveContainment.candidates(), targetSwContext, itemVersion),
-                liveContainment.usedRelaxedPass(),
-                liveContainment.usedRelaxedPass());
-    }
-
-    private String cpeQuery(String vendor, String productName) {
-        return vendor != null && !vendor.isBlank() ? vendor + " " + productName : productName;
+        // Genuine local-only last resort (closed-mode backlog item 273: no live NVD fallback to try
+        // first anymore).
+        List<CpeDictionaryEntry> variantMatches =
+                rankAndGate(vendor, findByNameVariants(vendor, productName), targetSwContext, itemVersion);
+        // Name-variant provenance, never relaxed-containment provenance — see CpeCandidateResult's
+        // own javadoc (REVISE item 1) for why this stays false here.
+        return new CpeCandidateResult(variantMatches, !variantMatches.isEmpty(), false);
     }
 
     /** Ranks {@code candidates} (see {@link #rankCpeCandidates}) and then applies the REVISE item 1
@@ -2043,32 +2015,4 @@ public class Stage1IdentificationService {
         return value == null ? "" : value.toLowerCase(java.util.Locale.ROOT).replace('_', ' ').replace("\\", "").trim();
     }
 
-    /**
-     * NVD's {@code keywordSearch} is a literal, all-words-must-roughly-match search, not a fuzzy
-     * one — confirmed live: {@code "Apache Log4j Core"} returns zero results while
-     * {@code "Apache Log4j"} (drop the trailing "Core") returns 162. A Tier3-resolved vendor+
-     * product string (e.g. "The Apache Software Foundation" + "Apache Log4j Core") very easily
-     * picks up qualifier words that don't appear in NVD's own terse CPE titles, silently losing a
-     * product NVD actually has cataloged — a real miss observed live for Log4j (CVE-2021-44228).
-     * Mitigates by retrying with trailing words dropped one at a time (bounded to a few extra
-     * rate-limited calls) until a query returns something or words run out.
-     */
-    private Optional<String> liveNvdCpeLookupWithFallback(String query, Optional<String> nvdApiKey) {
-        String[] words = query.trim().split("\\s+");
-        int wordsToTry = words.length;
-        int attempts = 0;
-
-        while (wordsToTry >= 1 && attempts < MAX_LIVE_NVD_QUERY_ATTEMPTS) {
-            String attempt = String.join(" ", Arrays.copyOfRange(words, 0, wordsToTry));
-            log.info("Querying NVD CPE API live for '{}' (apiKey={})", attempt, nvdApiKey.isPresent());
-            int upserted = nvdCpeSyncService.syncKeywordSinglePage(attempt, LIVE_NVD_LOOKUP_RESULTS_PER_PAGE, nvdApiKey);
-            log.info("Live NVD CPE lookup for '{}' upserted {} dictionary entries", attempt, upserted);
-            if (upserted > 0) {
-                return Optional.of(attempt);
-            }
-            wordsToTry--;
-            attempts++;
-        }
-        return Optional.empty();
-    }
 }
