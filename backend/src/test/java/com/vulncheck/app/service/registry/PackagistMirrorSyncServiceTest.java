@@ -111,4 +111,60 @@ class PackagistMirrorSyncServiceTest {
         Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("packagist"), batchCaptor.capture());
         assertThat(batchCaptor.getValue()).isEmpty();
     }
+
+    @Test
+    void rejectsATraversalShapedVendorSegmentWithoutAnyHttpCallAndCountsItAsUnresolved() {
+        // Closed-mode backlog item 184: contains exactly one "/" (so it passes syncPackages' own
+        // coarse precheck above) but the vendor side is a ".." traversal segment.
+        SyncOutcome outcome = service.syncPackages(List.of("../monolog"));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("packagist"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
+
+    @Test
+    void rejectsAPackageNameWithMoreThanOneSlashWithoutAnyHttpCallAndCountsItAsUnresolved() {
+        SyncOutcome outcome = service.syncPackages(List.of("monolog/monolog/extra"));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("packagist"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
+
+    @Test
+    void rejectsAPackageNameWithDisallowedCharactersWithoutAnyHttpCallAndCountsItAsUnresolved() {
+        SyncOutcome outcome = service.syncPackages(List.of("mono$log/monolog"));
+
+        assertThat(outcome.synced()).isEqualTo(0);
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        server.verify();
+        ArgumentCaptor<Map<String, List<String>>> batchCaptor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(registryPackageMirrorRepository).upsertBatch(Mockito.eq("packagist"), batchCaptor.capture());
+        assertThat(batchCaptor.getValue()).isEmpty();
+    }
+
+    @Test
+    void neverConsumesARateLimitSlotForAnInvalidPackageName() {
+        // Closed-mode backlog item 184 REVISE: the name-grammar check must run before
+        // rateLimiter.awaitTurn, not just before the HTTP call -- otherwise a name that's going to
+        // be rejected anyway still delays the next name in the batch by Packagist's ~500ms pacing.
+        ExternalRegistryRateLimiter mockRateLimiter = Mockito.mock(ExternalRegistryRateLimiter.class);
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer mockServer = MockRestServiceServer.bindTo(builder).build();
+        PackagistMirrorSyncService serviceWithMockedLimiter = new PackagistMirrorSyncService(
+                builder.build(), mockRateLimiter, registryPackageMirrorRepository);
+
+        SyncOutcome outcome = serviceWithMockedLimiter.syncPackages(List.of("../monolog"));
+
+        assertThat(outcome.unresolved()).isEqualTo(1);
+        mockServer.verify();
+        Mockito.verify(mockRateLimiter, Mockito.never()).awaitTurn(Mockito.anyString());
+    }
 }

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>NVD CVEミラー同期 - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>NVD CVEミラー同期</h1>
+
+<p>
+    NVD CVE API（services.nvd.nist.gov）を日付ウィンドウ単位でローカルの nvd_cve_records /
+    nvd_cve_cpe_match へミラーします。既定では無効（app.nvd-cve-backfill.enabled）です。
+    全件バックフィルは数時間規模の処理を複数回の実行に分けて完了する設計のため、下のボタンは
+    「予算（リクエスト数・時間）を使い切るまでの1回分」を実行し、すぐに応答を返します。
+</p>
+
+<p th:if="${result}" th:text="${result}" style="color: green;"></p>
+
+<h2>同期状態</h2>
+<div th:if="${syncState}">
+    <p>baseline完了: <span th:text="${syncState.baselineCompleted}"></span></p>
+    <p>baseline開始日時: <span th:text="${syncState.baselineStartedAt} ?: '未開始'"></span></p>
+    <p>直近の差分同期日時: <span th:text="${syncState.lastDeltaSyncedAt} ?: '未実施'"></span></p>
+</div>
+<div th:unless="${syncState}">
+    <p>同期状態が見つかりません。</p>
+</div>
+
+<h2>同期を1回実行</h2>
+<p style="color: #b00;">
+    既に同期が実行中の場合は、このボタンを押しても新たな同期は開始されません（二重起動防止）。
+</p>
+<form th:action="@{/admin/nvd-cve/sync-now}" method="post">
+    <button type="submit">同期を開始</button>
+</form>
+
+<p><a th:href="@{/}">ホームに戻る</a></p>
+</body>
+</html>

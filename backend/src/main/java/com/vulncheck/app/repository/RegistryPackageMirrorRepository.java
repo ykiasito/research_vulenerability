@@ -1,7 +1,9 @@
 package com.vulncheck.app.repository;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * CRUD surface for the {@code registry_package_mirror} table (closed-mode backlog item 176 pilot).
@@ -49,4 +51,14 @@ public interface RegistryPackageMirrorRepository {
      * separate delta/changelog endpoint on the crates.io sparse index to consume instead.
      */
     void upsertBatch(String ecosystem, Map<String, List<String>> versionsByNormalizedPackageName);
+
+    /**
+     * Normalized package names for this ecosystem whose {@code last_synced_at} is at or after
+     * {@code cutoff} -- used by {@link com.vulncheck.app.service.registry.RegistryMirrorSyncService}
+     * (closed-mode backlog item 186) to skip re-fetching a name this ecosystem's mirror already
+     * refreshed recently, rather than unconditionally re-syncing every observed name on every run.
+     * A name absent from {@code registry_package_mirror} entirely (never synced) is never in the
+     * returned set, regardless of {@code cutoff} -- there is no {@code last_synced_at} to compare.
+     */
+    Set<String> findFreshlySyncedNormalizedPackageNames(String ecosystem, Instant cutoff);
 }

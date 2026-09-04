@@ -1,5 +1,6 @@
 package com.vulncheck.app.service.nvd;
 
+import com.vulncheck.app.service.vuln.VersionUtils;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -137,6 +138,72 @@ public final class CpeUtils {
             parts.set(6, "*");
         }
         return String.join(":", parts);
+    }
+
+    /**
+     * Extracts just the version segment (index 5) from a CPE 2.3 string, defaulting to {@code "*"}
+     * ("any version" -- CPE 2.3's own wildcard) when the string is too short to carry one. Same
+     * escape-aware splitting as every other accessor here.
+     *
+     * <p>Closed-mode backlog item 251 (B4, senior-reviewer REVISE item 10): moved here from {@code
+     * NvdMirrorAbVerificationRunner}'s disposable A/B verification harness (which duplicated its
+     * own escape-aware splitter rather than depending on production code — see that class's own
+     * javadoc for why) once the harness's GATE PASSED conclusion made this parsing logic a real
+     * production dependency (production {@code NvdVulnerabilitySource} needs the exact same
+     * criteria-version extraction the harness used to compute the numbers senior-reviewer signed off
+     * on) — the harness now delegates here instead of keeping an independent copy, per backlog item
+     * 254's lesson about the same CPE-parsing bug being rediscovered three separate times across
+     * independently-maintained copies.
+     */
+    public static String parseVersion(String cpeString) {
+        if (cpeString == null) {
+            return "*";
+        }
+        List<String> parts = splitCpeSegments(cpeString);
+        return parts.size() > 5 ? parts.get(5) : "*";
+    }
+
+    /**
+     * One {@code cpeMatch} entry's version applicability against {@code itemVersion} — mirrors NVD's
+     * own documented semantics: if the match's own {@code criteriaVersion} (see {@link
+     * #parseVersion}) carries a concrete (non-{@code *}) version segment, that's an exact-version
+     * match with no range fields to consult; a {@code *} version defers to the four range bound
+     * arguments (all-null means unconditionally vulnerable at every version).
+     *
+     * <p>A {@code -} version segment is CPE 2.3's own "not applicable" marker, not a synonym for
+     * {@code *} ("any version") — this deliberately never matches on a bare {@code -} (fail-closed)
+     * rather than guessing at whatever paired AND-node condition a flattened, node-less table like
+     * {@code nvd_cve_cpe_match} has no column to represent. See {@code NvdMirrorAbVerificationRunner}
+     * class javadoc's "Known modeling gap" note (closed-mode backlog item 202) for the schema
+     * limitation this defends against, and item 251 REVISE item 10 for why this predicate now lives
+     * here instead of being duplicated between that disposable test harness and production {@code
+     * NvdVulnerabilitySource}.
+     *
+     * @return whether {@code itemVersion} falls within the range/exact-match this one {@code
+     *         cpeMatch} entry describes — see {@link VersionUtils#compare} for the numeric-aware
+     *         comparator the range checks below are built on.
+     */
+    public static boolean versionInRange(String itemVersion, String criteriaVersion, String startIncluding,
+            String startExcluding, String endIncluding, String endExcluding) {
+        if ("-".equals(criteriaVersion)) {
+            return false;
+        }
+        if (!"*".equals(criteriaVersion)) {
+            return criteriaVersion.equalsIgnoreCase(itemVersion);
+        }
+        if (startIncluding != null && VersionUtils.compare(itemVersion, startIncluding) < 0) {
+            return false;
+        }
+        if (startExcluding != null && VersionUtils.compare(itemVersion, startExcluding) <= 0) {
+            return false;
+        }
+        if (endIncluding != null && VersionUtils.compare(itemVersion, endIncluding) > 0) {
+            return false;
+        }
+        if (endExcluding != null && VersionUtils.compare(itemVersion, endExcluding) >= 0) {
+            return false;
+        }
+        return true;
     }
 
     public record VendorProduct(String vendor, String product) {

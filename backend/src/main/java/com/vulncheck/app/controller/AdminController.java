@@ -4,11 +4,13 @@ import com.vulncheck.app.entity.User;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
+import com.vulncheck.app.repository.NvdCveSyncStateRepository;
 import com.vulncheck.app.repository.OsvSyncFailureRepository;
 import com.vulncheck.app.repository.OsvSyncStateRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.NvdCpeSyncService;
 import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
+import com.vulncheck.app.service.NvdCveSyncService;
 import com.vulncheck.app.service.UserApiKeyService;
 import com.vulncheck.app.service.csaf.RedHatCsafSyncService;
 import com.vulncheck.app.service.csaf.SiemensCsafSyncService;
@@ -17,11 +19,13 @@ import com.vulncheck.app.service.cveorg.CveOrgSyncService;
 import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.osv.OsvSyncService;
 import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Controller;
@@ -32,8 +36,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 
 /**
  * Minimal operational screen for populating the local CPE Dictionary, CVE.org, CSAF vendor
- * advisory, and GHSA mirrors (see {@link NvdCpeSyncService}, {@link CveOrgSyncService}, {@link
- * SiemensCsafSyncService}, {@link RedHatCsafSyncService}, {@link GhsaSyncService}). Restricted to
+ * advisory, GHSA, registry, and NVD CVE mirrors (see {@link NvdCpeSyncService}, {@link
+ * CveOrgSyncService}, {@link SiemensCsafSyncService}, {@link RedHatCsafSyncService}, {@link
+ * GhsaSyncService}, {@link RegistryMirrorSyncService}, {@link NvdCveSyncService}). Restricted to
  * {@code ROLE_ADMIN} — see {@code
  * SecurityConfig} (route-level) and {@code AppUserDetailsService} (grants the role to the single
  * account named by the {@code ADMIN_EMAIL} env var, nobody by default).
@@ -57,6 +62,14 @@ public class AdminController {
     private final OsvSyncStateRepository osvSyncStateRepository;
     private final OsvSyncFailureRepository osvSyncFailureRepository;
     private final RegistryMirrorSyncService registryMirrorSyncService;
+    private final NvdCveSyncService nvdCveSyncService;
+    private final NvdCveSyncStateRepository nvdCveSyncStateRepository;
+
+    @Value("${app.nvd-cve-backfill.max-requests-per-run:60}")
+    private int nvdCveBackfillMaxRequestsPerRun;
+
+    @Value("${app.nvd-cve-backfill.max-duration-minutes:60}")
+    private int nvdCveBackfillMaxDurationMinutes;
 
     @GetMapping("/admin/cpe-dictionary")
     public String form() {
@@ -327,7 +340,7 @@ public class AdminController {
                 RegistryMirrorSyncService.SyncOutcome outcome = registryMirrorSyncService.syncAllAndRelease();
                 long minutes = (System.currentTimeMillis() - startedAt) / 60000;
                 log.warn("Registry mirror sync (admin-triggered) finished in {} minutes: {} synced, {} unresolved, "
-                        + "observed name counts: {}", minutes, outcome.totalSynced(), outcome.totalUnresolved(),
+                        + "candidate name counts (after freshness filter): {}", minutes, outcome.totalSynced(), outcome.totalUnresolved(),
                         outcome.observedNameCountByEcosystem());
             } catch (Exception e) {
                 log.error("Registry mirror sync (admin-triggered) aborted", e);
@@ -366,5 +379,72 @@ public class AdminController {
             model.addAttribute("result", "エコシステムの指定が不正です: " + ecosystem);
         }
         return "admin/registry-mirror";
+    }
+
+    @GetMapping("/admin/nvd-cve")
+    public String nvdCveForm(Model model) {
+        model.addAttribute("syncState", nvdCveSyncStateRepository.findById((short) 1).orElse(null));
+        return "admin/nvd-cve";
+    }
+
+    /**
+     * Starts one budgeted backfill tick (see {@link NvdCveSyncService}) on its own daemon thread and
+     * returns immediately — same shape as {@link #cpeFullSync}/{@link #registryMirrorFullSync}.
+     * Shares {@link NvdCveSyncService#tryBeginRun}'s guard with {@code
+     * NvdCveBackfillScheduledRunner}, so a second click (or a click racing the scheduled tick)
+     * while one is already running doesn't start a competing run against the same NVD rate limit
+     * and the same chunk table. Once the baseline finishes (may take several clicks/ticks — see
+     * {@link NvdCveSyncService}'s class javadoc), this becomes a fast no-op.
+     */
+    @PostMapping("/admin/nvd-cve/sync-now")
+    public String nvdCveSyncNow(Model model) {
+        if (!nvdCveSyncService.tryBeginRun()) {
+            model.addAttribute("result", "同期を開始できませんでした: 別の同期が既に実行中です。");
+            return "admin/nvd-cve";
+        }
+
+        try {
+            startNvdCveBackfillWorker();
+        } catch (Throwable t) {
+            // Same rationale as cpeFullSync's equivalent catch block (task-backlog items
+            // 81/136/141 lineage) — see that method's javadoc.
+            nvdCveSyncService.releaseRunGuard();
+            log.error("NVD CVE backfill tick (admin-triggered) failed to start — run guard released", t);
+            model.addAttribute("result", "同期の開始に失敗しました。バックエンドのログを確認してください。");
+            return "admin/nvd-cve";
+        }
+
+        model.addAttribute("result", "同期を開始しました。バックエンドのログで進捗を確認してください。");
+        return "admin/nvd-cve";
+    }
+
+    /**
+     * Spawns and starts the worker thread that runs one budgeted backfill tick. Package-private
+     * (rather than inlined in {@link #nvdCveSyncNow}) so a unit test can force this step to fail —
+     * same rationale as {@link #startFullSyncWorker}.
+     */
+    void startNvdCveBackfillWorker() {
+        Thread worker = new Thread(() -> {
+            log.warn("NVD CVE backfill tick starting (admin-triggered)");
+            long startedAt = System.currentTimeMillis();
+            NvdCveSyncService.RunBudget budget = new NvdCveSyncService.RunBudget(
+                    nvdCveBackfillMaxRequestsPerRun, Duration.ofMinutes(nvdCveBackfillMaxDurationMinutes));
+            try {
+                NvdCveSyncService.SyncOutcome outcome = nvdCveSyncService.runBackfillTickAndRelease(
+                        Optional.empty(), budget);
+                long seconds = (System.currentTimeMillis() - startedAt) / 1000;
+                if (outcome.completed()) {
+                    log.warn("NVD CVE backfill tick (admin-triggered) finished the baseline: {} records upserted "
+                            + "this tick, {} seconds", outcome.upserted(), seconds);
+                } else {
+                    log.info("NVD CVE backfill tick (admin-triggered) finished this tick's budget (baseline not "
+                            + "yet complete): {} records upserted, {} seconds", outcome.upserted(), seconds);
+                }
+            } catch (Exception e) {
+                log.error("NVD CVE backfill tick (admin-triggered) aborted", e);
+            }
+        }, "nvd-cve-backfill-admin");
+        worker.setDaemon(true);
+        worker.start();
     }
 }

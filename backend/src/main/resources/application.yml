@@ -10,13 +10,32 @@ spring:
     password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: org.postgresql.Driver
     hikari:
-      # Previously unset (Spring Boot/HikariCP's own default, 10) — pinned explicitly and
-      # externalized (item 167, 2026-09-01, docs/spec/closed-mode-plan.md §3-3 A4/§7 P2) so a
-      # closed-mode deployment can raise it once DB connection contention (rather than external
-      # network waits) becomes the item-processing bottleneck. Default value unchanged for now;
-      # keep this comfortably ahead of app.item-processing-pool-size plus any concurrently-running
-      # sync workers and the web layer's own connection needs.
-      maximum-pool-size: ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:10}
+      # Previously unset (Spring Boot/HikariCP's own default, 10), then pinned explicitly at that
+      # same value (item 167, 2026-09-01, docs/spec/closed-mode-plan.md §3-3 A4/§7 P2). Raised to 20
+      # (item 198, 2026-09-03, §7 P2's recommended initial value): closed-mode's Stage1 trigram
+      # search + Stage2's 4 local mirror sources keep an item-processing thread in near-constant DB
+      # contention instead of blocked on external network I/O, so at the old maximum-pool-size=10
+      # only ~2 connections were left for a concurrently-running sync worker plus the web layer. A
+      # live connections.acquire p95 measurement against the real dev DB
+      # (HikariPoolAcquireP95Measurement: static 1,000-item job + one concurrent
+      # RegistryMirrorSyncService#syncAllAndRelease run) is still pending as of this change — see
+      # that class's own javadoc for the intended method; re-run it (by hand, per its own
+      # instructions) to confirm 20 is enough headroom before relying on this value, and before
+      # raising item-processing-pool-size itself (§7 P4) or adding another always-on sync-style
+      # consumer. Keep this comfortably ahead of app.item-processing-pool-size plus any
+      # concurrently-running sync workers and the web layer's own connection needs.
+      #
+      # Registry mirror sync (closed-mode backlog item 186, RegistryMirrorSyncService) runs up to 9
+      # ecosystem workers concurrently on AsyncConfig#registryMirrorSyncExecutor, but this is
+      # deliberately NOT counted the same way as app.item-processing-pool-size above (senior review,
+      # PR #145 REVISE): unlike item processing, a sync worker's per-name work is almost entirely
+      # rate-limited HTTP calls to an external registry (ExternalRegistryRateLimiter#awaitTurn),
+      # made without holding any DB connection at all — each *MirrorSyncService#syncPackages/
+      # #syncModules only borrows a connection once per chunk, for a single batch upsert after the
+      # whole chunk's HTTP round trips are already done (see RegistryMirrorSyncService's class
+      # javadoc). So the 9 workers' actual DB usage is a handful of short, staggered upsert bursts,
+      # not 9 connections held for the sync's full (HTTP-bound) duration.
+      maximum-pool-size: ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:20}
 
   jpa:
     hibernate:
@@ -75,6 +94,10 @@ app:
   # PubRegistryClient between a live HTTP call and their local registry_package_mirror table are gone --
   # every one of those clients now always answers from the mirror unconditionally (see each client's own
   # javadoc), so the flag has nothing left to gate.
+  # NvdVulnerabilitySource's closed-mode.nvd-mirror-enabled flag (introduced on master by backlog item
+  # 251) is likewise absent here: closed-mode backlog item 264 (B4) physically removes the live NVD CVE
+  # API path this branch, so the mirror-backed lookup added by V39/NvdCveSyncService is the only path
+  # left and there is nothing left for a flag to gate — see NvdVulnerabilitySource's own javadoc.
   # high-confidence-verification config intentionally omitted here (closed-mode B2,
   # docs/spec/closed-mode-plan.md §9-2): HighConfidenceVerificationService is stubbed to an
   # unconditional no-op in this branch, with no enabled/threshold/downgrade-factor/cost-cap to
@@ -105,6 +128,33 @@ app:
   # a positive (>= 1) value — 0 or negative falls back to RegistryMirrorSyncService's own
   # DEFAULT_CHUNK_SIZE (200), logging a warning, rather than hanging/throwing (PR #122 REVISE).
   registry-mirror-sync-chunk-size: ${REGISTRY_MIRROR_SYNC_CHUNK_SIZE:200}
+  # How many days a seed name's registry_package_mirror.last_synced_at can be old and still be
+  # skipped by RegistryMirrorSyncService (closed-mode backlog item 186) instead of being re-synced
+  # this run — bounds cost so a weekly full sync doesn't unconditionally re-fetch every observed
+  # name every week. See RegistryMirrorSyncService#freshnessDays' own javadoc. 0 or negative
+  # disables the filter entirely (every observed name is always re-synced); a name never synced
+  # before is never excluded by this, regardless of the value set here.
+  registry-mirror-sync-freshness-days: ${REGISTRY_MIRROR_SYNC_FRESHNESS_DAYS:7}
+  # NVD CVE API bulk mirror (closed-mode backlog item 202, docs/spec/closed-mode-plan.md §4-2):
+  # nvd_cve_records/nvd_cve_cpe_match, populated by NvdCveSyncService via
+  # NvdCveBackfillScheduledRunner (daily, self-terminating once baseline_completed) or the manual
+  # /admin/nvd-cve kick. Off by default -- required, not optional: the estimated ~2-3GB storage
+  # impact (§4-2-6) is on top of this app's existing 15GB DB size hard cap, so growing this mirror
+  # must be a deliberate per-environment opt-in, same convention as every other *-mirror-enabled/
+  # *-scheduled-resync-enabled flag above.
+  nvd-cve-backfill:
+    enabled: ${NVD_CVE_BACKFILL_ENABLED:false}
+    # 06:00 UTC daily by default -- see NvdCveBackfillScheduledRunner#runBackfillTick's javadoc for
+    # why this slot was chosen relative to every other sync job (in particular, why it must not
+    # collide with the CPE dictionary's Sunday 01:30 UTC weekly resync -- both share the same
+    # process-wide NvdRateLimiter).
+    cron: ${NVD_CVE_BACKFILL_CRON:0 0 6 * * *}
+    # Per-run budget, counted in fetch *attempts* (not successes -- see NvdCveSyncService's class
+    # javadoc for why) so a chunk stuck retrying a persistent error can't consume unlimited
+    # wall-clock time within one run. At these defaults, a full ~245-300 request backfill
+    # (docs/spec/closed-mode-plan.md §4-2-3) finishes in roughly 4-5 daily runs.
+    max-requests-per-run: ${NVD_CVE_BACKFILL_MAX_REQUESTS_PER_RUN:60}
+    max-duration-minutes: ${NVD_CVE_BACKFILL_MAX_DURATION_MINUTES:60}
 
 server:
   port: 8080

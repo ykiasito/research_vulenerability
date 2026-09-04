@@ -95,6 +95,19 @@ public class PackagistMirrorSyncService {
                 unresolved++;
                 continue;
             }
+            // Closed-mode backlog item 184 REVISE: reject a package name outside Packagist's own
+            // vendor/package naming grammar before rateLimiter.awaitTurn below, so a name that's
+            // going to be rejected anyway never consumes a rate-limit slot at the expense of
+            // delaying the next (possibly valid) name in the batch. See
+            // RegistryMirrorPackageNameValidator's class javadoc for why this check is needed even
+            // though this method's caller already sits behind RegistryMirrorSyncService
+            // #isValidSeedName's wider, upload-time gate.
+            if (!RegistryMirrorPackageNameValidator.isValidVendorSlashPackageName(packageName)) {
+                log.warn("Packagist mirror sync rejected package name as invalid for URL assembly: "
+                        + "package={}", packageName);
+                unresolved++;
+                continue;
+            }
             rateLimiter.awaitTurn(ECOSYSTEM);
             Optional<List<String>> versions = fetchVersions(packageName);
             if (versions.isEmpty()) {
@@ -117,6 +130,8 @@ public class PackagistMirrorSyncService {
      *  out names with no "/" (see {@link #syncPackages}) -- this method assumes one is present. */
     private Optional<List<String>> fetchVersions(String packageName) {
         try {
+            // packageName is already validated by RegistryMirrorPackageNameValidator in
+            // syncPackages (closed-mode backlog item 184 REVISE), before this method is ever called.
             // Same UriComponentsBuilder.path(...) technique (not a {name} URI template
             // substitution) as CratesIoMirrorSyncService#fetchVersions uses, and for the identical
             // reason: a single {placeholder} substitution percent-encodes the "/" inside

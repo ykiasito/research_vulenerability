@@ -3,9 +3,13 @@ package com.vulncheck.app.repository;
 import java.sql.Array;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
@@ -57,9 +61,9 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
 
     private final JdbcTemplate jdbcTemplate;
 
-    // ConcurrentHashMap, not a Spring-cache abstraction: same reasoning as RegistryLookupCache /
-    // NvdResponseCache in service.registry / service.vuln -- a handful of ecosystem keys, read by up
-    // to itemProcessingExecutor's 8 parallel threads, doesn't need anything heavier.
+    // ConcurrentHashMap, not a Spring-cache abstraction: same reasoning as RegistryLookupCache in
+    // service.registry -- a handful of ecosystem keys, read by up to itemProcessingExecutor's 8
+    // parallel threads, doesn't need anything heavier.
     private final Map<String, HasAnyEntriesCacheEntry> hasAnyEntriesCache = new ConcurrentHashMap<>();
 
     @Override
@@ -151,6 +155,15 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
         // hook for it.)
         hasAnyEntriesCache.put(ecosystem,
                 new HasAnyEntriesCacheEntry(System.currentTimeMillis() + HAS_ANY_ENTRIES_CACHE_TTL_MILLIS));
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Set<String> findFreshlySyncedNormalizedPackageNames(String ecosystem, Instant cutoff) {
+        List<String> names = jdbcTemplate.queryForList(
+                "SELECT package_name FROM registry_package_mirror WHERE ecosystem = ? AND last_synced_at >= ?",
+                String.class, ecosystem, Timestamp.from(cutoff));
+        return new HashSet<>(names);
     }
 
     private List<String> toStringList(Array sqlArray) throws SQLException {

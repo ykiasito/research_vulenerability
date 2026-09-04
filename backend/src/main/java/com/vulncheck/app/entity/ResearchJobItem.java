@@ -82,6 +82,20 @@ public class ResearchJobItem {
      *  result. */
     public static final String INCOMPLETE_REASON_SOURCES_FAILED = "SOURCES_FAILED";
 
+    /** Set when {@code NvdVulnerabilitySource}'s mirror-backed lookup (closed-mode backlog item 251,
+     *  B4) genuinely found more distinct CVEs applicable to this item than its own write-safety cap
+     *  allows persisting (see that class's {@code MAX_FINDINGS_PER_ITEM} javadoc) -- the CVSS-ranked
+     *  top slice was written, but some lower-priority findings were deliberately not persisted at
+     *  all, not merely hidden by the display cap (see {@link #INCOMPLETE_REASON_SOURCES_FAILED}'s
+     *  distinction from a genuine zero-findings result for the same "don't render this identically
+     *  to a fully-verified result" rationale). Distinct from every other {@code INCOMPLETE_REASON_*}
+     *  here: this item DID get real findings, some of them just didn't make the cut, so this is not
+     *  reported as "nothing was checked". Only the write-time truncation sets this -- the read-time
+     *  display cap (top 10 in the HTML detail view / top 200 in the CSV export, see {@code
+     *  JobItemVulnerabilityRepository}) never touches this field, since every persisted row is still
+     *  reachable, just not all rendered in one place. */
+    public static final String INCOMPLETE_REASON_FINDINGS_TRUNCATED = "FINDINGS_TRUNCATED";
+
     /** Set when Stage2 genuinely found zero (every source that ran succeeded) but Stage4's AI
      *  web-search fallback was deliberately skipped because this item's {@link IdentifiedProduct
      *  #getConfidence()} was at/below {@code ResearchJobProcessingService#STAGE4_MIN_IDENTIFICATION_CONFIDENCE}
@@ -129,7 +143,8 @@ public class ResearchJobItem {
 
     /** Reason this item's vulnerability research isn't fully verified, or {@code null} when it is
      *  (a genuine zero-findings result with no verification gap, or an item that hasn't reached
-     *  Stage2 yet). See {@link #INCOMPLETE_REASON_SOURCES_FAILED}, {@link #INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK},
+     *  Stage2 yet). See {@link #INCOMPLETE_REASON_SOURCES_FAILED}, {@link #INCOMPLETE_REASON_FINDINGS_TRUNCATED},
+     *  {@link #INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK},
      *  {@link #INCOMPLETE_REASON_AI_NOT_AVAILABLE}, {@link #INCOMPLETE_REASON_BUDGET_EXHAUSTED} and
      *  {@link #INCOMPLETE_REASON_AI_CALL_FAILED} for the distinct causes this can hold. Left set once set
      *  until this item is reprocessed (there is
@@ -139,6 +154,20 @@ public class ResearchJobItem {
      *  indistinguishable-from-clean result — see V12's migration comment. */
     @Column(name = "research_incomplete_reason")
     private String researchIncompleteReason;
+
+    /** Highest recommended-upgrade version across this item's own Stage2 findings (V40, closed-mode
+     *  backlog item 251 REVISE item 5) -- computed once by {@code
+     *  Stage2VulnerabilityResearchService#research} from its own in-memory, pre-persistence {@code
+     *  VulnFinding} union (NVD/OSV/GHSA/CVE.org, never CSAF or bundled-component findings — see that
+     *  method's javadoc for why those two are excluded structurally rather than via an explicit
+     *  filter). {@code null} when Stage2 hasn't run yet or none of its findings carry a fixedVersion.
+     *  Replaces the old {@code JobController#highestFixedVersion}, which re-derived this at render
+     *  time from the persisted, globally-shared {@code vulnerabilities.fixed_version} column (a
+     *  cross-item contamination risk this field's compute-once-from-this-item's-own-findings
+     *  approach avoids) and would have needed to scan every one of an item's findings even after the
+     *  read-side display cap (backlog items 245/251) capped what {@code JobController} loads. */
+    @Column(name = "max_fixed_version")
+    private String maxFixedVersion;
 
     /** Convenience view of {@link #researchIncompleteReason}: {@code true} whenever this item's
      *  vulnerability research isn't fully verified, regardless of which specific reason. */

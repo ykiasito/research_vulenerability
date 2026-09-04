@@ -9,7 +9,6 @@ import com.vulncheck.app.repository.ResearchJobRepository;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.GhsaRateLimiter;
-import com.vulncheck.app.service.vuln.OsvRateLimiter;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -124,7 +123,6 @@ public class ResearchJobProcessingService {
     private final NvdRateLimiter nvdRateLimiter;
     private final ExternalRegistryRateLimiter externalRegistryRateLimiter;
     private final GhsaRateLimiter ghsaRateLimiter;
-    private final OsvRateLimiter osvRateLimiter;
 
     @Qualifier("itemProcessingExecutor")
     private final Executor itemProcessingExecutor;
@@ -161,7 +159,6 @@ public class ResearchJobProcessingService {
         JobTimings timings = new JobTimings();
         long nvdWaitBaselineMs = nvdRateLimiter.cumulativeWaitMillis();
         long ghsaWaitBaselineMs = ghsaRateLimiter.cumulativeWaitMillis();
-        long osvWaitBaselineMs = osvRateLimiter.cumulativeWaitMillis();
         Map<String, Long> registryWaitBaseline = externalRegistryRateLimiter.cumulativeWaitMillisByEcosystem();
         try {
             // Items within this one job are processed concurrently (bounded by
@@ -205,7 +202,7 @@ public class ResearchJobProcessingService {
         }
 
         logJobTimings(jobId, items.size(), jobStartNanos, timings, nvdWaitBaselineMs, ghsaWaitBaselineMs,
-                osvWaitBaselineMs, registryWaitBaseline);
+                registryWaitBaseline);
 
         job.setStatus(ResearchJob.STATUS_COMPLETED);
         job.setCompletedAt(OffsetDateTime.now());
@@ -262,14 +259,17 @@ public class ResearchJobProcessingService {
      * wait counters across this job's processing window (not perfectly attributable if another job
      * ran concurrently and used the same limiter, but good enough for the debugging/validation pass
      * this exists for — see {@code NvdRateLimiter}/{@code ExternalRegistryRateLimiter}/{@code
-     * GhsaRateLimiter}/{@code OsvRateLimiter}'s own {@code cumulativeWait*} javadocs).
+     * GhsaRateLimiter}'s own {@code cumulativeWait*} javadocs). No {@code osv} entry any more
+     * (closed-mode backlog item 264, B4): {@code OsvRateLimiter} existed solely to pace {@code
+     * OsvLiveQueryClient}'s live {@code api.osv.dev} calls, both now physically deleted — Stage2's
+     * own {@code find()} has read the local OSV mirror only since before this branch existed.
      */
     private void logJobTimings(Long jobId, int itemCount, long jobStartNanos, JobTimings timings,
-            long nvdWaitBaselineMs, long ghsaWaitBaselineMs, long osvWaitBaselineMs,
+            long nvdWaitBaselineMs, long ghsaWaitBaselineMs,
             Map<String, Long> registryWaitBaseline) {
         long wallMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - jobStartNanos);
         log.info("Job {} timings: items={} wallMs={} stage1SumMs={} stage2SumMs={} stage4SumMs={} bundledComponentSumMs={} "
-                        + "rateLimiterWaitDeltaMs=[nvd={} ghsa={} osv={} registry={}]",
+                        + "rateLimiterWaitDeltaMs=[nvd={} ghsa={} registry={}]",
                 jobId, itemCount, wallMs,
                 TimeUnit.NANOSECONDS.toMillis(timings.stage1Nanos.get()),
                 TimeUnit.NANOSECONDS.toMillis(timings.stage2Nanos.get()),
@@ -277,7 +277,6 @@ public class ResearchJobProcessingService {
                 TimeUnit.NANOSECONDS.toMillis(timings.bundledComponentNanos.get()),
                 nvdRateLimiter.cumulativeWaitMillis() - nvdWaitBaselineMs,
                 ghsaRateLimiter.cumulativeWaitMillis() - ghsaWaitBaselineMs,
-                osvRateLimiter.cumulativeWaitMillis() - osvWaitBaselineMs,
                 waitDelta(registryWaitBaseline, externalRegistryRateLimiter.cumulativeWaitMillisByEcosystem()));
     }
 
@@ -370,7 +369,8 @@ public class ResearchJobProcessingService {
         // is already caught inside it, so this would mean an unexpected bug there), that's the
         // same "we don't actually have a signal" situation as every individual source failing —
         // see the firing condition below.
-        Stage2VulnerabilityResearchService.Stage2Result stage2Result = new Stage2VulnerabilityResearchService.Stage2Result(0, false);
+        Stage2VulnerabilityResearchService.Stage2Result stage2Result =
+                new Stage2VulnerabilityResearchService.Stage2Result(0, false, false);
         long stage2Start = System.nanoTime();
         try {
             stage2Result = stage2VulnerabilityResearchService.research(item, identifiedProduct.get(), userId);
@@ -387,8 +387,21 @@ public class ResearchJobProcessingService {
         // could mean the item was never actually checked (a false-negative security report). May be
         // overwritten below with INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK if Stage4 also ends up
         // skipped for this item.
-        item.setResearchIncompleteReason(
-                stage2Result.anySourceSucceeded() ? null : ResearchJobItem.INCOMPLETE_REASON_SOURCES_FAILED);
+        //
+        // findingsTruncated (closed-mode backlog item 251, REVISE item 11) is checked second, only
+        // once sourcesFailed is ruled out: a source's write-safety cap dropping some findings still
+        // means real findings WERE found and persisted (just not all of them), a materially
+        // different situation from "nothing was actually checked" that INCOMPLETE_REASON_SOURCES_FAILED
+        // exists to flag — see ResearchJobItem#INCOMPLETE_REASON_FINDINGS_TRUNCATED's javadoc.
+        String incompleteReason;
+        if (!stage2Result.anySourceSucceeded()) {
+            incompleteReason = ResearchJobItem.INCOMPLETE_REASON_SOURCES_FAILED;
+        } else if (stage2Result.findingsTruncated()) {
+            incompleteReason = ResearchJobItem.INCOMPLETE_REASON_FINDINGS_TRUNCATED;
+        } else {
+            incompleteReason = null;
+        }
+        item.setResearchIncompleteReason(incompleteReason);
         researchJobItemRepository.save(item);
 
         // Stage4 (paid AI web-search) only fires on a genuine zero-findings result — i.e. at

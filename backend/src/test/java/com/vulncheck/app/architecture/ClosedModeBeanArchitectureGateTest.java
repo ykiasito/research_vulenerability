@@ -55,12 +55,16 @@ class ClosedModeBeanArchitectureGateTest {
     @Test
     @Disabled(
             "externalApiRestClient is still legitimately wired today (docs/spec/closed-mode-plan.md "
-                    + "§3-4): NvdVulnerabilitySource and OsvLiveQueryClient — both B4 work, not yet started "
-                    + "as of item 196 — inject it for their live HTTP calls. §3-4 calls for deleting this "
-                    + "Bean outright (not just its callers) once B4 removes those two classes, turning any "
-                    + "future re-introduction of a live-egress caller into a startup-time "
-                    + "NoSuchBeanDefinitionException rather than a silent no-op. Re-enable this test as "
-                    + "part of B4.")
+                    + "§3-4). Left disabled here as part of item 263's own scope (Bean deletion, not this "
+                    + "task) -- but the injecting side has narrowed as of closed-mode backlog item 264/B4 "
+                    + "(2026-09-04): OsvLiveQueryClient no longer exists (its live HTTP call is gone "
+                    + "entirely), so NvdVulnerabilitySource's own deletion of fetchFromNvd (the live NVD "
+                    + "CVE API call) is now this Bean's only remaining injector -- NvdVulnerabilitySource "
+                    + "itself was deliberately kept (it's still Stage2's real mirror-backed NVD CVE lookup "
+                    + "on this branch), just without the field. §3-4 still calls for deleting this Bean "
+                    + "outright once item 263 removes it (turning any future re-introduction of a "
+                    + "live-egress caller into a startup-time NoSuchBeanDefinitionException rather than a "
+                    + "silent no-op) -- re-enable this test as part of item 263.")
     void externalApiRestClientBeanDoesNotExist() {
         assertThat(applicationContext.containsBean("externalApiRestClient")).isFalse();
     }
