@@ -58,16 +58,6 @@ class RestClientConfigTest {
     }
 
     @Test
-    void externalApiRestClientUsesSimpleClientHttpRequestFactoryWithFiveSecondConnectAndTenSecondRead() {
-        RestClient restClient = new RestClientConfig().externalApiRestClient();
-
-        ClientHttpRequestFactory requestFactory = requestFactoryOf(restClient);
-        assertThat(requestFactory).isExactlyInstanceOf(SimpleClientHttpRequestFactory.class);
-        assertThat((int) ReflectionTestUtils.getField(requestFactory, "connectTimeout")).isEqualTo(5_000);
-        assertThat((int) ReflectionTestUtils.getField(requestFactory, "readTimeout")).isEqualTo(10_000);
-    }
-
-    @Test
     void nvdSyncRestClientUsesSimpleClientHttpRequestFactoryWithTenSecondConnectAndFiveMinuteRead() {
         RestClient restClient = new RestClientConfig().nvdSyncRestClient();
 

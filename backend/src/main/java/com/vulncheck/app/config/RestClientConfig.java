@@ -55,24 +55,14 @@ public class RestClientConfig {
         return ClientHttpRequestFactoryBuilder.simple().build(settings);
     }
 
-    @Bean
-    public RestClient externalApiRestClient() {
-        SimpleClientHttpRequestFactory requestFactory =
-                simpleRequestFactory(Duration.ofSeconds(5), Duration.ofSeconds(10));
-
-        return RestClient.builder()
-                .requestFactory(requestFactory)
-                .defaultHeader("User-Agent", "vulncheck-server/0.1 (product identification)")
-                .build();
-    }
-
     /**
-     * For the paginating NVD CPE dictionary sync only — NOT for per-item lookups. A full-dictionary
-     * page (10,000 CPEs, ~3MB) measured 29.5s to return from NVD, which the 10s read timeout on
-     * {@link #externalApiRestClient} would kill outright, so a full sync could never complete on
-     * that client. Deliberately a separate bean rather than relaxing the shared one: the short
-     * timeout is exactly what we want for a per-item live lookup, where a hung NVD should fail fast
-     * and let the item fall through instead of stalling the whole job for minutes.
+     * For the paginating NVD CPE dictionary sync only. A full-dictionary page (10,000 CPEs, ~3MB)
+     * measured 29.5s to return from NVD, well beyond what a per-item live lookup client's timeout
+     * would tolerate — which is exactly why this stayed a separate bean even back when a per-item
+     * live-lookup client ({@code externalApiRestClient}) still existed (closed-mode backlog item
+     * 263, 2026-09-04: that Bean was deleted along with the last production code that injected it,
+     * see {@code docs/spec/closed-mode-plan.md} §3-4 — live per-item egress no longer exists in
+     * this codebase at all).
      */
     @Bean
     public RestClient nvdSyncRestClient() {
@@ -87,7 +77,7 @@ public class RestClientConfig {
 
     /**
      * For CSAF vendor advisory sync ({@code SiemensCsafSyncService}, and later a Red Hat
-     * equivalent). Deliberately NOT the shared {@link #externalApiRestClient} — the CSAF sync
+     * equivalent). Deliberately a separate bean from the other sync clients here — the CSAF sync
      * flow follows vendor-supplied URLs (provider-metadata -> ROLIE feed -> per-document links)
      * that are themselves an SSRF-shaped risk (see the plan's §6), so this client disables
      * automatic HTTP redirect following (see {@link #noRedirectRequestFactory}) so the sync
@@ -156,7 +146,7 @@ public class RestClientConfig {
     /**
      * For CVE.org mirror sync ({@code CveOrgSyncService}) — used only for the one small GitHub
      * Releases API call ({@code GET .../releases/latest}) that resolves the current baseline/delta
-     * asset URLs. Deliberately NOT the shared {@link #externalApiRestClient} (item 165, 2026-09-01):
+     * asset URLs. Deliberately NOT the shared {@code externalApiRestClient} (item 165, 2026-09-01):
      * that bean is meant to stay a request-path-only egress (10 registries, live NVD, live OSV), and
      * mixing this sync-time call into it would make it one of the things a future closed-mode branch
      * would have to carefully carve back out. Same shape as {@link #ghsaSyncRestClient}/{@link
@@ -180,7 +170,7 @@ public class RestClientConfig {
 
     /**
      * For the crates.io sparse-index mirror sync (closed-mode backlog item 176 pilot, {@code
-     * CratesIoMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * CratesIoMirrorSyncService}) — deliberately NOT the shared {@code externalApiRestClient}, same
      * item-165 rationale as the other {@code *SyncRestClient} beans above: that bean is meant to stay
      * a request-path-only egress (the 10 live registries, live NVD, live OSV) so a future full
      * closed-mode branch can delete it outright without having to first carve sync-time traffic back
@@ -201,7 +191,7 @@ public class RestClientConfig {
 
     /**
      * For the RubyGems compact-index mirror sync (closed-mode backlog item 176 rollout, {@code
-     * RubyGemsMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * RubyGemsMirrorSyncService}) — deliberately NOT the shared {@code externalApiRestClient}, same
      * item-165 rationale as {@link #cratesIoSyncRestClient} and the other {@code *SyncRestClient}
      * beans above. {@code index.rubygems.org} is served through Fastly with no redirect chain
      * observed against real gem lookups (confirmed live 2026-09-02), so a plain {@link
@@ -221,8 +211,8 @@ public class RestClientConfig {
 
     /**
      * For the Packagist {@code p2/} provider-metadata mirror sync (closed-mode backlog item 176
-     * rollout, {@code PackagistMirrorSyncService}) — deliberately NOT the shared {@link
-     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * rollout, {@code PackagistMirrorSyncService}) — deliberately NOT the shared {@code
+     * externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
      * #rubyGemsSyncRestClient} and the other {@code *SyncRestClient} beans above. {@code
      * repo.packagist.org} is served through a static-file CDN (one small JSON response per package,
      * confirmed live 2026-09-02 with no redirect chain observed), same shape as the crates.io/RubyGems
@@ -241,7 +231,7 @@ public class RestClientConfig {
 
     /**
      * For the Hex.pm mirror sync (closed-mode backlog item 176, Hex rollout, {@code
-     * HexMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * HexMirrorSyncService}) — deliberately NOT the shared {@code externalApiRestClient}, same
      * item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient} and the
      * other {@code *SyncRestClient} beans above. {@code hex.pm} is served through Fastly with no
      * redirect chain observed against real package lookups (confirmed live 2026-09-02 against
@@ -262,7 +252,7 @@ public class RestClientConfig {
 
     /**
      * For the npm registry mirror sync (closed-mode backlog item 176 rollout, npm, {@code
-     * NpmMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient}, same
+     * NpmMirrorSyncService}) — deliberately NOT the shared {@code externalApiRestClient}, same
      * item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient}/{@link
      * #packagistSyncRestClient}/{@link #hexSyncRestClient} and the other {@code *SyncRestClient} beans
      * above. {@code registry.npmjs.org}'s per-package document endpoint ({@code GET /{package}}) is
@@ -284,8 +274,8 @@ public class RestClientConfig {
 
     /**
      * For the PyPI Simple API (PEP 691 JSON) mirror sync (closed-mode backlog item 176 rollout,
-     * PyPI, {@code PyPiMirrorSyncService}) — deliberately NOT the shared {@link
-     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * PyPI, {@code PyPiMirrorSyncService}) — deliberately NOT the shared {@code
+     * externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
      * #rubyGemsSyncRestClient}/{@link #packagistSyncRestClient}/{@link #hexSyncRestClient} and the
      * other {@code *SyncRestClient} beans above. {@code pypi.org/simple/} is served through Fastly
      * with no redirect chain observed against a package's already-PEP-503-normalized name
@@ -308,8 +298,8 @@ public class RestClientConfig {
 
     /**
      * For the NuGet flat-container package-base-address mirror sync (closed-mode backlog item 176
-     * rollout, NuGet, {@code NuGetMirrorSyncService}) — deliberately NOT the shared {@link
-     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * rollout, NuGet, {@code NuGetMirrorSyncService}) — deliberately NOT the shared {@code
+     * externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
      * #rubyGemsSyncRestClient}/{@link #packagistSyncRestClient}/{@link #hexSyncRestClient}/{@link
      * #npmSyncRestClient}/{@link #pypiSyncRestClient} and the other {@code *SyncRestClient} beans
      * above. {@code api.nuget.org}'s flat-container endpoint is served directly off Azure Blob
@@ -332,8 +322,8 @@ public class RestClientConfig {
 
     /**
      * For the Go module proxy per-module version-list mirror sync (closed-mode backlog item 176
-     * rollout, Go, {@code GoMirrorSyncService}) — deliberately NOT the shared {@link
-     * #externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
+     * rollout, Go, {@code GoMirrorSyncService}) — deliberately NOT the shared {@code
+     * externalApiRestClient}, same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link
      * #rubyGemsSyncRestClient}/{@link #packagistSyncRestClient}/{@link #hexSyncRestClient}/{@link
      * #npmSyncRestClient}/{@link #pypiSyncRestClient}/{@link #nugetSyncRestClient} and the other
      * {@code *SyncRestClient} beans above. {@code proxy.golang.org}'s {@code @v/list} endpoint
@@ -356,7 +346,7 @@ public class RestClientConfig {
 
     /**
      * For the pub.dev per-package document sync (closed-mode backlog item 176 rollout, pub.dev,
-     * {@code PubMirrorSyncService}) — deliberately NOT the shared {@link #externalApiRestClient},
+     * {@code PubMirrorSyncService}) — deliberately NOT the shared {@code externalApiRestClient},
      * same item-165 rationale as {@link #cratesIoSyncRestClient}/{@link #rubyGemsSyncRestClient}/
      * {@link #packagistSyncRestClient}/{@link #hexSyncRestClient}/{@link #npmSyncRestClient}/{@link
      * #pypiSyncRestClient}/{@link #nugetSyncRestClient} and the other {@code *SyncRestClient} beans
