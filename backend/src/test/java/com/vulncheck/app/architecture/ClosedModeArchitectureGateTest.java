@@ -22,7 +22,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Assumptions;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.env.YamlPropertySourceLoader;
@@ -101,9 +100,14 @@ class ClosedModeArchitectureGateTest {
     // 264/B4, 2026-09-04): it stays on the classpath as a mirror-only VulnerabilitySource rather
     // than being deleted outright, since (unlike OsvLiveQueryClient, whose sole caller was already
     // gutted to a no-op) it also implements Stage2's real, still-needed NVD CVE mirror lookup —
-    // only its live NVD CVE API path (fetchFromNvd) was removed. See
-    // osvLiveQueryClientIsAbsentFromClasspath()'s own @Disabled note below for what item 261 should
-    // decide to assert about it instead.
+    // only its live NVD CVE API path (fetchFromNvd) was removed. Item 261 (B7, 2026-09-04)
+    // re-enabled the OsvLiveQueryClient half unchanged and added
+    // nvdVulnerabilitySourceHasNoEgressCapableMembers() below as the "no live-egress capability"
+    // check this class's own field/constructor-parameter scan can express for a class that
+    // deliberately still exists (mirroring liveRegistryClientsHaveNoLookupLiveMethod()'s approach
+    // for the 10 registry clients) — confirmed today that NvdVulnerabilitySource only holds
+    // jdbcTemplate/transactionManager fields, no RestClient or other egress-capable member,
+    // now that item 263 deleted RestClientConfig#externalApiRestClient outright.
     //
     // Note on "live *RegistryClient": §3-6's original text was written expecting B3 to delete the
     // 10 *RegistryClient classes outright (same treatment as LlmServiceClient for B1). B3 (item
@@ -175,24 +179,39 @@ class ClosedModeArchitectureGateTest {
     }
 
     @Test
-    @Disabled(
-            "Left disabled as part of item 261 (B7)'s own scope, not re-enabled here (closed-mode "
-                    + "backlog item 264/B4, 2026-09-04): the assertion below is corrected to match how B4 "
-                    + "was actually implemented, so item 261 doesn't inherit a stale premise when it "
-                    + "eventually re-enables this test. OsvLiveQueryClient is now genuinely gone (its sole "
-                    + "caller, BundledComponentResearchService, was already gutted to a no-op in B2), so "
-                    + "that half is ready to assert absence. NvdVulnerabilitySource, unlike "
-                    + "OsvLiveQueryClient, was deliberately NOT deleted -- it still exists as a "
-                    + "mirror-only VulnerabilitySource (fetchFromMirror is Stage2's real NVD CVE lookup "
-                    + "on this branch), just with its live NVD CVE API path (fetchFromNvd) physically "
-                    + "removed. Item 261 should still decide whether/how to assert \"NvdVulnerabilitySource "
-                    + "has no live-egress capability\" (e.g. no externalApiRestClient-typed field, mirroring "
-                    + "liveRegistryClientsHaveNoLookupLiveMethod()'s approach for the 10 registry clients) "
-                    + "when it re-enables this test, rather than a bare classpath-absence check.")
     void osvLiveQueryClientIsAbsentFromClasspath() {
         assertThrows(
                 ClassNotFoundException.class,
                 () -> Class.forName("com.vulncheck.app.service.vuln.OsvLiveQueryClient"));
+    }
+
+    /**
+     * The "no live-egress capability" half of §3-6 item 1 for {@code NvdVulnerabilitySource} —
+     * deliberately not a classpath-absence check (that class stays, see the section note above).
+     * Reuses the same field/constructor-parameter scan as {@link
+     * #registryClientsHaveNoEgressCapableMembers()} below rather than a hand-rolled reflection walk,
+     * so a future addition to {@link #EGRESS_CAPABLE_TYPES} (e.g. R9's {@code RestClient.Builder}
+     * addition) automatically covers this class too.
+     */
+    @Test
+    void nvdVulnerabilitySourceHasNoEgressCapableMembers() {
+        Class<?> nvdVulnerabilitySource;
+        try {
+            nvdVulnerabilitySource = Class.forName("com.vulncheck.app.service.vuln.NvdVulnerabilitySource");
+        } catch (ClassNotFoundException e) {
+            throw new AssertionError("NvdVulnerabilitySource is missing from the classpath entirely. "
+                    + "It was deliberately kept as a mirror-only VulnerabilitySource (B4, item 264) — "
+                    + "Stage2's real NVD CVE mirror lookup — not deleted outright; if it genuinely "
+                    + "disappeared (e.g. via a master merge, §9-3), Stage2 lost NVD CVE coverage "
+                    + "entirely, not just its live-API fallback.", e);
+        }
+
+        assertThat(findEgressCapableMembers(nvdVulnerabilitySource))
+                .as("NvdVulnerabilitySource holds a field or constructor argument typed as one of "
+                        + "%s — B4 (item 264) was supposed to remove the *capability* to make a live "
+                        + "HTTP call from this class outright, not just leave its live NVD CVE fetch "
+                        + "method (fetchFromNvd) unreachable", EGRESS_CAPABLE_TYPES)
+                .isEmpty();
     }
 
     // ------------------------------------------------------------------------------------------
