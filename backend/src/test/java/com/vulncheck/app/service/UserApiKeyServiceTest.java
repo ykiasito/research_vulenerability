@@ -234,6 +234,33 @@ class UserApiKeyServiceTest {
         assertThat(events).allSatisfy(event -> assertThat(event.getLevel()).isEqualTo(Level.WARN));
     }
 
+    @Test
+    void getNvdApiKeyLogsAtWarnAgainAfterAnInterveningSuccessClearsTheDedupFlag() {
+        // REVISE round 2 (senior-reviewer 2026-09-04, PR#188): the catch block in getNvdApiKey
+        // covers both a permanent decrypt failure AND a transient repository-layer exception, so
+        // the dedup must only suppress repeats of the SAME ongoing failure episode -- not every
+        // future failure for that user -- or a single transient blip that later resolves itself
+        // would permanently downgrade a later, genuinely new (and actionable) decrypt failure to
+        // DEBUG for the rest of the process's lifetime. Confirms a success between two failures
+        // clears the flag, so the second failure logs at WARN again rather than DEBUG.
+        UserSecret secret = new UserSecret(1L, 7L, UserSecret.PROVIDER_NVD, "encrypted-blob", null);
+        when(userSecretRepository.findByUserIdAndProvider(7L, UserSecret.PROVIDER_NVD))
+                .thenReturn(Optional.of(secret));
+        when(secretEncryptionService.decrypt("encrypted-blob", 7L, UserSecret.PROVIDER_NVD))
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"))
+                .thenReturn("decrypted-nvd-key")
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"));
+
+        List<ILoggingEvent> events = captureLogEvents(() -> {
+            assertThat(service.getNvdApiKey(7L)).isEmpty();
+            assertThat(service.getNvdApiKey(7L)).contains("decrypted-nvd-key");
+            assertThat(service.getNvdApiKey(7L)).isEmpty();
+        });
+
+        assertThat(events).hasSize(2);
+        assertThat(events).allSatisfy(event -> assertThat(event.getLevel()).isEqualTo(Level.WARN));
+    }
+
     /** Captures every log event {@code UserApiKeyService}'s own logger emits while {@code action}
      *  runs, temporarily lowering the logger to DEBUG (Spring Boot's default root level is INFO,
      *  which would otherwise silently drop the DEBUG-level events these tests need to see) and
