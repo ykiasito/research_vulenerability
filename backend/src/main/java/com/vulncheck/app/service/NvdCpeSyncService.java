@@ -128,6 +128,17 @@ public class NvdCpeSyncService {
      * a sync legitimately reached {@link #syncAllAndRelease}/{@link #syncDeltaAndRelease} would let
      * a second, concurrent sync start against the same NVD rate limit and {@code cpe_dictionary}
      * table, so callers must not call it once the worker thread has actually started running.
+     *
+     * <p>A second legitimate call site (senior-reviewer REVISE, PR #207 round 1): {@code
+     * CpeDictionaryScheduledResync#runScheduledResync} — running <em>on</em> the already-spawned
+     * worker thread, after {@link #tryBeginFullSync} already won the slot — calls this if {@link
+     * #hasCompletedInitialSync()} itself throws (a transient DB read failure), for exactly the same
+     * reason: that thread's own path into {@link #syncAllAndRelease}/{@link #syncDeltaAndRelease}
+     * is what was supposed to release the guard, and a failure before reaching either one leaves
+     * this method as the only remaining release path. Not limited to "worker thread never started"
+     * the way the rest of this javadoc originally described it — any code path on the guard-holding
+     * thread that can determine, with certainty, that neither release-bearing method will be
+     * reached is a legitimate caller.
      */
     public void releaseFullSyncGuard() {
         fullSyncRunning.set(false);
@@ -275,6 +286,20 @@ public class NvdCpeSyncService {
                     LogSanitizer.sanitize(keyword));
 
             if (fetched == 0) {
+                if (startIndex < totalResults) {
+                    // senior-reviewer REVISE (PR #207 round 1): NVD reported more results than this
+                    // page actually carried (an empty/malformed "products" array on a page NVD's own
+                    // totalResults says shouldn't be empty yet) — a page fetch failure that a 2xx
+                    // response smuggled past the page == null check above. Reporting this as a clean
+                    // finish would (a) let a full/delta sync mark cpe_dictionary_sync_state
+                    // initial_sync_completed true off a partial dictionary — exactly the
+                    // misclassification that table exists to prevent — and (b) advance the delta
+                    // cursor past a window this run never actually fetched, permanently skipping
+                    // that gap on every future delta tick (the cursor only ever moves forward).
+                    return new SyncOutcome(totalUpserted, false);
+                }
+                // startIndex >= totalResults here (including the legitimate totalResults == 0 case,
+                // startIndex == 0) -- a clean, fully-exhausted finish.
                 break;
             }
         }
@@ -336,9 +361,12 @@ public class NvdCpeSyncService {
         }
         // lastModStart/lastModEnd are always programmatically computed (never CSV/user-supplied —
         // see the delta sync's own javadoc), but routing them through the same CSV-safe
-        // queryParam(String, String) as keyword is still correct and desirable here: NVD's ISO
-        // offset timestamp format always includes a literal "+" (e.g. "+00:00" for UTC), and this
-        // method's own encoding closes exactly that character's ambiguity (task-backlog item 255).
+        // queryParam(String, String) as keyword is still correct here: it's the same encoder every
+        // other query value on this request goes through, so there's no second, parallel encoding
+        // path to keep in sync with NvdUriBuilder's own (task-backlog item 255) if this endpoint's
+        // ISO offset format ever produces a non-UTC ("+HH:MM"-style) offset for some caller.
+        // (Note: DateTimeFormatter.ISO_OFFSET_DATE_TIME renders a UTC OffsetDateTime as "Z", not
+        // "+00:00", so today's callers never actually hit that "+" case in practice.)
         if (lastModStart != null) {
             uriBuilder.queryParam("lastModStartDate", formatNvdTimestamp(lastModStart));
         }
