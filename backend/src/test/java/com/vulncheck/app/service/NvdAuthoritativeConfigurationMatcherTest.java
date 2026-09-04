@@ -1,6 +1,6 @@
 package com.vulncheck.app.service;
 
-import static com.vulncheck.app.service.NvdMirrorAbVerificationRunner.authoritativeConfigurationsCover;
+import static com.vulncheck.app.service.NvdAuthoritativeConfigurationMatcher.authoritativeConfigurationsCover;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -8,13 +8,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 /**
- * Pure, DB/network-free unit coverage for {@link NvdMirrorAbVerificationRunner#authoritativeConfigurationsCover}
- * -- the round 5 predicate that decides whether NVD's own authoritative {@code ?cveId=} {@code
- * configurations} JSON actually covers a queried (part, vendor, product, version), replacing round
- * 4's unproven "zero mirror cpe_match rows = freshness gap" assumption (see {@link
- * NvdMirrorAbVerificationRunner}'s class javadoc). {@link NvdMirrorAbVerificationRunner} itself is a
- * disabled, real-dev-DB/live-NVD integration harness that can't double as this method's unit test,
- * so this class exercises the pure predicate directly against fixture JSON instead.
+ * Pure, DB/network-free unit coverage for {@link
+ * NvdAuthoritativeConfigurationMatcher#authoritativeConfigurationsCover} -- the predicate that
+ * decides whether NVD's own authoritative {@code ?cveId=} {@code configurations} JSON actually
+ * covers a queried (part, vendor, product, version). Originally developed (as round 5's fix) inside
+ * {@code NvdMirrorAbVerificationRunner}, a disabled real-dev-DB/live-NVD A/B verification harness
+ * that ran to completion with {@code gatePassed=true} (see {@code
+ * docs/spec/closed-mode-backlog.md} item 241's history); that harness was deleted outright in
+ * closed-mode backlog item 261/B7 (2026-09-04) once item 263 removed the last {@code RestClient}
+ * bean it depended on, and this predicate (the harness's only piece with real standalone value) was
+ * extracted here rather than lost along with it.
  *
  * <p>The first fixture below ({@link #CVE_2026_18301_GIMP_RESPONSE}) is shaped after the real
  * {@code ?cveId=CVE-2026-18301} response a senior-reviewer fetched live (non-destructive,
@@ -23,7 +26,7 @@ import org.junit.jupiter.api.Test;
  * exactly why golden-300's queried {@code 2.10.38} isn't covered -- this is what motivated the round
  * 5 fix in the first place.
  */
-class NvdMirrorAbVerificationRunnerTest {
+class NvdAuthoritativeConfigurationMatcherTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
