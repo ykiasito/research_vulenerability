@@ -7,7 +7,6 @@ import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,24 +52,6 @@ class ClosedModeBeanArchitectureGateTest {
     }
 
     @Test
-    @Disabled(
-            "The Bean definition itself (docs/spec/closed-mode-plan.md §3-4) is still left in "
-                    + "RestClientConfig -- deleting it is item 263's own scope, not this task's. As of "
-                    + "closed-mode backlog item 273 (2026-09-04), production code has ZERO remaining "
-                    + "injectors: NvdVulnerabilitySource's own live NVD CVE call (fetchFromNvd) was "
-                    + "already deleted in item 264/B4, and this test's own @Disabled reason previously "
-                    + "(incorrectly) named that as the last one -- the actual last production injector "
-                    + "was NvdCpeSyncService (its single-page live keyword-search fallback, "
-                    + "syncKeywordSinglePage, used by Stage1IdentificationService's live CPE lookup), "
-                    + "removed by item 273. The only remaining reference anywhere in this codebase is a "
-                    + "test-scope @Autowired field in NvdMirrorAbVerificationRunner (a disabled, "
-                    + "*Runner-named diagnostic harness never exercised by `mvn test`; deliberately kept "
-                    + "rather than deleted, since its own companion NvdMirrorAbVerificationRunnerTest "
-                    + "depends on a pure-logic method it hosts -- see item 273's own PR description). "
-                    + "Re-enable this test as part of item 263, once RestClientConfig#externalApiRestClient "
-                    + "itself is actually deleted (turning any future re-introduction of a live-egress "
-                    + "caller into a startup-time NoSuchBeanDefinitionException rather than a silent "
-                    + "no-op).")
     void externalApiRestClientBeanDoesNotExist() {
         assertThat(applicationContext.containsBean("externalApiRestClient")).isFalse();
     }
