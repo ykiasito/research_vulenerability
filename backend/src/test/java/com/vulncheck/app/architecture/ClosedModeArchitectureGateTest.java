@@ -412,6 +412,13 @@ class ClosedModeArchitectureGateTest {
      * for this test to need a change. If it fails WITHOUT a preceding master-sync merge, that means
      * a {@code V*__} file was added directly on closed-mode, which violates §3-2 and must be
      * reverted, not accommodated by editing this baseline.
+     *
+     * <p>Item 288 (2026-09-04): entries here are actually paths relative to {@code db/migration}
+     * (via {@code migrationDir.relativize(...)}, matched against {@link #migrationSetMatchesMasterBaseline()}'s
+     * now-recursive {@code Files.walk} scan) rather than bare filenames — the two happen to be
+     * identical today because no migration is nested under a subdirectory, but a future nested
+     * migration's baseline entry must include its subdirectory prefix (e.g. {@code
+     * "sub/V50__x.sql"}), not just its filename.
      */
     private static final Set<String> MASTER_MIGRATION_BASELINE = Set.of(
             "V1__init.sql",
@@ -605,10 +612,18 @@ class ClosedModeArchitectureGateTest {
                 .as("expected %s to exist relative to the backend module root", migrationDir)
                 .isTrue();
 
-        try (Stream<Path> files = Files.list(migrationDir)) {
+        // Item 288 (2026-09-04): Files.walk (not Files.list) and a migrationDir-relative path as
+        // the key (not just Path#getFileName()) — Flyway itself (spring.flyway.locations,
+        // classpath:db/migration) scans this directory *recursively*, so a versioned migration
+        // dropped into a subdirectory is executed by Flyway but was previously invisible to this
+        // gate's flat, non-recursive Files.list scan. The VERSIONED_MIGRATION naming-convention
+        // check still matches on the bare filename (Flyway's own naming rule is filename-only,
+        // irrespective of nesting) — only the *key* used for baseline comparison changed.
+        try (Stream<Path> files = Files.walk(migrationDir)) {
             Set<String> actualVersionedFiles = files
-                    .map(path -> path.getFileName().toString())
-                    .filter(name -> VERSIONED_MIGRATION.matcher(name).matches())
+                    .filter(Files::isRegularFile)
+                    .filter(path -> VERSIONED_MIGRATION.matcher(path.getFileName().toString()).matches())
+                    .map(path -> migrationDir.relativize(path).toString())
                     .collect(Collectors.toSet());
 
             // Compute both directions up front (not just for the failure message, but so the
@@ -664,6 +679,14 @@ class ClosedModeArchitectureGateTest {
      * already reported (with a more specific message) by {@link #migrationSetMatchesMasterBaseline()},
      * so this test doesn't re-report that case as a spurious "no baseline hash for this file" or
      * "file present in baseline but absent on disk" failure.
+     *
+     * <p>Item 288 (2026-09-04): unlike {@link #migrationSetMatchesMasterBaseline()}, this test does
+     * not scan {@code migrationDir} at all — it is driven entirely by {@link
+     * #MASTER_MIGRATION_CONTENT_SHA256}'s own keys, resolving each one directly via {@code
+     * migrationDir.resolve(...)}. So it was never subject to that method's non-recursive-{@code
+     * Files.list} bug, and a nested migration is already handled correctly here as long as its
+     * baseline key is the correct {@code db/migration}-relative path (see that field's javadoc) —
+     * no {@code Files.walk} conversion is needed in this method.
      */
     @Test
     void migrationContentMatchesMasterBaseline() throws IOException {
@@ -721,6 +744,9 @@ class ClosedModeArchitectureGateTest {
      * expected to exist under {@code db/migration}. Currently just {@code R__closed_mode_strip.sql}
      * (item 262/B6). A future addition here must be a deliberate, reviewed closed-mode-only
      * migration, not a stray file — see {@link #closedModeOnlyMigrationSetMatchesBaseline()}.
+     *
+     * <p>Item 288 (2026-09-04): same "actually a {@code db/migration}-relative path, not a bare
+     * filename" note as {@link #MASTER_MIGRATION_BASELINE} applies here too.
      */
     private static final Set<String> CLOSED_MODE_ONLY_MIGRATION_BASELINE =
             Set.of("R__closed_mode_strip.sql");
@@ -752,10 +778,15 @@ class ClosedModeArchitectureGateTest {
                 .as("expected %s to exist relative to the backend module root", migrationDir)
                 .isTrue();
 
-        try (Stream<Path> files = Files.list(migrationDir)) {
+        // Item 288 (2026-09-04): same Files.walk + relativize fix as migrationSetMatchesMasterBaseline
+        // above, for the same reason — Flyway scans db/migration recursively, so a repeatable
+        // migration nested in a subdirectory would otherwise be invisible to this gate.
+        try (Stream<Path> files = Files.walk(migrationDir)) {
             Set<String> actualClosedModeOnlyFiles = files
-                    .map(path -> path.getFileName().toString())
-                    .filter(name -> name.endsWith(".sql") && !VERSIONED_MIGRATION.matcher(name).matches())
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(".sql")
+                            && !VERSIONED_MIGRATION.matcher(path.getFileName().toString()).matches())
+                    .map(path -> migrationDir.relativize(path).toString())
                     .collect(Collectors.toSet());
 
             Set<String> unexpected = actualClosedModeOnlyFiles.stream()
@@ -792,6 +823,10 @@ class ClosedModeArchitectureGateTest {
      * test/loop: mixing "diverged from master, investigate" (V*__) and "diverged from its own last
      * reviewed content, investigate" (R__, no master to diff against) into one assertion message
      * would blur two different failure meanings.
+     *
+     * <p>Item 288 (2026-09-04): same "baseline-driven, not a directory scan, so no {@code
+     * Files.walk} conversion needed" note as {@link #migrationContentMatchesMasterBaseline()}
+     * applies here too.
      */
     @Test
     void closedModeOnlyMigrationContentMatchesBaseline() throws IOException {
