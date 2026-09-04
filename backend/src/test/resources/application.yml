@@ -31,9 +31,30 @@ spring:
     # `validateOnMigrate` (default true) fails ApplicationContext startup with "Detected applied
     # migration not resolved locally" once the shared vulncheck_test DB's flyway_schema_history
     # has recorded that repeatable migration from a different branch's test run (item 285, 2026-09-04).
-    # Versioned migrations are unaffected: "repeatable:missing" only covers repeatable (R__) entries,
-    # so a genuinely missing versioned migration still fails validation as before.
-    ignore-migration-patterns: "repeatable:missing"
+    #
+    # "*:future" is Flyway's own built-in default for this property (FlywayModel.defaults()), but
+    # Spring Boot's FlywayAutoConfiguration applies spring.flyway.ignore-migration-patterns by
+    # *replacing* Flyway's default array rather than merging into it. Setting only
+    # "repeatable:missing" here (as an earlier revision of this file did) silently drops "*:future"
+    # and reintroduces item 285's failure mode in the opposite direction: closed-mode trails master
+    # by design (closedModeOnlyMigrationSetMatchesBaseline keeps it from adding its own versioned
+    # migrations), so when master adds a new versioned migration (e.g. V42) and applies it to the
+    # shared vulncheck_test DB, a subsequent `mvn test` on closed-mode would see that migration as
+    # FUTURE_SUCCESS (applied but newer than anything resolved locally) and fail ApplicationContext
+    # startup — exactly the item 285 symptom, just triggered from the other branch/direction. Both
+    # patterns must stay listed so both directions keep working:
+    #   - "*:future": unchanged from Flyway's own default — a locally-unresolved but *newer*
+    #     applied migration (closed-mode running behind master) is tolerated, same as before this
+    #     property was ever set.
+    #   - "repeatable:missing": item 285's original fix — a locally-unresolved repeatable migration
+    #     from a branch we're not on (e.g. master running without closed-mode's repeatable strip
+    #     migration) is tolerated.
+    # Neither pattern relaxes detection of a genuinely *missing* versioned migration (a gap in the
+    # locally-resolved version sequence below the applied baseline) — that failure mode is
+    # unaffected and still fails validation as before.
+    ignore-migration-patterns:
+      - "*:future"
+      - "repeatable:missing"
 
   thymeleaf:
     cache: false
