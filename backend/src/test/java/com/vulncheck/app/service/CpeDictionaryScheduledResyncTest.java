@@ -146,4 +146,82 @@ class CpeDictionaryScheduledResyncTest {
 
         verify(nvdCpeSyncService, times(1)).syncAllAndRelease(Optional.of("admin-nvd-key"));
     }
+
+    // --- closed-mode backlog item 283: full vs. delta dispatch -----------------------------
+
+    @Test
+    void runScheduledResyncRunsAFullSyncWhenTheInitialSyncHasNotCompletedYet() {
+        when(nvdCpeSyncService.hasCompletedInitialSync()).thenReturn(false);
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
+        when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenReturn(new SyncOutcome(1815263, true));
+
+        resync.runScheduledResync();
+
+        verify(nvdCpeSyncService, times(1)).syncAllAndRelease(Optional.empty());
+        verify(nvdCpeSyncService, never()).syncDeltaAndRelease(Optional.empty());
+    }
+
+    @Test
+    void runScheduledResyncRunsADeltaSyncWhenTheInitialSyncHasAlreadyCompleted() {
+        when(nvdCpeSyncService.hasCompletedInitialSync()).thenReturn(true);
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
+        when(nvdCpeSyncService.syncDeltaAndRelease(Optional.empty())).thenReturn(new SyncOutcome(120, true));
+
+        resync.runScheduledResync();
+
+        verify(nvdCpeSyncService, times(1)).syncDeltaAndRelease(Optional.empty());
+        verify(nvdCpeSyncService, never()).syncAllAndRelease(Optional.empty());
+    }
+
+    @Test
+    void runDeltaSyncLogsCompletedOutcomeWithoutThrowing() {
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
+        when(nvdCpeSyncService.syncDeltaAndRelease(Optional.empty())).thenReturn(new SyncOutcome(120, true));
+
+        resync.runDeltaSync();
+
+        verify(nvdCpeSyncService, times(1)).syncDeltaAndRelease(Optional.empty());
+    }
+
+    @Test
+    void runDeltaSyncLogsAbortedEarlyOutcomeWithoutThrowing() {
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
+        when(nvdCpeSyncService.syncDeltaAndRelease(Optional.empty())).thenReturn(new SyncOutcome(30, false));
+
+        resync.runDeltaSync();
+
+        verify(nvdCpeSyncService, times(1)).syncDeltaAndRelease(Optional.empty());
+    }
+
+    @Test
+    void runDeltaSyncSwallowsAnExceptionFromSyncDeltaAndReleaseRatherThanPropagatingIt() {
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
+        when(nvdCpeSyncService.syncDeltaAndRelease(Optional.empty())).thenThrow(new RuntimeException("NVD unreachable"));
+
+        resync.runDeltaSync();
+
+        verify(nvdCpeSyncService, times(1)).syncDeltaAndRelease(Optional.empty());
+    }
+
+    @Test
+    void runDeltaSyncFallsBackToUnkeyedWhenAdminKeyResolutionThrows() {
+        when(userApiKeyService.getAdminNvdApiKey())
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"));
+        when(nvdCpeSyncService.syncDeltaAndRelease(Optional.empty())).thenReturn(new SyncOutcome(0, true));
+
+        resync.runDeltaSync();
+
+        verify(nvdCpeSyncService, times(1)).syncDeltaAndRelease(Optional.empty());
+    }
+
+    @Test
+    void runDeltaSyncPassesTheAdminNvdKeyThroughWhenOneIsConfigured() {
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.of("admin-nvd-key"));
+        when(nvdCpeSyncService.syncDeltaAndRelease(Optional.of("admin-nvd-key")))
+                .thenReturn(new SyncOutcome(120, true));
+
+        resync.runDeltaSync();
+
+        verify(nvdCpeSyncService, times(1)).syncDeltaAndRelease(Optional.of("admin-nvd-key"));
+    }
 }
