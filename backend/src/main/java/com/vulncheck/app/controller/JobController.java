@@ -105,8 +105,14 @@ public class JobController {
     public String upload(
             @AuthenticationPrincipal UserDetails userDetails,
             @RequestParam("csvFile") MultipartFile csvFile,
-            @RequestParam(value = "bundledComponentCheck", defaultValue = "false") boolean bundledComponentCheckEnabled,
             Model model) {
+        // Closed-mode backlog item 262 (Phase B6, docs/spec/closed-mode-plan.md §3-2): the upload
+        // form's checkbox for this is gone (jobs/new.html), and this is hardcoded false rather than
+        // bound from a request parameter -- a hand-crafted POST with bundledComponentCheck=true
+        // must not be able to re-enable it either. ResearchJob#bundledComponentCheckEnabled and its
+        // column stay (schema invariant, per §3-2), and BundledComponentResearchService itself was
+        // already a no-op as of B2 -- this just removes the last way to even set the flag true.
+        boolean bundledComponentCheckEnabled = false;
         User user = currentUser(userDetails);
 
         if (csvFile.isEmpty()) {
