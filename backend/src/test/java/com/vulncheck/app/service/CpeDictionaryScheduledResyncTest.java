@@ -1,6 +1,7 @@
 package com.vulncheck.app.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -85,6 +86,25 @@ class CpeDictionaryScheduledResyncTest {
 
         verify(nvdCpeSyncService, times(1)).releaseFullSyncGuard();
         verify(nvdCpeSyncService, never()).syncAllAndRelease(Optional.empty());
+    }
+
+    @Test
+    void runScheduledResyncReleasesTheGuardWhenHasCompletedInitialSyncThrows() {
+        // Regression test for senior-reviewer REVISE (PR #207 round 1): hasCompletedInitialSync()
+        // is an unguarded JPA read running on the worker thread after tryBeginFullSync() already
+        // won the slot. If it throws (a transient DB hiccup), runScheduledResync() must release the
+        // guard itself -- neither syncAllAndRelease() nor syncDeltaAndRelease() would ever be
+        // reached to do it via their own finally blocks, reintroducing the task-backlog items
+        // 81/136/141 guard-leak failure mode. No full-sync fallback: this week's resync is simply
+        // skipped and retried next week.
+        when(nvdCpeSyncService.hasCompletedInitialSync())
+                .thenThrow(new IllegalStateException("connection pool exhausted"));
+
+        resync.runScheduledResync();
+
+        verify(nvdCpeSyncService, times(1)).releaseFullSyncGuard();
+        verify(nvdCpeSyncService, never()).syncAllAndRelease(any());
+        verify(nvdCpeSyncService, never()).syncDeltaAndRelease(any());
     }
 
     @Test
