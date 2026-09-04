@@ -13,7 +13,7 @@
 <p>
     製品名から自動的にパッケージの実在・バージョンを照合できるレジストリです。このデプロイ（<code>closed-mode</code>）では、
     これらのレジストリへアイテムごとにライブ照会することはなく、事前にローカルへ同期済みのミラーデータに対して照合します。
-    照合そのものは通常どおり動作しており、以下は対応エコシステムの一覧です。
+    以下の9エコシステムは、このミラー照合が通常どおり動作しています。
 </p>
 <table border="1" cellpadding="4">
     <thead>
@@ -22,7 +22,6 @@
     <tbody>
     <tr><td>npm</td><td>npm (Node.js)</td></tr>
     <tr><td>pypi</td><td>PyPI (Python)</td></tr>
-    <tr><td>maven</td><td>Maven Central (Java)</td></tr>
     <tr><td>go</td><td>Go module proxy</td></tr>
     <tr><td>nuget</td><td>NuGet (.NET)</td></tr>
     <tr><td>rubygems</td><td>RubyGems (Ruby)</td></tr>
@@ -58,6 +57,7 @@
     現在このデプロイでは識別・脆弱性調査ができません。
 </p>
 <ul>
+    <li>Maven Central（Java、座標 group:artifact:version）— このデプロイにはMaven Centralのミラーが無いため、自動照合できません（詳細は<code>docs/spec/closed-mode-plan.md</code>§5-4を参照）</li>
     <li>VS Code Marketplace（拡張機能）</li>
     <li>Chrome ウェブストア（拡張機能）</li>
     <li>Docker Hub（コンテナイメージ）</li>

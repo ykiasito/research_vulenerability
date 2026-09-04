@@ -28,7 +28,12 @@ import lombok.Setter;
  * {@link com.vulncheck.app.controller.GuideController} no longer queries this table (senior-reviewer
  * REVISE, item 262/PR#200) — its registry-list guide page section is a static list now, since an
  * always-empty DB-driven table misleadingly implied this deployment does no registry matching at
- * all, when in fact all 10 registry clients still serve Tier1 lookups from their local mirror.
+ * all, when in fact 9 of the 10 registry clients still serve Tier1 lookups from their local mirror
+ * (the one exception, Maven Central, never got a closed-mode mirror — {@code
+ * docs/spec/closed-mode-plan.md} §5-4 — and is listed separately on that same guide page as a
+ * distribution channel this deployment can't auto-match; see {@link
+ * com.vulncheck.app.controller.GuideController}'s own javadoc for the second-round REVISE this
+ * fixed).
  */
 @Entity
 @Table(name = "ecosystem_registries")
