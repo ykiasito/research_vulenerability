@@ -700,6 +700,135 @@ class ClosedModeArchitectureGateTest {
                 .isEmpty();
     }
 
+    // ------------------------------------------------------------------------------------------
+    // Closed-mode-only migrations (item 261, found during PR#200/item 262's senior-reviewer
+    // review, 2026-09-04): the three tests above only ever look at files matching VERSIONED_MIGRATION
+    // (V\d+__*.sql, i.e. files also on master) — a file that ISN'T on master at all, like
+    // R__closed_mode_strip.sql (item 262/B6, the one migration that only exists on closed-mode),
+    // was invisible to both the filename-set gate and the content-hash gate. That is exactly the
+    // blind spot item 205 closed for V*__ files, left open here — and worse for a repeatable
+    // migration specifically: Flyway re-runs an R__ file automatically the moment its checksum
+    // changes, so an unnoticed edit here doesn't just risk a startup FlywayValidateException
+    // (V*__ files' failure mode) -- it risks silently *re-executing* a DELETE against
+    // secret-bearing/data tables with different SQL than what was reviewed. The three tests below
+    // mirror the V*__ trio above, scoped to the complementary file set (anything under
+    // db/migration that ISN'T a V\d+__ file).
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Every {@code closed-mode}-only migration file (i.e. present on this branch but never on
+     * {@code master} — R__ repeatable migrations, or any future U__ undo migration) that is
+     * expected to exist under {@code db/migration}. Currently just {@code R__closed_mode_strip.sql}
+     * (item 262/B6). A future addition here must be a deliberate, reviewed closed-mode-only
+     * migration, not a stray file — see {@link #closedModeOnlyMigrationSetMatchesBaseline()}.
+     */
+    private static final Set<String> CLOSED_MODE_ONLY_MIGRATION_BASELINE =
+            Set.of("R__closed_mode_strip.sql");
+
+    /**
+     * SHA-256 (hex-encoded) of every file in {@link #CLOSED_MODE_ONLY_MIGRATION_BASELINE}. Same
+     * purpose as {@link #MASTER_MIGRATION_CONTENT_SHA256}, but for files that were never on master
+     * to begin with, so there is no "master baseline" to diff against — the reference point here is
+     * simply "the content this was last reviewed/approved with".
+     *
+     * <p><b>Maintenance</b>: unlike {@link #MASTER_MIGRATION_CONTENT_SHA256} (refreshed only on a
+     * master-sync merge), this hash is refreshed whenever {@code R__closed_mode_strip.sql}'s own
+     * content is deliberately, reviewably changed on closed-mode itself (there is no upstream to
+     * sync from) — e.g. adding a third DELETE statement for a newly-identified closed-mode-only
+     * table. If this fails without such a change, treat it as unreviewed drift to investigate and
+     * revert, not as a baseline to casually update.
+     */
+    private static final Map<String, String> CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256 = new LinkedHashMap<>();
+
+    static {
+        CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256.put("R__closed_mode_strip.sql",
+                "6a47fd3883917a827e26c2e5f65ea6274cea36d6c064b834636c326fe62dbb03");
+    }
+
+    @Test
+    void closedModeOnlyMigrationSetMatchesBaseline() throws IOException {
+        Path migrationDir = Path.of("src/main/resources/db/migration");
+        assertThat(Files.isDirectory(migrationDir))
+                .as("expected %s to exist relative to the backend module root", migrationDir)
+                .isTrue();
+
+        try (Stream<Path> files = Files.list(migrationDir)) {
+            Set<String> actualClosedModeOnlyFiles = files
+                    .map(path -> path.getFileName().toString())
+                    .filter(name -> name.endsWith(".sql") && !VERSIONED_MIGRATION.matcher(name).matches())
+                    .collect(Collectors.toSet());
+
+            Set<String> unexpected = actualClosedModeOnlyFiles.stream()
+                    .filter(name -> !CLOSED_MODE_ONLY_MIGRATION_BASELINE.contains(name))
+                    .collect(Collectors.toSet());
+            Set<String> missing = CLOSED_MODE_ONLY_MIGRATION_BASELINE.stream()
+                    .filter(name -> !actualClosedModeOnlyFiles.contains(name))
+                    .collect(Collectors.toSet());
+
+            assertThat(actualClosedModeOnlyFiles)
+                    .as("db/migration's non-V*__ .sql file set must match "
+                            + "CLOSED_MODE_ONLY_MIGRATION_BASELINE exactly (extra: %s | missing: %s) — "
+                            + "every closed-mode-only migration must be a deliberate, reviewed addition "
+                            + "recorded in this baseline, not a silent extra file", unexpected, missing)
+                    .isEqualTo(CLOSED_MODE_ONLY_MIGRATION_BASELINE);
+        }
+    }
+
+    /** Same self-consistency check as {@link #migrationContentBaselineCoversEveryBaselineFile()},
+     *  for the closed-mode-only baseline: a file added to {@link #CLOSED_MODE_ONLY_MIGRATION_BASELINE}
+     *  without a matching hash entry would otherwise go silently un-hashed by {@link
+     *  #closedModeOnlyMigrationContentMatchesBaseline()}. */
+    @Test
+    void closedModeOnlyMigrationContentBaselineCoversEveryBaselineFile() {
+        assertThat(CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256.keySet())
+                .as("CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256 must hold exactly one hash entry per "
+                        + "file in CLOSED_MODE_ONLY_MIGRATION_BASELINE")
+                .isEqualTo(CLOSED_MODE_ONLY_MIGRATION_BASELINE);
+    }
+
+    /**
+     * Content-drift detection for closed-mode-only migrations — the repeatable-migration analogue
+     * of {@link #migrationContentMatchesMasterBaseline()}. Deliberately not folded into that same
+     * test/loop: mixing "diverged from master, investigate" (V*__) and "diverged from its own last
+     * reviewed content, investigate" (R__, no master to diff against) into one assertion message
+     * would blur two different failure meanings.
+     */
+    @Test
+    void closedModeOnlyMigrationContentMatchesBaseline() throws IOException {
+        Path migrationDir = Path.of("src/main/resources/db/migration");
+        assertThat(Files.isDirectory(migrationDir))
+                .as("expected %s to exist relative to the backend module root", migrationDir)
+                .isTrue();
+
+        List<String> mismatches = new ArrayList<>();
+        for (Map.Entry<String, String> baselineEntry : CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256.entrySet()) {
+            String fileName = baselineEntry.getKey();
+            Path file = migrationDir.resolve(fileName);
+            if (!Files.exists(file)) {
+                // A missing baseline file is closedModeOnlyMigrationSetMatchesBaseline()'s
+                // invariant, not this one.
+                continue;
+            }
+            String expectedSha256 = baselineEntry.getValue();
+            String actualSha256 = sha256Hex(file);
+            if (!expectedSha256.equals(actualSha256)) {
+                mismatches.add(fileName + " (expected sha256 " + expectedSha256 + ", actual "
+                        + actualSha256 + ")");
+            }
+        }
+
+        assertThat(mismatches)
+                .as("these closed-mode-only migration files have content that no longer matches "
+                        + "the last-reviewed baseline — for a repeatable (R__) migration this is "
+                        + "especially dangerous: Flyway re-runs it automatically the moment its "
+                        + "checksum changes, so an unreviewed edit here doesn't just risk a startup "
+                        + "validation failure, it risks silently re-executing an unreviewed DELETE "
+                        + "against secret-bearing/data tables. Refresh "
+                        + "CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256 only if this is a deliberate, "
+                        + "reviewed content change; otherwise revert it")
+                .isEmpty();
+    }
+
     /**
      * Self-test for {@link #migrationContentMatchesMasterBaseline()}'s detection mechanism (item
      * 205): proves {@link #sha256Hex(Path)} actually changes when a migration file's content is
