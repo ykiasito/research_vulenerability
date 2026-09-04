@@ -742,7 +742,7 @@ class ClosedModeArchitectureGateTest {
 
     static {
         CLOSED_MODE_ONLY_MIGRATION_CONTENT_SHA256.put("R__closed_mode_strip.sql",
-                "6a47fd3883917a827e26c2e5f65ea6274cea36d6c064b834636c326fe62dbb03");
+                "285a25258ccd4df3d9cd3ee6ec7f9d3358e8977d0aa17333243988d5f3334cba");
     }
 
     @Test
