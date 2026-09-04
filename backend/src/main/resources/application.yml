@@ -199,6 +199,17 @@ app:
     # (docs/spec/closed-mode-plan.md §4-2-3) finishes in roughly 4-5 daily runs.
     max-requests-per-run: ${NVD_CVE_BACKFILL_MAX_REQUESTS_PER_RUN:60}
     max-duration-minutes: ${NVD_CVE_BACKFILL_MAX_DURATION_MINUTES:60}
+  # NVD CVE API delta sync (closed-mode backlog item 284): only meaningful once the above backfill
+  # has finished (nvd_cve_sync_state.baseline_completed) -- NvdCveDeltaScheduledRunner checks that
+  # itself before ever touching NvdCveSyncService's shared run guard. Off by default, same
+  # deliberate opt-in convention as nvd-cve-backfill above.
+  nvd-cve-delta:
+    enabled: ${NVD_CVE_DELTA_ENABLED:false}
+    # 06:30 UTC daily by default -- see NvdCveDeltaScheduledRunner#runDeltaScheduledTick's javadoc
+    # for why this slot was chosen relative to the backfill's own 06:00 UTC slot.
+    cron: ${NVD_CVE_DELTA_CRON:0 30 6 * * *}
+    max-requests-per-run: ${NVD_CVE_DELTA_MAX_REQUESTS_PER_RUN:60}
+    max-duration-minutes: ${NVD_CVE_DELTA_MAX_DURATION_MINUTES:60}
 
 server:
   port: 8080

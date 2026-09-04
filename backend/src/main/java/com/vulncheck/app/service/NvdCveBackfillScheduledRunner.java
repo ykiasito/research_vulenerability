@@ -19,10 +19,11 @@ import org.springframework.stereotype.Component;
  *
  * <p><b>Self-terminating, unlike {@link CpeDictionaryScheduledResync}</b>: once {@code
  * nvd_cve_sync_state.baseline_completed} is true, {@link #runBackfillTick} returns immediately and
- * does nothing else, forever (no delta-sync fallback — see {@link NvdCveSyncService}'s class
- * javadoc for why delta isn't wired to any scheduler yet). At the default budget (60 requests/60
- * minutes per run), a full backfill (~245-300 requests, §4-2-3) finishes in roughly 4-5 daily runs;
- * every run after that is a cheap one-row {@code SELECT} that exits immediately.
+ * does nothing else, forever — the delta side (closed-mode backlog item 284) is driven separately
+ * by {@code NvdCveDeltaScheduledRunner}, not by this class falling back internally. At the default
+ * budget (60 requests/60 minutes per run), a full backfill (~245-300 requests, §4-2-3) finishes in
+ * roughly 4-5 daily runs; every run after that is a cheap one-row {@code SELECT} that exits
+ * immediately.
  *
  * <p>Same worker-thread/guard shape as {@link CpeDictionaryScheduledResync}: the actual sync runs
  * on its own daemon thread, not the shared {@code @Scheduled} pool thread (this pool is already
