@@ -158,6 +158,23 @@ class NvdCpeSyncServiceTest {
         syncServer.verify();
     }
 
+    @Test
+    void syncReportsIncompleteWhenAPageReportsResultsButReturnsNoProducts() {
+        // Regression test for senior-reviewer REVISE (PR #207 round 1): NVD returning a 2xx
+        // response whose totalResults says there's more to fetch, but whose products array is
+        // empty, used to be treated identically to a legitimate "no more pages" signal (fetched ==
+        // 0) -- silently recording this partial dictionary as a clean finish and, for an unfiltered
+        // sync, advancing cpe_dictionary_sync_state past a window that was never actually ingested.
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":500,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isFalse();
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+        syncServer.verify();
+    }
+
     // --- closed-mode backlog item 283: delta sync -------------------------------------------
 
     @Test

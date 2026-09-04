@@ -120,9 +120,33 @@ public class CpeDictionaryScheduledResync {
      * like both of those methods themselves require. Package-private rather than private so a unit
      * test can invoke it directly on the test thread and assert on its dispatch behavior without
      * having to synchronize with a real background thread.
+     *
+     * <p>senior-reviewer REVISE (PR #207, round 1): {@code hasCompletedInitialSync()} is an
+     * unguarded JPA read (a {@code SELECT} against {@code cpe_dictionary_sync_state}) running here,
+     * on the worker thread, <em>after</em> {@link #resyncWeekly} already won {@link
+     * NvdCpeSyncService#tryBeginFullSync}'s slot. If that read throws (a transient DB hiccup —
+     * connection-pool exhaustion, a brief outage), this method would exit without ever reaching
+     * {@link #runFullSync}/{@link #runDeltaSync}, so neither {@link
+     * NvdCpeSyncService#syncAllAndRelease}'s nor {@link NvdCpeSyncService#syncDeltaAndRelease}'s
+     * own {@code finally} block would ever run — the exact task-backlog items 81/136/141 guard-leak
+     * failure mode this class already goes to some lengths to avoid everywhere else (see {@link
+     * #resyncWeekly}'s catch block and {@link #resolveAdminKey}'s own try/catch), reintroduced by
+     * this one unguarded call. Deliberately no full-sync fallback on failure: a DB unhealthy enough
+     * to fail this read would fail {@link NvdCpeSyncService#syncAllAndRelease} moments later anyway
+     * (it upserts into that same database), so the only thing this catch block needs to guarantee
+     * is that the guard gets released — this week's resync is simply skipped and retried next week.
      */
     void runScheduledResync() {
-        if (nvdCpeSyncService.hasCompletedInitialSync()) {
+        boolean initialSyncCompleted;
+        try {
+            initialSyncCompleted = nvdCpeSyncService.hasCompletedInitialSync();
+        } catch (Throwable t) {
+            nvdCpeSyncService.releaseFullSyncGuard();
+            log.error("Scheduled weekly NVD CPE dictionary resync aborted before starting — could not "
+                    + "determine full-vs-delta (sync slot released)", t);
+            return;
+        }
+        if (initialSyncCompleted) {
             runDeltaSync();
         } else {
             runFullSync();
