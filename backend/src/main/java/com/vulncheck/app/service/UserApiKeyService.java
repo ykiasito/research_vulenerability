@@ -91,9 +91,11 @@ public class UserApiKeyService {
      */
     public Optional<String> getNvdApiKey(Long userId) {
         try {
-            return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_NVD)
+            Optional<String> key = userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_NVD)
                     .map(secret -> secretEncryptionService.decrypt(
                             secret.getEncryptedKey(), userId, UserSecret.PROVIDER_NVD));
+            nvdKeyDecryptFailureWarnedUserIds.remove(userId);
+            return key;
         } catch (Exception e) {
             if (nvdKeyDecryptFailureWarnedUserIds.add(userId)) {
                 log.warn("Failed to decrypt NVD API key for userId={} — falling back to unkeyed", userId);
