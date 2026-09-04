@@ -24,8 +24,11 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.PropertySource;
+import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.FileSystemResource;
 
 /**
@@ -906,6 +909,64 @@ class ClosedModeArchitectureGateTest {
             // practice, but MessageDigest.getInstance declares it as checked.
             throw new AssertionError("SHA-256 MessageDigest not available", e);
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Item 289 (2026-09-04): the six migration gates above (§3-6 item 5, item 261, item 288) all
+    // hardcode src/main/resources/db/migration as the directory to scan/hash, but never assert
+    // that Flyway itself is actually configured to read only that directory. If a second entry
+    // were ever added to spring.flyway.locations (e.g. classpath:db/extra-migration) in either
+    // application.yml, Flyway would execute migrations from it while every gate above stayed
+    // completely blind to it — same failure shape as item 288's non-recursive scan, but one level
+    // up (a whole extra Flyway-scanned location, not just a subdirectory of the one already
+    // covered). These two tests close that gap for both the production and test application.yml
+    // (same YamlPropertySourceLoader technique already used by dockerComposeHasNoLlmServiceService
+    // above and PoolSizeConfigBindingTest).
+    // ------------------------------------------------------------------------------------------
+
+    private static final String EXPECTED_FLYWAY_LOCATION = "classpath:db/migration";
+
+    @Test
+    void productionApplicationYamlFlywayLocationsIsExactlyDbMigration() throws IOException {
+        assertFlywayLocationsIsExactlyDbMigration("src/main/resources/application.yml");
+    }
+
+    @Test
+    void testApplicationYamlFlywayLocationsIsExactlyDbMigration() throws IOException {
+        assertFlywayLocationsIsExactlyDbMigration("src/test/resources/application.yml");
+    }
+
+    /**
+     * Loads {@code yamlPath} with {@link YamlPropertySourceLoader} (no {@code ApplicationContext},
+     * same rationale as {@link #dockerComposeHasNoLlmServiceService()} above) and asserts {@code
+     * spring.flyway.locations} binds to exactly {@code [classpath:db/migration]} — one entry, no
+     * more, no fewer. {@code spring.flyway.locations} accepts either a single scalar or a YAML
+     * list; binding it as {@code List<String>} handles both forms (a bare scalar binds to a
+     * single-element list) without the test needing to know which form the YAML uses.
+     */
+    private static void assertFlywayLocationsIsExactlyDbMigration(String yamlPath) throws IOException {
+        YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
+        List<PropertySource<?>> loaded = loader.load("application", new FileSystemResource(yamlPath));
+
+        StandardEnvironment environment = new StandardEnvironment();
+        environment.getPropertySources().remove(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME);
+        environment.getPropertySources().remove(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME);
+        loaded.forEach(propertySource -> environment.getPropertySources().addLast(propertySource));
+
+        List<String> locations = Binder.get(environment)
+                .bind("spring.flyway.locations", Bindable.listOf(String.class))
+                .orElseThrow(() -> new AssertionError(
+                        yamlPath + " must set spring.flyway.locations — its absence means Flyway would fall "
+                                + "back to its own default (classpath:db/migration, same value we require here, "
+                                + "but implicitly rather than explicitly configured), which this gate cannot "
+                                + "distinguish from a deliberate but different configuration"));
+
+        assertThat(locations)
+                .as("%s's spring.flyway.locations must be exactly [%s] — every migration gate above "
+                        + "(§3-6 item 5, item 261, item 288) only scans/hashes that one directory, so a "
+                        + "second location would let Flyway execute migrations none of those gates can see",
+                        yamlPath, EXPECTED_FLYWAY_LOCATION)
+                .containsExactly(EXPECTED_FLYWAY_LOCATION);
     }
 
     // ------------------------------------------------------------------------------------------
