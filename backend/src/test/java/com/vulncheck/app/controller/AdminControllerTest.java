@@ -13,6 +13,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.vulncheck.app.repository.CpeDictionaryRepository;
+import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
@@ -184,7 +185,8 @@ class AdminControllerTest {
         // exact scenario would have let both syncs run at once.
         CpeDictionaryRepository sharedRepository = mock(CpeDictionaryRepository.class);
         NvdCpeSyncService sharedService = new NvdCpeSyncService(
-                mock(RestClient.class), mock(RestClient.class), sharedRepository, new NvdRateLimiter());
+                mock(RestClient.class), mock(RestClient.class), sharedRepository, new NvdRateLimiter(),
+                mock(CpeDictionarySyncStateRepository.class));
 
         // Stand-in for CpeDictionaryBootstrapSync.run() winning the race and starting first.
         assertThat(sharedService.tryBeginFullSync()).isTrue();

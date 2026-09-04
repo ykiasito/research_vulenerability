@@ -57,9 +57,10 @@ import org.springframework.web.util.UriComponentsBuilder;
  * [last_delta_synced_at - safety margin, now)} clamped to NVD's 120-day range cap (see {@link
  * #resolveDeltaChunk}), and pages it through the identical {@link #processChunkStep} logic. Neither
  * is wired to a scheduler by this class itself — {@code NvdCveBackfillScheduledRunner} drives the
- * backfill side; nothing yet drives the delta side (out of scope for backlog item 202's (2)-(5),
- * which covers mirror infrastructure only, not the A/B verification + cutover that would make delta
- * sync operationally relevant).
+ * backfill side, {@code NvdCveDeltaScheduledRunner} drives the delta side (closed-mode backlog item
+ * 284; deliberately deferred until items 241/251 — the A/B verification gate and the mirror-only
+ * cutover — both completed, so enabling delta sync earlier wouldn't taint that verification with
+ * mirror data-freshness drift).
  *
  * <p><b>Run budget, counted in attempts</b>: both entry points take a {@link RunBudget} (request
  * count + wall-clock duration) and stop cleanly once either is exhausted, leaving any unfinished
@@ -165,8 +166,9 @@ public class NvdCveSyncService {
     /** Runs one budgeted delta tick and unconditionally releases {@link #runInProgress} afterward
      *  — same contract as {@link #runBackfillTickAndRelease}. No-ops (returns {@code
      *  SyncOutcome(0, false)}) if the baseline backfill hasn't completed yet — delta sync is only
-     *  meaningful against a complete baseline. Not currently invoked by any scheduler (see the
-     *  class javadoc); exposed for the executor-reuse this class's design requires. */
+     *  meaningful against a complete baseline. Invoked by {@code NvdCveDeltaScheduledRunner} (see
+     *  the class javadoc); this no-op is also relied on defensively there in case its own
+     *  baseline-completed pre-check ever races with a backfill run's completion. */
     public SyncOutcome runDeltaTickAndRelease(Optional<String> apiKey, RunBudget budget) {
         try {
             return runDeltaTick(apiKey, budget);
