@@ -39,11 +39,10 @@ class NvdCpeSyncServiceTest {
 
     @BeforeEach
     void setUp() {
-        RestClient externalApiRestClient = RestClient.builder().build();
         RestClient.Builder syncClientBuilder = RestClient.builder();
         syncServer = MockRestServiceServer.bindTo(syncClientBuilder).build();
         cpeDictionaryRepository = mock(CpeDictionaryRepository.class);
-        service = new NvdCpeSyncService(externalApiRestClient, syncClientBuilder.build(), cpeDictionaryRepository,
+        service = new NvdCpeSyncService(syncClientBuilder.build(), cpeDictionaryRepository,
                 new NvdRateLimiter());
     }
 
@@ -108,8 +107,8 @@ class NvdCpeSyncServiceTest {
     @Test
     void encodesCsvSuppliedKeywordCharactersInTheQueryStringToPreventParameterInjection() {
         // Backlog item 253 (senior review, 2026-09-03, PR#158 follow-up): keyword is the
-        // CSV-supplied product name (see Stage1IdentificationService#syncKeywordSinglePage and
-        // AdminController#syncByKeyword), and fetchPage() used to build the query string without
+        // CSV-supplied product name (see AdminController#syncByKeyword), and fetchPage() used to
+        // build the query string without
         // UriComponentsBuilder#encode() -- a product cell containing "&resultsPerPage=1" would
         // inject its own resultsPerPage ahead of the real one. Same class of bug as
         // NvdVulnerabilitySource's cpeName case (PR#163); confirms the "&" stays percent-encoded

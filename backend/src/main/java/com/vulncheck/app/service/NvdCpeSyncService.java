@@ -46,7 +46,6 @@ public class NvdCpeSyncService {
      *  (6.5s unkeyed), the page count, not the byte count, dominates total sync time. */
     private static final int RESULTS_PER_PAGE = 10000;
 
-    private final RestClient externalApiRestClient;
     private final RestClient nvdSyncRestClient;
     private final CpeDictionaryRepository cpeDictionaryRepository;
     private final NvdRateLimiter nvdRateLimiter;
@@ -113,29 +112,6 @@ public class NvdCpeSyncService {
         }
     }
 
-    /**
-     * Single-page, on-demand keyword lookup — bounded to exactly one rate-limited NVD call, never
-     * paginates. Used by {@code Stage1IdentificationService} when the local dictionary has no
-     * candidates at all for a product, so an unknown-to-us product can still be resolved live
-     * instead of requiring someone to have pre-synced that keyword via the admin screen first.
-     * Upserted rows land in the same {@code cpe_dictionary} table, so the lookup doubly serves as
-     * an incremental cache warm for future items with the same/similar product name.
-     */
-    public int syncKeywordSinglePage(String keyword, int resultsPerPage, Optional<String> apiKey) {
-        nvdRateLimiter.awaitTurn(apiKey.isPresent());
-        JsonNode page = fetchPage(keyword, 0, resultsPerPage, apiKey);
-        if (page == null) {
-            return 0;
-        }
-        int upserted = 0;
-        for (JsonNode productNode : page.path("products")) {
-            if (upsertProduct(productNode.path("cpe"))) {
-                upserted++;
-            }
-        }
-        return upserted;
-    }
-
     private SyncOutcome sync(String keyword, Optional<String> apiKey) {
         int startIndex = 0;
         int totalUpserted = 0;
@@ -178,14 +154,10 @@ public class NvdCpeSyncService {
         return new SyncOutcome(totalUpserted, true);
     }
 
-    private JsonNode fetchPage(String keyword, int startIndex, int resultsPerPage, Optional<String> apiKey) {
-        return fetchPage(keyword, startIndex, resultsPerPage, apiKey, externalApiRestClient);
-    }
-
     private JsonNode fetchPage(String keyword, int startIndex, int resultsPerPage, Optional<String> apiKey,
             RestClient restClient) {
-        // keyword is the CSV-supplied product name (see Stage1IdentificationService's
-        // syncKeywordSinglePage / AdminController's syncByKeyword), so a product cell like
+        // keyword is the CSV-supplied product name (see AdminController's syncByKeyword), so a
+        // product cell like
         // "foo&resultsPerPage=1" would otherwise inject an unencoded "&" into the query string and
         // let CSV input override resultsPerPage/startIndex above -- same class of bug as
         // NvdVulnerabilitySource's cpeName case (PR#163).
@@ -244,30 +216,5 @@ public class NvdCpeSyncService {
             }
         }
         return cpe.path("titles").size() > 0 ? cpe.path("titles").get(0).path("title").asText(null) : null;
-    }
-
-    private boolean upsertProduct(JsonNode cpe) {
-        String cpeName = cpe.path("cpeName").asText(null);
-        if (cpeName == null) {
-            return false;
-        }
-
-        CpeUtils.VendorProduct vendorProduct = CpeUtils.parseVendorProduct(cpeName);
-        String vendor = vendorProduct != null ? vendorProduct.vendor() : null;
-        String product = vendorProduct != null ? vendorProduct.product() : null;
-
-        String title = null;
-        for (JsonNode titleNode : cpe.path("titles")) {
-            if ("en".equals(titleNode.path("lang").asText())) {
-                title = titleNode.path("title").asText(null);
-                break;
-            }
-        }
-        if (title == null && cpe.path("titles").size() > 0) {
-            title = cpe.path("titles").get(0).path("title").asText(null);
-        }
-
-        cpeDictionaryRepository.upsert(cpeName, title, vendor, product);
-        return true;
     }
 }
