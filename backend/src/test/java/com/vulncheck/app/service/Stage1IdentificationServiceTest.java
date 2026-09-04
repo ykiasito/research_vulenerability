@@ -9,7 +9,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.vulncheck.app.entity.CpeDictionaryEntry;
@@ -41,6 +40,17 @@ import org.mockito.junit.jupiter.MockitoExtension;
  * condition every real closed-mode job runs under now. Every remaining test here already asserted
  * that fallback outcome, so removing the (now nonexistent) API-key/LLM-response stubs is the only
  * change most of them needed.
+ *
+ * <p>Closed-mode backlog item 273 (B4): the live NVD CPE keyword-search fallback ({@code
+ * liveNvdCpeLookupWithFallback}, {@code UserApiKeyService}/{@code NvdCpeSyncService} collaborators)
+ * has since been physically deleted too. The 4 tests whose entire purpose was validating that live
+ * path outright ({@code emptyLocalDictionaryFallsBackToLiveNvdCpeLookup}, {@code
+ * reQueriesWithTheWordDroppedVariantThatActuallySucceededNotTheOriginalFullQuery}, {@code
+ * nonEmptyLocalDictionaryNeverTriggersLiveNvdLookup}, {@code
+ * variantSearchDoesNotSuppressLiveNvdFallbackForAKnownRealName}) were removed outright rather than
+ * adapted; every other test that merely stubbed {@code nvdCpeSyncService.syncKeywordSinglePage} as
+ * boilerplate (never asserting anything about it) had just that now-unneeded stub line dropped,
+ * keeping its own actual assertions unchanged.
  */
 @ExtendWith(MockitoExtension.class)
 class Stage1IdentificationServiceTest {
@@ -52,12 +62,6 @@ class Stage1IdentificationServiceTest {
 
     @Mock
     private IdentifiedProductRepository identifiedProductRepository;
-
-    @Mock
-    private UserApiKeyService userApiKeyService;
-
-    @Mock
-    private NvdCpeSyncService nvdCpeSyncService;
 
     @Mock
     private RegistryRoutingPolicy registryRoutingPolicy;
@@ -93,8 +97,8 @@ class Stage1IdentificationServiceTest {
                 lookups, registryRoutingPolicy, new RegistryLookupCache());
         Stage1AiArbitration aiArbitration = new Stage1AiArbitration();
         return new Stage1IdentificationService(
-                cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService,
-                nvdCpeSyncService, highConfidenceVerificationService, registryIdentification, aiArbitration);
+                cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository,
+                highConfidenceVerificationService, registryIdentification, aiArbitration);
     }
 
     private void stubSaveReturnsArgument() {
@@ -138,7 +142,6 @@ class Stage1IdentificationServiceTest {
         };
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of());
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
 
         service(List.of(npmLookup)).identify(item("lodash"), USER_ID);
 
@@ -146,7 +149,15 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
-    void registryMatchSkipsLiveNvdCpeLookupWhenLocalDictionaryIsEmpty() {
+    void registryMatchSkipsNameVariantSearchWhenLocalDictionaryIsEmpty() {
+        // REVISE (senior-reviewer, PR#196): "express" is a single token, so
+        // expandLeadingInitialism/contractToAcronym/stripLeadingVendor all early-return on their
+        // own regardless of whether the registry-match skip fires -- getCpe() would be null either
+        // way, so the original version of this test didn't actually prove the skip does anything.
+        // "VM Player" (proven elsewhere in this file, e.g.
+        // aLoneNameVariantDerivedCpeCandidateIsDroppedRatherThanAutoAcceptedWithNoApiKey, to
+        // tokenize to ["vm","player"] and reach findByLeadingInitialismMatch when the skip is NOT
+        // in play) makes the explicit never() verification below meaningful.
         PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
             @Override
             public Optional<RegistryMatch> lookup(String name, String version) {
@@ -161,12 +172,12 @@ class Stage1IdentificationServiceTest {
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
         stubSaveReturnsArgument();
 
-        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item("express"), USER_ID);
+        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item("VM Player"), USER_ID);
 
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("npm");
         assertThat(result.get().getCpe()).isNull();
-        verifyNoInteractions(nvdCpeSyncService);
+        verify(cpeDictionaryRepository, never()).findByLeadingInitialismMatch(anyString(), anyString(), anyInt());
     }
 
     @Test
@@ -296,7 +307,6 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getEcosystem()).isEqualTo("npm");
         assertThat(result.get().getPackageName()).isEqualTo("cobra");
-        verifyNoInteractions(nvdCpeSyncService);
     }
 
     @Test
@@ -452,7 +462,6 @@ class Stage1IdentificationServiceTest {
         // The vendor must never enter the query text; it is only a re-ranking signal.
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of());
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
 
         ResearchJobItem item = item("TeamViewer");
         item.setVendor("Amazon Web Services");
@@ -584,7 +593,6 @@ class Stage1IdentificationServiceTest {
                 .thenReturn(List.of());
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
                 .thenReturn(List.of(vlcMediaPlayer, otherVariantGuess));
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
         stubSaveReturnsArgument();
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
@@ -593,54 +601,6 @@ class Stage1IdentificationServiceTest {
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:videolan:vlc_media_player:1.0.0:*:*:*:*:*:*:*");
         assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
         assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
-    }
-
-    @Test
-    void emptyLocalDictionaryFallsBackToLiveNvdCpeLookup() {
-        CpeDictionaryEntry liveHit = cpeEntry("cpe:2.3:a:amazon:aws_cli:2.15.0:*:*:*:*:*:*:*", "aws_cli");
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of())
-                .thenReturn(List.of(liveHit));
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(1);
-        stubSaveReturnsArgument();
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("AWS CLI"), USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:amazon:aws_cli:1.0.0:*:*:*:*:*:*:*");
-        verify(nvdCpeSyncService).syncKeywordSinglePage(anyString(), anyInt(), any());
-    }
-
-    @Test
-    void reQueriesWithTheWordDroppedVariantThatActuallySucceededNotTheOriginalFullQuery() {
-        // Real gap observed live: "GitKraken GitLens - Git supercharged" (vendor + product, 5
-        // words) failed the live NVD lookup, but dropping the trailing word down to "GitKraken
-        // GitLens - Git" succeeded and upserted real entries — yet re-querying the local
-        // dictionary with the ORIGINAL 5-word string diluted trigram similarity below both
-        // thresholds (observed live: 0.276/0.286 vs. thresholds of 0.3/0.6), silently discarding
-        // the very rows the live call had just upserted. The re-query must use the shorter query
-        // that actually succeeded.
-        // Product slug deliberately matches the full query ("widgetlens_pro_ultra", not just
-        // "widgetlens") so this stays a clean direction-1 (candidate-contains-query) match with no
-        // leftover query tokens at all — REVISE item 5's single-token-candidate trailing-token check
-        // is a separate concern this test isn't exercising.
-        CpeDictionaryEntry liveHit =
-                cpeEntry("cpe:2.3:a:acme:widgetlens_pro_ultra:11.0.0:*:*:*:*:*:*:*", "widgetlens_pro_ultra");
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of());
-        when(cpeDictionaryRepository.findFuzzyMatches(eq("Acme Widgetlens Pro"), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(liveHit));
-        when(nvdCpeSyncService.syncKeywordSinglePage(eq("Acme Widgetlens Pro Ultra"), anyInt(), any())).thenReturn(0);
-        when(nvdCpeSyncService.syncKeywordSinglePage(eq("Acme Widgetlens Pro"), anyInt(), any())).thenReturn(1);
-        stubSaveReturnsArgument();
-
-        ResearchJobItem item = item("Widgetlens Pro Ultra");
-        item.setVendor("Acme");
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:widgetlens_pro_ultra:1.0.0:*:*:*:*:*:*:*");
-        verify(cpeDictionaryRepository).findFuzzyMatches(eq("Acme Widgetlens Pro"), anyDouble(), anyDouble(), anyInt());
     }
 
     @Test
@@ -811,17 +771,6 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
-    void nonEmptyLocalDictionaryNeverTriggersLiveNvdLookup() {
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(cpeEntry("cpe:2.3:a:lodash:lodash:4.17.0:*:*:*:*:*:*:*", "lodash")));
-        stubSaveReturnsArgument();
-
-        service(List.of()).identify(item("lodash"), USER_ID);
-
-        verifyNoInteractions(nvdCpeSyncService);
-    }
-
-    @Test
     void theInitialismExpansionSearchRejectsAnAnchorMatchWhoseLeadingWordsDoNotSpellTheAbbreviation() {
         // Guards the new candidate-generation path against reintroducing the exact false-positive
         // shape prior sessions already fixed for containment matching (see
@@ -835,7 +784,6 @@ class Stage1IdentificationServiceTest {
         // is now far more targeted than a plain anchor-substring scan.
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of());
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
         CpeDictionaryEntry dockerDesktop = cpeEntry("cpe:2.3:a:docker:desktop:4.0.0:*:*:*:*:*:*:*", "desktop");
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(eq("vs"), eq("desktop"), anyInt()))
                 .thenReturn(List.of(dockerDesktop));
@@ -858,30 +806,12 @@ class Stage1IdentificationServiceTest {
                 cpeEntry("cpe:2.3:a:someone:gimp_extension_pack:1.0.0:*:*:*:*:*:*:*", "gimp_extension_pack");
         when(cpeDictionaryRepository.findFuzzyMatches(eq("gimp"), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(gimpExtension));
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
 
         Optional<IdentifiedProduct> result =
                 service(List.of()).identify(item("GNU Image Manipulation Program"), USER_ID);
 
         assertThat(result).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
-    }
-
-    @Test
-    void variantSearchDoesNotSuppressLiveNvdFallbackForAKnownRealName() {
-        // Regression for the bug the senior review found 2026-08-25: the name-variant search used to
-        // run *inside* localCpeLookup and could produce *a* candidate (even a wrong one) before the
-        // live NVD fallback ever got a chance to run at all, silently suppressing that strictly
-        // better fallback stage. "GitLens - Git supercharged" is a real historical product in this
-        // app's own data (currently UNIDENTIFIED) — the point here is only that the live NVD lookup
-        // actually gets tried, not that the item resolves.
-        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
-
-        Optional<IdentifiedProduct> result = service(List.of()).identify(item("GitLens - Git supercharged"), USER_ID);
-
-        assertThat(result).isEmpty();
-        verify(nvdCpeSyncService, org.mockito.Mockito.atLeastOnce()).syncKeywordSinglePage(anyString(), anyInt(), any());
     }
 
     @Test
@@ -898,7 +828,6 @@ class Stage1IdentificationServiceTest {
                 .thenReturn(List.of());
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
                 .thenReturn(List.of(vlcMediaPlayer));
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("VM Player"), USER_ID);
 
@@ -919,7 +848,6 @@ class Stage1IdentificationServiceTest {
                 .thenReturn(List.of(wrongMatch));
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
                 .thenReturn(List.of(wrongMatch));
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("animal-sniffer-annotations"), USER_ID);
 
@@ -940,7 +868,6 @@ class Stage1IdentificationServiceTest {
                 .thenReturn(List.of(oplynx));
         when(cpeDictionaryRepository.findByLeadingInitialismMatch(anyString(), anyString(), anyInt()))
                 .thenReturn(List.of(oplynx));
-        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("org.projectlombok:lombok"), USER_ID);
 

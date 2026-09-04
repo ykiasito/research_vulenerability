@@ -78,12 +78,6 @@ class Stage1GoldenBenchmarkTest {
     private IdentifiedProductRepository identifiedProductRepository;
 
     @Mock
-    private UserApiKeyService userApiKeyService;
-
-    @Mock
-    private NvdCpeSyncService nvdCpeSyncService;
-
-    @Mock
     private RegistryRoutingPolicy registryRoutingPolicy;
 
     @BeforeEach
@@ -91,9 +85,10 @@ class Stage1GoldenBenchmarkTest {
         // This benchmark deliberately validates the static-only pipeline — closed-mode B2
         // (docs/spec/closed-mode-plan.md §9-2) made that the *only* pipeline: every AI call site
         // this benchmark used to have to deliberately avoid is gone outright, always taking the
-        // exact fallback this benchmark already validated against.
+        // exact fallback this benchmark already validated against. Closed-mode backlog item 273
+        // (B4) removed the live NVD CPE keyword-search fallback entirely, so there is no longer a
+        // UserApiKeyService/NvdCpeSyncService collaborator here to stub either.
         lenient().when(registryRoutingPolicy.route(any(), any())).thenAnswer(invocation -> invocation.getArgument(1));
-        lenient().when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
         lenient().when(identifiedProductRepository.save(any(IdentifiedProduct.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
     }
@@ -122,8 +117,8 @@ class Stage1GoldenBenchmarkTest {
                 lookups, registryRoutingPolicy, new RegistryLookupCache());
         Stage1AiArbitration aiArbitration = new Stage1AiArbitration();
         Stage1IdentificationService service = new Stage1IdentificationService(
-                cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository, userApiKeyService,
-                nvdCpeSyncService, highConfidenceVerificationService, registryIdentification, aiArbitration);
+                cpeDictionaryRepository, new CpeNameVariantCache(), identifiedProductRepository,
+                highConfidenceVerificationService, registryIdentification, aiArbitration);
 
         Optional<IdentifiedProduct> result = service.identify(item, USER_ID);
 

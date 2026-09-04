@@ -184,7 +184,7 @@ class AdminControllerTest {
         // exact scenario would have let both syncs run at once.
         CpeDictionaryRepository sharedRepository = mock(CpeDictionaryRepository.class);
         NvdCpeSyncService sharedService = new NvdCpeSyncService(
-                mock(RestClient.class), mock(RestClient.class), sharedRepository, new NvdRateLimiter());
+                mock(RestClient.class), sharedRepository, new NvdRateLimiter());
 
         // Stand-in for CpeDictionaryBootstrapSync.run() winning the race and starting first.
         assertThat(sharedService.tryBeginFullSync()).isTrue();
