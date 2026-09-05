@@ -286,13 +286,67 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         // versions, google:chrome 9,530 — and Stage1IdentificationService#versionCoverageIsPlausible
         // only ever reduces the set down to its single highest major version anyway, so shipping the
         // whole set over JDBC and re-parsing every element in Java on every ranking comparison was
-        // pure waste. Computed here as max() over each row's leading digit run of the version
-        // segment (CPE segment 6, 1-indexed), matching
-        // Stage1IdentificationService#leadingMajorVersion's own parsing rule; capped at 9 digits so
-        // the ::integer cast can never overflow regardless of what a pathological version string
-        // contains. NULLIF/max collapse to SQL NULL when nothing in the partition has a numeric
-        // leading run, which versionCoverageIsPlausible treats identically to "no evidence"
-        // (always plausible).
+        // pure waste. Each row's own leading digit run of the version segment (CPE segment 6,
+        // 1-indexed) is parsed exactly like Stage1IdentificationService#leadingMajorVersion's own
+        // parsing rule; capped at 9 digits so no ::integer cast below can ever overflow regardless of
+        // what a pathological version string contains.
+        //
+        // Backlog item 346 (senior review 2026-09-05): this is the *credible* highest cataloged
+        // major, not the plain max() over every row in the partition — a single broken NVD version
+        // string can otherwise inflate the whole (vendor, product) pair's value forever (real
+        // example: oracle:vm_virtualbox's max() was 71, from one row's "71.6" among 270 catalogued
+        // versions — a typo, not a real major release) and permanently push
+        // Stage1IdentificationService#versionCoverageRank to COVERS(0) for that pair regardless of
+        // the item's actual version. The same shape hit google:android (max() 2024, from two rows
+        // whose version segment is a date, e.g. "2024-01-01", not a version). Two cheap,
+        // order-preserving passes over the same per-row major values fix both without ever rescanning
+        // the partition a second time:
+        //   - Rule A (minority digit-width scheme excluded): split the partition into "major < 1000"
+        //     and "major >= 1000" rows. When the >=1000 rows are less than 10% of all rows that have
+        //     a parseable major AND at least one <1000 row exists, the >=1000 rows are dropped from
+        //     consideration entirely (a real 4+-digit major version scheme, e.g. a genuine year-based
+        //     versioning product, would not be a small minority next to a completely different,
+        //     3-digit-or-fewer scheme in the same partition).
+        //   - Rule B (thin-support extreme outlier replaced by p99): applied after rule A, on
+        //     whichever set (narrowed by rule A or the whole partition) rule A left as credible. When
+        //     that set has at least 20 rows, at least 3 distinct majors, a 99th-percentile major of at
+        //     least 4, and the max is more than 4x that 99th percentile, the max is replaced by the
+        //     99th percentile instead — a lone outlier far beyond everything else the pair has ever
+        //     catalogued, with no other row anywhere near it.
+        // Measured against the real dictionary (read-only, 2026-09-05): of 66,228 (vendor, product)
+        // pairs with at least one parseable major, rule A fires for 204 (all of which change value,
+        // since any >=1000 row is always larger than every <1000 row and so always was the pre-fix
+        // max) and rule B fires for 14 (12 without rule A, 2 more on top of rule A's own narrowed
+        // set) — 216 pairs total change value, 0.33% of all pairs. oracle:vm_virtualbox goes from 71
+        // to 7 (still COVERS item version 7.0.14, same as before — see backlog items 308/345), and
+        // google:android goes from 2024 to 15 (Android 15, the real answer — backlog item 289/348).
+        // Legitimate large majors were confirmed to survive unchanged, e.g. postgresql:postgresql_
+        // jdbc_driver (42), gnome:nautilus (42), signal (6), onlyoffice:google_translate (99) — none
+        // of these have the "buried under everything else" shape rule B looks for. A rejected
+        // alternative was unconditionally dropping the single highest-major row per partition: NVD
+        // only catalogs the versions a CVE actually named, so a (vendor, product) pair whose latest
+        // major has exactly one row (a real, ordinary case — see backlog item 89's own pdf-xchange:
+        // pdf-xchange_editor example) would always lose its true latest major under that rule. A
+        // rejected alternative was a plain percentile alone (no rule A first): partition sizes here
+        // range from 1 row to vim:vim's 15,751, four orders of magnitude apart, so a single percentile
+        // rule is either meaningless on tiny partitions or wrongly trims a legitimate latest major off
+        // large ones.
+        //
+        // count(DISTINCT major) below (both the whole-partition and rule-A-narrowed variants) looks
+        // redundant next to max()/percentile_disc(), but removing it is a measured regression: on
+        // vim:vim (the largest partition, 15,751 rows), this aggregate's own EXPLAIN (ANALYZE,
+        // BUFFERS) execution time went from 19ms to 108ms without it. With count(DISTINCT major)
+        // present, the planner sorts the partition once and shares that sort between the ordered-set
+        // aggregates (percentile_disc) and the distinct count; without it, the distinct count forces
+        // its own separate hashed pass instead.
+        //
+        // percentile_disc(0.99) ignores NULL inputs on its own — no NULLS LAST/FIRST or extra
+        // filtering is needed for a row with no parseable major version to simply not participate in
+        // either percentile.
+        //
+        // NULLIF/max collapse to SQL NULL when nothing in the partition has a numeric leading run
+        // (propagated the same way through both rule A's and rule B's CASE expressions below), which
+        // versionCoverageIsPlausible treats identically to "no evidence" (always plausible).
         //
         // Both are re-derived via a CROSS JOIN LATERAL against the small (<= limit, currently 40)
         // row set the trigram-filtered subquery above already narrows down to, rather than as a
@@ -328,13 +382,15 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         // aggregate entirely instead of joining back to its own outer row — verified against the
         // real dictionary that vendor/product are NULL on zero rows today, so this never actually
         // happens in practice. "=" was chosen over "IS NOT DISTINCT FROM" because it is a plain
-        // btree-indexable equality that the V31 (vendor, product) index (see that migration) can
-        // back directly, where "IS NOT DISTINCT FROM" cannot use a plain btree index scan the same
-        // way. The "cost 8.57 vs 47147" figure from an earlier revision of this comment was written
-        // before V31 had actually been applied to any real database and was never reproduced — as of
-        // 2026-08-30 the dev DB still only has V30 applied (V31 has not been rolled out yet), so that
-        // specific comparison remains unverified pending V31's actual rollout; re-measure with EXPLAIN
-        // once V31 is applied rather than trusting the old figure.
+        // btree-indexable equality that the V31 (vendor, product) index (idx_cpe_dictionary_vendor_
+        // product, see that migration) can back directly, where "IS NOT DISTINCT FROM" cannot use a
+        // plain btree index scan the same way. The "cost 8.57 vs 47147" figure from an earlier
+        // revision of this comment was written before V31 had actually been applied to any real
+        // database and was never reproduced — V31 is applied on this dev DB as of 2026-09-06
+        // (confirmed via \d cpe_dictionary), and the LATERAL join for both 'chrome' and 'vim' below
+        // does use a Bitmap Index Scan on idx_cpe_dictionary_vendor_product (see the item 346 EXPLAIN
+        // (ANALYZE, BUFFERS) figures further down), so the index itself is doing its job; the specific
+        // "cost 8.57 vs 47147" equality-operator comparison was still not independently re-verified.
         //
         // What has been verified against the real dictionary on this dev DB (2026-08-30, before V31):
         // product 'chrome' went from 2003.2ms on the pre-LATERAL query shape (a window function over
@@ -342,6 +398,16 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
         // current CROSS JOIN LATERAL shape, ~5x faster, because the LATERAL join only re-derives
         // target_sw_values/max_cataloged_major for the <= limit rows the trigram filter already
         // narrowed down to, rather than for every trigram-filtered row up front.
+        //
+        // Backlog item 346's own EXPLAIN (ANALYZE, BUFFERS), measured directly against this LATERAL
+        // subquery in isolation (not the whole collect() call) on this dev DB with a fully warm
+        // buffer cache (repeated back-to-back to eliminate first-run disk read noise), 2026-09-06,
+        // before vs. after the rule A/B outlier guard below: google:chrome (9,558 rows) 14.2ms ->
+        // 17.6ms, vim:vim (15,751 rows, the largest partition) 19.8ms -> 26.1ms. Both partitions
+        // switch from a plain Aggregate to an Aggregate over an explicit Sort (needed by
+        // percentile_disc/count(DISTINCT major)), which accounts for essentially all of the added
+        // time -- still comfortably sub-30ms and negligible next to the <= limit (40) LATERAL
+        // invocations any one collect() call makes.
         //
         // regexp_replace(d.cpe_string, '\\:', '', 'g') (senior review, job 37 root-cause): a plain
         // split_part mis-indexes every segment from the first escaped colon onward — CPE 2.3
@@ -371,13 +437,70 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
                 + ") deduped ORDER BY score DESC, id LIMIT ?"
                 + ") t "
                 + "CROSS JOIN LATERAL ("
-                + "SELECT array_agg(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 11)) "
-                + "FILTER (WHERE d." + column + " % ? AND similarity(d." + column + ", ?) > ?) AS target_sw_values, "
-                + "max((NULLIF(substring(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 6) "
-                + "from '^[0-9]{1,9}'), ''))::integer) AS max_cataloged_major, "
-                + "count(*)::integer AS cataloged_row_count "
+                // Layer 1 (innermost): one row per cataloged row in the (vendor, product) partition
+                // -- target_sw and major parsed exactly as before, plus "matched" reproducing the
+                // FILTER predicate target_sw_values has always used (both the "%" pre-filter and the
+                // explicit similarity(...) > ? predicate, mirroring the outer subquery's own WHERE).
+                + "WITH per_row AS ("
+                + "SELECT split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 11) AS target_sw, "
+                + "(d." + column + " % ? AND similarity(d." + column + ", ?) > ?) AS matched, "
+                + "(NULLIF(substring(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 6) "
+                + "from '^[0-9]{1,9}'), ''))::integer AS major "
                 + "FROM cpe_dictionary d "
                 + "WHERE d.vendor = t.vendor AND d.product = t.product"
+                + "), "
+                // Layer 2 (aggregate): target_sw_values/cataloged_row_count unchanged from before,
+                // plus the whole-partition ("_all") and sub-1000-major-only ("_narrow") statistics
+                // rule A/B (layer 3 below) choose between. See this method's own max_cataloged_major
+                // comment above for what each of rows_wide/rows_narrow/dist_*/p99_* protects against,
+                // and why count(DISTINCT major) is kept despite looking redundant next to max()/
+                // percentile_disc() (measured vim:vim regression without it: 19ms -> 108ms).
+                + "agg AS ("
+                + "SELECT array_agg(target_sw) FILTER (WHERE matched) AS target_sw_values, "
+                + "count(*)::integer AS cataloged_row_count, "
+                + "count(major) AS rows_all, "
+                + "count(*) FILTER (WHERE major >= 1000) AS rows_wide, "
+                + "count(major) FILTER (WHERE major < 1000) AS rows_narrow, "
+                + "max(major) AS max_all, "
+                + "max(major) FILTER (WHERE major < 1000) AS max_narrow, "
+                + "count(DISTINCT major) AS dist_all, "
+                + "count(DISTINCT major) FILTER (WHERE major < 1000) AS dist_narrow, "
+                + "percentile_disc(0.99) WITHIN GROUP (ORDER BY major) AS p99_all, "
+                + "percentile_disc(0.99) WITHIN GROUP (ORDER BY major) FILTER (WHERE major < 1000) AS p99_narrow "
+                + "FROM per_row"
+                + "), "
+                // Layer 2b: rule A picks which of the "_all"/"_narrow" statistics are credible for
+                // this partition -- see this method's own max_cataloged_major comment above for the
+                // exact condition and rationale. Named credible_* columns so layer 3's rule B, below,
+                // reads uniformly regardless of which side rule A picked.
+                + "credible AS ("
+                + "SELECT target_sw_values, cataloged_row_count, "
+                + "CASE WHEN rows_wide > 0 AND rows_wide * 10 < rows_all AND rows_narrow > 0 "
+                + "THEN max_narrow ELSE max_all END AS credible_max, "
+                + "CASE WHEN rows_wide > 0 AND rows_wide * 10 < rows_all AND rows_narrow > 0 "
+                + "THEN p99_narrow ELSE p99_all END AS credible_p99, "
+                + "CASE WHEN rows_wide > 0 AND rows_wide * 10 < rows_all AND rows_narrow > 0 "
+                + "THEN rows_narrow ELSE rows_all END AS credible_rows, "
+                + "CASE WHEN rows_wide > 0 AND rows_wide * 10 < rows_all AND rows_narrow > 0 "
+                + "THEN dist_narrow ELSE dist_all END AS credible_distinct "
+                + "FROM agg"
+                + ") "
+                // Layer 3 (outermost): rule B replaces a thin-support extreme outlier with the 99th
+                // percentile -- see this method's own max_cataloged_major comment above for the exact
+                // condition and the measured 216/66,228 pairs this changes. credible_max/credible_p99
+                // are compared as bigint (not the ::integer they're stored as): 4 * credible_p99 can
+                // exceed Integer.MAX_VALUE for a pathological 9-digit parsed major, which would
+                // otherwise raise a runtime "integer out of range" error instead of just comparing
+                // false.
+                + "SELECT target_sw_values, cataloged_row_count, "
+                + "CASE "
+                + "WHEN credible_max IS NULL THEN NULL "
+                + "WHEN credible_rows >= 20 AND credible_distinct >= 3 AND credible_p99 >= 4 "
+                + "AND credible_max::bigint > 4::bigint * credible_p99::bigint "
+                + "THEN credible_p99 "
+                + "ELSE credible_max "
+                + "END AS max_cataloged_major "
+                + "FROM credible"
                 + ") a "
                 // The outermost ORDER BY also carries an id tiebreak for the same reason as the
                 // inner two levels above (deduped ORDER BY and the DISTINCT ON's own inner ORDER
