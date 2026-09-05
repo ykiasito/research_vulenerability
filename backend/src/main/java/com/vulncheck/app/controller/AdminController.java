@@ -76,8 +76,22 @@ public class AdminController {
         return "admin/cpe-dictionary";
     }
 
+    /**
+     * Closed-mode backlog item 330 (先行修正): the form's {@code required} attribute is
+     * client-side only, so a direct POST can still supply a blank/whitespace keyword. Without this
+     * guard, {@link NvdCpeSyncService#syncByKeyword} would still run — {@code fetchPage} omits
+     * {@code keywordSearch} entirely for a blank keyword, silently turning this into an unfiltered
+     * ~1.8M-entry full sync running on this very request thread for ~103 minutes, without ever
+     * going through {@link NvdCpeSyncService#tryBeginFullSync}'s guard. Validated here (a friendly
+     * model error, not a 500) in addition to {@link NvdCpeSyncService}'s own defensive check, so
+     * this path never even reaches the service call.
+     */
     @PostMapping("/admin/cpe-dictionary/sync")
     public String sync(@RequestParam("keyword") String keyword, @AuthenticationPrincipal UserDetails userDetails, Model model) {
+        if (keyword == null || keyword.isBlank()) {
+            model.addAttribute("result", "キーワードを入力してください（空欄のままでは同期できません）。");
+            return "admin/cpe-dictionary";
+        }
         User user = userRepository.findByEmail(userDetails.getUsername())
                 .orElseThrow(() -> new IllegalStateException("認証済みユーザーが見つかりません。"));
         int count = nvdCpeSyncService.syncByKeyword(keyword, userApiKeyService.getNvdApiKey(user.getId()));
@@ -96,6 +110,13 @@ public class AdminController {
      * holds the single "already running" guard shared by both trigger paths, so a second click (or
      * a click racing the startup sync) while one is already running doesn't start a concurrent
      * mirror competing for the same NVD rate limit and the same {@code cpe_dictionary} upserts.
+     *
+     * <p><b>Do not add {@link NvdCpeSyncService#isMirrorFresherThan}'s freshness gate here</b>
+     * (closed-mode backlog item 330) — that gate exists only to skip the automatic,
+     * unattended-restart case ({@code CpeDictionaryBootstrapSync}); an admin clicking this button
+     * is always a deliberate, explicit request for a full sync and must run unconditionally
+     * (subject only to the shared {@code tryBeginFullSync} guard above), or there would be no way
+     * left to force a full re-sync on demand.
      */
     @PostMapping("/admin/cpe-dictionary/sync-all")
     public String cpeFullSync(Model model) {
