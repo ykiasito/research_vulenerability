@@ -1142,6 +1142,17 @@ public class Stage1IdentificationService {
      *       vendorAgrees} is true for both), leaving only which pair NVD has actually catalogued 80
      *       rows for versus 1 to break the tie — a real coin-flip on {@code id} otherwise.</li>
      * </ul>
+     *
+     * <p>Backlog item 299 case 5 (closed-mode golden-300 regression, 2026-09-05): one more key,
+     * {@link #isDerivedFromSiblingCandidate} (ascending, base-product-first), inserted immediately
+     * before K3 — see that method's own javadoc for the "Microsoft Visual Studio" vs. {@code
+     * visual_studio_code} parent-product/derived-product mixup this closes (every earlier key ties,
+     * so K3's raw catalog-volume tie-break alone decided it wrongly) and for why two earlier, less
+     * pool-relative versions of this fix were each tried and reverted after measuring real
+     * regressions against the real dev DB's golden-300 recall. Sitting right before K3 means it only
+     * ever overrides a tie K3 would otherwise settle for the wrong reason — every earlier key
+     * (exact-slug, target_sw match, K1, K2, vendorAgrees) still decides first when it can, exactly
+     * like K3 always has.
      * Performance (required by the same backlog item): every key above is now computed exactly once
      * per candidate, into a {@link RankedCandidate} record, before sorting — not recomputed inside
      * the {@link java.util.Comparator} on every one of the O(n log n) comparisons the way the
@@ -1180,7 +1191,8 @@ public class Stage1IdentificationService {
 
         String normalizedVendor = normalizeForContainment(vendor);
         String normalizedExactMatchQuery = normalizeForContainment(exactMatchQuery);
-        List<RankedCandidate> ranked = bestPerProduct.values().stream()
+        java.util.Collection<CpeDictionaryEntry> pool = bestPerProduct.values();
+        List<RankedCandidate> ranked = pool.stream()
                 .map(entry -> new RankedCandidate(
                         entry,
                         exactProductSlugMatch(normalizedExactMatchQuery, entry),
@@ -1189,6 +1201,7 @@ public class Stage1IdentificationService {
                         versionCoverageRank(entry, itemVersion),
                         versionCoverageIsPlausible(entry, itemVersion),
                         vendorAgrees(normalizedVendor, entry),
+                        isDerivedFromSiblingCandidate(entry, pool),
                         catalogedRowCount(entry)))
                 .toList();
         // Stable sort: preserves the underlying trigram ranking within each group (RankedCandidate
@@ -1209,6 +1222,7 @@ public class Stage1IdentificationService {
                         // out of scope for this fix.
                         .thenComparing(c -> c.versionPlausible() ? 0 : 1)
                         .thenComparing(c -> c.vendorAgrees() ? 0 : 1)
+                        .thenComparing(c -> c.derivedFromSiblingCandidate() ? 1 : 0)
                         .thenComparing(java.util.Comparator.comparingInt(RankedCandidate::catalogedRowCount).reversed()))
                 .limit(limit)
                 .map(RankedCandidate::entry)
@@ -1227,6 +1241,7 @@ public class Stage1IdentificationService {
             int versionCoverageRank,
             boolean versionPlausible,
             boolean vendorAgrees,
+            boolean derivedFromSiblingCandidate,
             int catalogedRowCount) {
     }
 
@@ -1443,6 +1458,61 @@ public class Stage1IdentificationService {
     private int catalogedRowCount(CpeDictionaryEntry entry) {
         Integer count = entry.getCatalogedRowCount();
         return count == null ? 0 : count;
+    }
+
+    /**
+     * Backlog item 299 case 5 (closed-mode golden-300 regression, 2026-09-05): whether some *other*
+     * candidate still in the same ranked {@code pool} is a parent product of {@code entry} — i.e.
+     * {@code entry}'s own normalized product-slug tokens start with that other candidate's tokens,
+     * plus at least one extra trailing word. Every earlier key ties for the real case this exists to
+     * fix — "Microsoft Visual Studio" 17.10 against {@code microsoft:visual_studio} (correct) and
+     * {@code microsoft:visual_studio_code} (wrong, a derived product bundled under the same
+     * vendor:product identity as one of its own extensions): both contain "visual"/"studio" so K1 is
+     * 0 for both, and both happen to cover the item's own major version 17 in their cataloged history
+     * (confirmed live: {@code visual_studio_code}'s own rows include a target_sw=python-scoped
+     * bundled extension catalogued under a "2020.x"/"2021.x" calendar version scheme that numerically
+     * covers 17) — leaving K3's raw catalogued-row-count to decide it wrongly, since {@code
+     * visual_studio_code}'s count is inflated into the thousands by exactly that same scoped
+     * extension. {@code visual_studio}'s own tokens ({@code ["visual", "studio"]}) are a strict
+     * prefix of {@code visual_studio_code}'s ({@code ["visual", "studio", "code"]}), so this method
+     * returns {@code true} only for the derived one, letting it be demoted immediately before K3.
+     *
+     * <p>Deliberately a *pairwise, pool-relative* check rather than a per-candidate comparison
+     * against the query text — two earlier, non-relative versions of this fix were each measured
+     * against the real dev DB's golden-300 recall and reverted for introducing new regressions on
+     * genuinely unrelated ties: (1) a {@code target_sw}-set-based version treated legitimate
+     * deployment/platform tags ({@code rt} for Windows RT, {@code aws}, {@code
+     * pivotal_cloud_foundry}) as evidence of a bundled sub-product, wrongly demoting Microsoft Office,
+     * HashiCorp Terraform and Pivotal RabbitMQ; (2) a version that penalized any candidate with a
+     * product-slug word absent from the query text wrongly introduced a preference between {@code
+     * apache_http_server} and {@code apache_tomcat} for the bare query "apache" — two genuinely
+     * different, unrelated products (neither's tokens are a prefix of the other's) that {@code
+     * ambiguousCpeCandidatesAreDisambiguatedByLlm} and its sibling tests deliberately leave as a tie
+     * for Tier2 AI (or list-order, with no AI) to break, not this key. Restricting to an actual
+     * token-prefix relationship *within the same candidate pool* only ever fires for the specific
+     * parent-product/derived-product shape this backlog item is about, leaving every other tie
+     * (including genuinely unrelated same-vendor products, and identical-slug pairs like RabbitMQ's
+     * {@code pivotal_software}/{@code vmware} renaming) to whichever later key already decided them.
+     */
+    private boolean isDerivedFromSiblingCandidate(CpeDictionaryEntry entry, java.util.Collection<CpeDictionaryEntry> pool) {
+        List<String> ownTokens = tokenize(normalizeForContainment(entry.getProduct()));
+        for (CpeDictionaryEntry other : pool) {
+            if (other == entry) {
+                continue;
+            }
+            List<String> otherTokens = tokenize(normalizeForContainment(other.getProduct()));
+            if (isStrictPrefix(otherTokens, ownTokens)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code prefix} is a non-empty, strictly shorter leading run of {@code whole} — used
+     *  only by {@link #isDerivedFromSiblingCandidate} to detect a genuine parent-product/derived
+     *  -product token relationship, never a mere substring or reordering. */
+    private boolean isStrictPrefix(List<String> prefix, List<String> whole) {
+        return !prefix.isEmpty() && prefix.size() < whole.size() && whole.subList(0, prefix.size()).equals(prefix);
     }
 
     private boolean vendorAgrees(String normalizedVendor, CpeDictionaryEntry entry) {
