@@ -2229,39 +2229,34 @@ public class Stage1IdentificationService {
      * relies on the incoming list's own trigram order to break ties within each ranking key, so
      * appending rescued candidates after strict ones would silently give every rescued candidate a
      * worse trigram-order tie-break than every strict one, regardless of its real similarity score.
+     *
+     * <p>Backlog item 345 REVISE (senior review 2026-09-05): {@code exactProductSlugMatch}'s own
+     * definition means every anchor's normalized product slug is necessarily equal to {@code
+     * normalizedQuery} itself, so the containment check below is evaluated once against {@code
+     * normalizedQuery} rather than once per anchor — an O(candidates + anchors) pass instead of the
+     * previous O(candidates &times; anchors) one.
      */
     private List<CpeDictionaryEntry> rescuePoolRelativeSameVendorSupersetCandidates(
             String normalizedQuery, List<CpeDictionaryEntry> candidates, List<CpeDictionaryEntry> strict) {
-        List<CpeDictionaryEntry> anchors = strict.stream()
+        if (strict.size() == candidates.size()) {
+            return strict;
+        }
+        java.util.Set<String> anchorVendors = strict.stream()
                 .filter(entry -> exactProductSlugMatch(normalizedQuery, entry))
-                .toList();
-        if (anchors.isEmpty()) {
+                .map(entry -> normalizeForContainment(cpeVendorOf(entry)))
+                .filter(vendor -> !vendor.isBlank())
+                .collect(java.util.stream.Collectors.toSet());
+        if (anchorVendors.isEmpty()) {
             return strict;
         }
         java.util.Set<CpeDictionaryEntry> strictSet =
                 java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
         strictSet.addAll(strict);
         return candidates.stream()
-                .filter(entry -> strictSet.contains(entry) || isRescuableSameVendorSupersetOfAnAnchor(entry, anchors))
+                .filter(entry -> strictSet.contains(entry)
+                        || (anchorVendors.contains(normalizeForContainment(cpeVendorOf(entry)))
+                                && isSlugContainedInOtherSlug(normalizedQuery, normalizeForContainment(entry.getProduct()))))
                 .toList();
-    }
-
-    /** Backlog item 345: whether {@code candidate} (already rejected by the strict pass) qualifies
-     *  for {@link #rescuePoolRelativeSameVendorSupersetCandidates}'s rescue against at least one of
-     *  {@code anchors} — see that method's own javadoc for the two conditions checked together. */
-    private boolean isRescuableSameVendorSupersetOfAnAnchor(CpeDictionaryEntry candidate, List<CpeDictionaryEntry> anchors) {
-        String candidateVendor = normalizeForContainment(cpeVendorOf(candidate));
-        String candidateSlug = normalizeForContainment(candidate.getProduct());
-        for (CpeDictionaryEntry anchor : anchors) {
-            String anchorVendor = normalizeForContainment(cpeVendorOf(anchor));
-            if (anchorVendor.isBlank() || !anchorVendor.equals(candidateVendor)) {
-                continue;
-            }
-            if (isSlugContainedInOtherSlug(normalizeForContainment(anchor.getProduct()), candidateSlug)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /** Backlog item 89 P2: outcome of {@link #plausibleContainmentOnly}. {@code usedRelaxedPass} is
