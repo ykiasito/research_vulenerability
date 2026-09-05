@@ -2081,6 +2081,300 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void installUrlHostnameDeclaresATargetSwAndPassesTheGateWithNoRegistryMatch() {
+        // Backlog item 303 (task B): a marketplace extension has no package-registry ecosystem to
+        // route through at all — before this item, passesTargetSwGate's "no registry match at all
+        // -> reject" rule made a target_sw-scoped VS Code extension candidate structurally
+        // unreachable regardless of what install_url said. install_url is now a second, independent
+        // declared-platform source.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_extension:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
+    void installUrlDeclaredPlatformMustMatchTheCandidatesOwnTargetSwNotJustBePresent() {
+        // Backlog item 303: install_url declaring a platform is not a blanket admit — the declared
+        // value must still equal the candidate's own target_sw (same equality check a registry-
+        // derived declaration was always held to). A VS Code Marketplace install_url must not admit
+        // a JetBrains-plugin-scoped candidate.
+        CpeDictionaryEntry jetbrainsPlugin = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:jetbrains:*:*", "foo_extension");
+        jetbrainsPlugin.setTitle("Foo Plugin for JetBrains IDEs 2.0");
+        jetbrainsPlugin.setTargetSwValues(java.util.Set.of("jetbrains"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(jetbrainsPlugin));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlHostSpoofedInThePathOfAnUnrelatedHostDoesNotDeclareAPlatform() {
+        // Backlog item 303: the hostname match must be against the URI's real authority, never a
+        // substring anywhere in the URL — a naive substring check would be fooled by the real
+        // marketplace hostname sitting in the PATH of an attacker-controlled host.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://evil.com/marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlHostSuffixSpoofDoesNotDeclareAPlatformEither() {
+        // Backlog item 303: the mirror-image spoof attempt — the real marketplace hostname as a
+        // LEADING label of an attacker-controlled parent domain — must be rejected the same way.
+        // Trailing-label suffix matching (host equals or ends with ".<mapped host>") is what makes
+        // this fail: "marketplace.visualstudio.com.evil.com" ends with ".evil.com", not
+        // ".marketplace.visualstudio.com".
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://marketplace.visualstudio.com.evil.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlOnAGenuineSubdomainOfAMappedHostStillDeclaresThePlatform() {
+        // Backlog item 303: trailing-label matching must still accept a real subdomain of a mapped
+        // host (host equals the mapped value OR ends with "." + it) — this is the legitimate
+        // counterpart to the two spoof tests above, guarding against an over-corrected exact-only
+        // comparison.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://www.marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_extension:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
+    void chromeWebStoreLegacyUrlShapeDeclaresTheChromePlatform() {
+        // Backlog item 303: the legacy chrome.google.com/webstore/... URL shape needs both the host
+        // AND the /webstore path prefix — chrome.google.com alone hosts plenty of non-extension
+        // pages too, so the host by itself isn't specific enough to declare a platform.
+        CpeDictionaryEntry chromeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:chrome:*:*", "foo_extension");
+        chromeExtension.setTitle("Foo Extension for Chrome 2.0");
+        chromeExtension.setTargetSwValues(java.util.Set.of("chrome"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(chromeExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://chrome.google.com/webstore/detail/foo-extension/abcdefghijklmnop");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_extension:1.0.0:*:*:*:*:chrome:*:*");
+    }
+
+    @Test
+    void chromeGoogleComHostWithoutTheLegacyWebstorePathDoesNotDeclareAPlatform() {
+        // Backlog item 303: the counterpart to the legacy-shape test above — chrome.google.com
+        // hosting some other, non-webstore page must not declare chrome as the platform.
+        CpeDictionaryEntry chromeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:chrome:*:*", "foo_extension");
+        chromeExtension.setTitle("Foo Extension for Chrome 2.0");
+        chromeExtension.setTargetSwValues(java.util.Set.of("chrome"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(chromeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://chrome.google.com/intl/en/about/");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void jetbrainsMarketplaceInstallUrlDeclaresTheJetbrainsPlatform() {
+        CpeDictionaryEntry jetbrainsPlugin = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_plugin:2.0:*:*:*:*:jetbrains:*:*", "foo_plugin");
+        jetbrainsPlugin.setTitle("Foo Plugin for JetBrains IDEs 2.0");
+        jetbrainsPlugin.setTargetSwValues(java.util.Set.of("jetbrains"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(jetbrainsPlugin));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Plugin");
+        item.setInstallUrl("https://plugins.jetbrains.com/plugin/1234-foo-plugin");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_plugin:1.0.0:*:*:*:*:jetbrains:*:*");
+    }
+
+    @Test
+    void firefoxAddonsMozillaInstallUrlDeclaresTheFirefoxPlatform() {
+        CpeDictionaryEntry firefoxAddon = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_addon:2.0:*:*:*:*:firefox:*:*", "foo_addon");
+        firefoxAddon.setTitle("Foo Addon for Firefox 2.0");
+        firefoxAddon.setTargetSwValues(java.util.Set.of("firefox"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(firefoxAddon));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Addon");
+        item.setInstallUrl("https://addons.mozilla.org/en-US/firefox/addon/foo-addon/");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_addon:1.0.0:*:*:*:*:firefox:*:*");
+    }
+
+    @Test
+    void chromeGoogleComLegacyPathLookalikeDoesNotDeclareAPlatform() {
+        // Senior-reviewer REVISE (PR#229, measured live): a bare startsWith("/webstore") check also
+        // matched an unrelated path like "/webstoreEVIL/x" or "/webstore-foo" -- neither is the real
+        // legacy chrome.google.com/webstore/... shape, so neither must declare chrome.
+        CpeDictionaryEntry chromeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:chrome:*:*", "foo_extension");
+        chromeExtension.setTitle("Foo Extension for Chrome 2.0");
+        chromeExtension.setTargetSwValues(java.util.Set.of("chrome"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(chromeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://chrome.google.com/webstoreEVIL/detail/foo-extension/abcdefghijklmnop");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlWithNoSchemeStillDeclaresThePlatform() {
+        // Senior-reviewer REVISE (PR#229): a non-engineer pasting an install_url without "https://"
+        // must not silently disable this whole feature -- jobs/new.html's own vulncheckGetUrlHost
+        // already tolerates the same scheme-less shape for this same install_url column.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_extension:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
+    void installUrlWithNoSchemeHostSpoofedInThePathStillDoesNotDeclareAPlatform() {
+        // Senior-reviewer REVISE (PR#229): the scheme-less tolerance above must not weaken the
+        // existing path-spoof resistance -- prepending "https://" to a scheme-less URL still leaves
+        // URI itself to do the real authority/path parsing, so the real marketplace hostname sitting
+        // in an unrelated host's path must still fail to declare a platform.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("evil.com/marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlDeclarationOverridesAnUnmappedRegistryEcosystemsDefaultAllow() {
+        // Senior-reviewer REVISE (PR#229): maven has no ECOSYSTEM_TO_TARGET_SW mapping, so without
+        // an install_url declaration this would reach passesTargetSwGate's hex/maven default-allow.
+        // But this item's own install_url declares "jetbrains" -- that declaration must take
+        // priority and be held to the same strict equality check as any other declared platform,
+        // rejecting a candidate scoped to an unrelated target_sw ("python" here) rather than
+        // falling through to the default-allow.
+        PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch(
+                        "maven", "somelib", "pkg:maven/some/somelib@1.0.0", new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "maven";
+            }
+        };
+        CpeDictionaryEntry pythonScopedSomelib = cpeEntry("cpe:2.3:a:somevendor:somelib:1.0.0:*:*:*:*:python:*:*", "somelib");
+        pythonScopedSomelib.setTargetSwValues(java.util.Set.of("python"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(pythonScopedSomelib));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("somelib");
+        item.setInstallUrl("https://plugins.jetbrains.com/plugin/1234-somelib");
+
+        Optional<IdentifiedProduct> result = service(List.of(mavenLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("maven");
+        assertThat(result.get().getCpe()).isNull();
+    }
+
+    @Test
     void versionCoverageTieBreakPrefersACandidateWhoseCatalogedVersionsCoverTheItemsVersion() {
         // Backlog item 15, P2 (senior review 2026-08-30); ratio value updated for backlog item 36
         // (senior review 2026-08-30, ratio-guard rewrite): two same-slug candidates tie on
