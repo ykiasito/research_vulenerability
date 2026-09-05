@@ -2837,6 +2837,41 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void poolRelativeRescueDoesNotLetASupersetCandidateOutrankAnAnchorWhenCoverageIsntContradicted() {
+        // Backlog item 345 REVISE (senior review 2026-09-05): the same VirtualBox fixture as
+        // exactSlugMatchIsSuppressedForAStaleSameVendorDuplicateThatVersionCoverageContradicts above,
+        // but oracle:virtualbox's own max cataloged major raised from 3 to 7, so item version 7.0.14's
+        // major (7) no longer exceeds 3*VERSION_COVERAGE_IMPLAUSIBILITY_RATIO(2)=21 either way — both
+        // candidates now get versionCoverageRank COVERS, so item 308's own suppression condition 1
+        // (the anchor's version coverage must be contradicted) never fires. This is the safety net for
+        // item 345's own new admission-time rescue: rescuing oracle:vm_virtualbox into the ranked pool
+        // must not, by itself, let it outrank the exact-slug-match anchor in the normal case where
+        // nothing actually contradicts the anchor's own version coverage — exact-slug-match still sits
+        // ahead of everything else in rankCpeCandidates's own key chain. Asserting cpeCandidateCount
+        // alongside the chosen CPE proves the rescue itself still happened (both candidates reached the
+        // ranked pool) even though the ranking outcome didn't change.
+        CpeDictionaryEntry oracleVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:virtualbox:6.1.38:*:*:*:*:*:*:*", "virtualbox");
+        oracleVirtualbox.setMaxCatalogedMajor(7);
+        CpeDictionaryEntry oracleVmVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:vm_virtualbox:7.0.6:*:*:*:*:*:*:*", "vm_virtualbox");
+        oracleVmVirtualbox.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVirtualbox, oracleVmVirtualbox));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle");
+        item.setVersion("7.0.14");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:oracle:virtualbox:7.0.14:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+    }
+
+    @Test
     void prefersAParentProductCandidateOverASiblingDerivedProductWithAnInflatedRowCount() {
         // Backlog item 299 case 5 (closed-mode golden-300 regression, 2026-09-05): "Microsoft Visual
         // Studio" 17.10 ties microsoft:visual_studio (correct) and microsoft:visual_studio_code
