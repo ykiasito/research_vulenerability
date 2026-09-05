@@ -45,30 +45,17 @@ import org.springframework.transaction.annotation.Transactional;
         "spring.datasource.username=vulncheck",
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Re-measured 2026-09-05 (backlog item 308, VirtualBox exact-slug-vs-version-coverage fix) "
-        + "against the real dev DB, both before and after that fix, to satisfy the '68 denominator "
-        + "NEEDS RE-MEASUREMENT' note left by the previous (item 299 case 5) update -- CPE "
-        + "vendor:product exact match is 63/68 = 0.9265 identically before and after item 308's "
-        + "rankCpeCandidates change (zero regression, but also zero improvement on this suite: see "
-        + "below). The 5 remaining mismatches are Metasploit Framework, Notepad++, VirtualBox, Zoom, "
-        + "Kibana (Cisco IOS XE from the previous note's list is no longer one of them -- and Kibana "
-        + "is newly one -- pure real-dev-DB CPE dictionary content drift since that note was written, "
-        + "confirmed unrelated to item 308 since both the pre- and post-fix runs here show the exact "
-        + "same 5). VirtualBox itself stays a mismatch even after item 308's fix: real dev DB data "
-        + "confirms oracle:virtualbox (max cataloged major 3, 8 rows) and oracle:vm_virtualbox (max "
-        + "cataloged major 71, 270 rows) exist exactly as item 308's own diagnosis described, but "
-        + "oracle:vm_virtualbox never reaches rankCpeCandidates's candidate pool at all for the query "
-        + "'VirtualBox' -- plausibleContainmentOnly's explainsQuery admission gate rejects it on both "
-        + "the product field ('vm_virtualbox' has an unaccounted-for leading 'vm' token neither "
-        + "Direction 1 nor Direction 2 credits) and the title field ('Oracle VM VirtualBox ...' does "
-        + "not start with the query token 'virtualbox', so Direction 1's own leading-alignment "
-        + "requirement fails) -- confirmed live via a throwaway reflection-based debug test against "
-        + "this same dev DB, not by inspection alone. item 308's own senior-review design (narrowing "
-        + "exactSlugMatch only for candidates that both reach and tie within the ranked pool) is "
-        + "therefore verified correctly implemented and harmless, but does not by itself resolve the "
-        + "real golden-300 VirtualBox row -- that would need a separate, unaddressed admission-layer "
-        + "change to explainsQuery, out of this task's specified scope. Left disabled so it can never "
-        + "re-fire on a routine mvn test run -- see class javadoc.")
+@Disabled("Re-measured 2026-09-05 (backlog item 345, pool-relative same-vendor superset rescue in "
+        + "plausibleContainmentOnly) against the real dev DB -- CPE vendor:product exact match is now "
+        + "64/68 = 0.9412, up from 63/68 = 0.9265 before item 345. The 4 remaining mismatches are "
+        + "Metasploit Framework, Notepad++, Zoom, Kibana. VirtualBox is resolved: item 345's "
+        + "pool-relative rescue in plausibleContainmentOnly admits oracle:vm_virtualbox into "
+        + "rankCpeCandidates's candidate pool (via the oracle:virtualbox exact-slug anchor already "
+        + "admitted by the strict pass), which combined with item 308's own versionCoverageRank fix "
+        + "resolves the real golden-300 VirtualBox row. Left disabled so it can never re-fire on a "
+        + "routine mvn test run -- see class javadoc. The max cataloged major 71 figure (for "
+        + "oracle:vm_virtualbox) traces to a single broken NVD version string '71.6' among that "
+        + "product's 270 rows, not a real major version 71 release.")
 class Backlog299CpeRankingGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
