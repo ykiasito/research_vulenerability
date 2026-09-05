@@ -68,7 +68,11 @@ import org.springframework.transaction.annotation.Transactional;
         + "therefore verified correctly implemented and harmless, but does not by itself resolve the "
         + "real golden-300 VirtualBox row -- that would need a separate, unaddressed admission-layer "
         + "change to explainsQuery, out of this task's specified scope. Left disabled so it can never "
-        + "re-fire on a routine mvn test run -- see class javadoc.")
+        + "re-fire on a routine mvn test run -- see class javadoc. UPDATE PENDING (item 345): once the "
+        + "real-dev-DB re-measurement below this fix is run (needs POSTGRES_PASSWORD, not available in "
+        + "an isolated engineer worktree -- escalated to the orchestrator/tester per this backlog item's "
+        + "own instructions), this note and the max-cataloged-major-71 figure below should be updated "
+        + "to reflect the actual post-345 golden-300 CPE accuracy.")
 class Backlog299CpeRankingGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
