@@ -487,6 +487,35 @@ class CpeDictionaryRepositoryImplTest {
         assertThat(entry.getCatalogedRowCount()).isEqualTo(2);
     }
 
+    /**
+     * Backlog item 346 REVISE (peer review on PR #257): before this REVISE, {@code
+     * findByVendorProductPairs} carried its own hand-copied LATERAL aggregate with a plain, unguarded
+     * {@code max()} that had silently drifted out of sync with {@code collect()}'s own item-346
+     * outlier guard -- this exact-match path is a real, reachable production route (
+     * {@code Stage1IdentificationService#exactVendorProductMatches}, the item 302 fallback, feeds
+     * straight into {@code rankCpeCandidates}'s {@code versionCoverageRank}/{@code
+     * versionCoverageIsPlausible}, both of which consume {@code maxCatalogedMajor}), so a candidate
+     * found only via this fallback would keep an outlier-inflated value forever. Same shape as {@code
+     * CpeDictionaryRepositoryImplTest#maxCatalogedMajorFallsBackToP99ForASingleTypoStyleOutlier}'s own
+     * collect()-path case (a): 100 rows at majors 1..100 (p99 lands on 100) plus one outlier row at
+     * major 710 (standing in for a single broken NVD version string, e.g. oracle:vm_virtualbox's real
+     * "71.6") -- max(710) is more than 4x p99(100), so rule B fires and the outlier is replaced by
+     * 100, not 710, on this path too now that both callers share {@code
+     * CpeDictionaryRepositoryImpl#outlierGuardedAggregateSql}.
+     */
+    @Test
+    void findByVendorProductPairsFallsBackToP99ForASingleTypoStyleOutlier() {
+        insertMajorSequence("zzzitem346fbypcasea", 1, 100);
+        insert("cpe:2.3:a:zzzitem346fbypcasea:zzzitem346fbypcasea:710.6:*:*:*:*:*:*:*",
+                "Zzzitem346fbypcasea", "zzzitem346fbypcasea", "zzzitem346fbypcasea");
+
+        List<CpeDictionaryEntry> results = cpeDictionaryRepository.findByVendorProductPairs(
+                List.of(new VendorProductPair("zzzitem346fbypcasea", "zzzitem346fbypcasea")), 10);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getMaxCatalogedMajor()).isEqualTo(100);
+    }
+
     /** Item 302: an empty pair list must short-circuit to an empty result with no query at all
      *  (an empty SQL {@code IN ()} list is a syntax error, not merely a no-match predicate). */
     @Test
