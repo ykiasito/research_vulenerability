@@ -2746,6 +2746,45 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void exactSlugMatchIsSuppressedForAStaleSameVendorDuplicateThatVersionCoverageContradicts() {
+        // Backlog item 308 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3):
+        // real data confirmed oracle:virtualbox (8 rows, max cataloged major 3, exact-slug match for
+        // query "VirtualBox") outranking the real current entry oracle:vm_virtualbox (270 rows, max
+        // cataloged major 7, NOT an exact-slug match) purely because exactSlugMatch sits ahead of
+        // everything else in rankCpeCandidates's own key chain — even though the current entry's own
+        // version coverage is the only one of the two that actually covers VirtualBox 7.0.14
+        // (7 > 3*VERSION_COVERAGE_IMPLAUSIBILITY_RATIO(2)=6, so the old entry's own versionCoverageRank
+        // is NOT_COVERS). Reproduced here with the qualifying word trailing ({@code virtualbox_vm}
+        // rather than the real dictionary's leading {@code vm_virtualbox}) and the item's own vendor
+        // field set to "Oracle VM" (Oracle's real hypervisor product family {@code vm_virtualbox} is
+        // cataloged under) purely so the query "VirtualBox" admits both candidates through this test's
+        // own mocked findFuzzyMatches pool via the existing explainsQuery containment gate (its
+        // single-token-query leftover check, backlog item 89 P3, requires any unconsumed trailing
+        // candidate token to be explained by the item's own vendor field — "vm" isn't explained by a
+        // bare "Oracle") — the four-condition shape this test actually exercises (same CPE vendor, old
+        // slug exact-match+NOT_COVERS, new slug non-exact-match+COVERS, old slug contained in new slug)
+        // is otherwise identical to the real VirtualBox data.
+        CpeDictionaryEntry oracleVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:virtualbox:6.1.38:*:*:*:*:*:*:*", "virtualbox");
+        oracleVirtualbox.setMaxCatalogedMajor(3);
+        CpeDictionaryEntry oracleVirtualboxVm =
+                cpeEntry("cpe:2.3:a:oracle:virtualbox_vm:7.0.6:*:*:*:*:*:*:*", "virtualbox_vm");
+        oracleVirtualboxVm.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVirtualbox, oracleVirtualboxVm));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle VM");
+        item.setVersion("7.0.14");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:oracle:virtualbox_vm:7.0.14:*:*:*:*:*:*:*");
+    }
+
+    @Test
     void prefersAParentProductCandidateOverASiblingDerivedProductWithAnInflatedRowCount() {
         // Backlog item 299 case 5 (closed-mode golden-300 regression, 2026-09-05): "Microsoft Visual
         // Studio" 17.10 ties microsoft:visual_studio (correct) and microsoft:visual_studio_code
