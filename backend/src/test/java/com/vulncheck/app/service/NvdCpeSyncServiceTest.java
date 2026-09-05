@@ -175,6 +175,55 @@ class NvdCpeSyncServiceTest {
         syncServer.verify();
     }
 
+    // --- closed-mode backlog item 330 (B): a missing/contradictory totalResults must never be
+    // recorded as a clean finish -----------------------------------------------------------------
+
+    @Test
+    void syncReportsIncompleteWhenTotalResultsIsMissingButProductsIsNonEmpty() {
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"products\":[{\"cpe\":{\"cpeName\":"
+                                + "\"cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*\",\"titles\":[]}}]}",
+                        MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isFalse();
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+        syncServer.verify();
+    }
+
+    @Test
+    void syncReportsIncompleteWhenTotalResultsIsZeroButProductsIsNonEmpty() {
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"totalResults\":0,\"products\":[{\"cpe\":{\"cpeName\":"
+                                + "\"cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*\",\"titles\":[]}}]}",
+                        MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isFalse();
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+        syncServer.verify();
+    }
+
+    @Test
+    void syncAllAndReleaseRecordsInitialSyncCompletedWhenTotalResultsAndProductsAreBothLegitimatelyZero() {
+        // Regression guard: a legitimate no-change delta/full page (totalResults:0, products:[])
+        // must keep reporting a clean finish -- the item 330 (B) contradiction check above must
+        // only fire when totalResults is missing/non-numeric or self-contradictory, never for this
+        // ordinary "nothing to sync" case.
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isTrue();
+        verify(cpeDictionarySyncStateRepository).save(any());
+        syncServer.verify();
+    }
+
     // --- closed-mode backlog item 283: delta sync -------------------------------------------
 
     @Test
@@ -187,6 +236,57 @@ class NvdCpeSyncServiceTest {
         when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
 
         assertThat(service.hasCompletedInitialSync()).isTrue();
+    }
+
+    // --- closed-mode backlog item 330 (C): freshness gate for CpeDictionaryBootstrapSync --------
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenNoStateRowExists() {
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.empty());
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenInitialSyncNeverCompleted() {
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(false);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenLastSyncedAtIsNullDespiteInitialSyncCompleted() {
+        // Defensive case: same one resolveDeltaCursor already guards against (both fields are set
+        // together in practice, so this should not happen, but must not throw or misreport fresh).
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(null);
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void isMirrorFresherThanIsTrueWhenLastSyncedAtIsWithinTheWindow() {
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC).minusDays(5));
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isTrue();
+    }
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenLastSyncedAtIsOlderThanTheWindow() {
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC).minusDays(45));
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
     }
 
     @Test
@@ -323,6 +423,37 @@ class NvdCpeSyncServiceTest {
         assertThat(service.tryBeginFullSync())
                 .as("the slot must be free again after a normal delta completion")
                 .isTrue();
+    }
+
+    // --- closed-mode backlog item 330 (A): blank keyword must never fall through to an unfiltered
+    // full sync ---------------------------------------------------------------------------------
+
+    @Test
+    void syncByKeywordRejectsNullKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncByKeyword(null, Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
+    @Test
+    void syncByKeywordRejectsEmptyKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncByKeyword("", Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
+    @Test
+    void syncByKeywordRejectsWhitespaceOnlyKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncByKeyword("   ", Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
+    @Test
+    void syncKeywordSinglePageRejectsBlankKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncKeywordSinglePage("  ", 1, Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
     }
 
     @Test

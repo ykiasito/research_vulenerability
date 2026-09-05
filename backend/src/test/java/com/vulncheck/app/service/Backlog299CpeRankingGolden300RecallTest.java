@@ -45,25 +45,20 @@ import org.springframework.transaction.annotation.Transactional;
         "spring.datasource.username=vulncheck",
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Run once (2026-09-05, backlog item 299 case 5 -- isDerivedFromSiblingCandidate ranking "
-        + "fix) against the real dev DB -- 'Microsoft Visual Studio' 17.10 now correctly resolves to "
-        + "microsoft:visual_studio (was microsoft:visual_studio_code); overall CPE vendor:product "
-        + "exact-match rate went from 59/66 to 60/66 (denominator updated 2026-09-05 for item 320's "
-        + "Blender/Rufus golden-300.csv ground-truth correction: both rows now carry an "
-        + "expected_cpe_vendor/expected_cpe_product, so this test's dynamically-counted "
-        + "cpeTargetTotal newly includes them, moving the denominator from 66 to 68 -- NEEDS "
-        + "RE-MEASUREMENT, the 59/60 numerators above predate that correction and are no longer "
-        + "reported against the 68 denominator), with the exact same 5 remaining mismatches as "
-        + "baseline minus Visual Studio (Cisco IOS XE/Metasploit Framework/Notepad++/VirtualBox/Zoom, "
-        + "none of them regressed or newly introduced by this fix -- confirmed via a stash/rerun "
-        + "before/after comparison, against the pre-correction 66-row denominator). Two earlier, less "
-        + "pool-relative versions of this fix were each measured and reverted first (a "
-        + "target_sw-set-based version regressed Microsoft Office, HashiCorp Terraform and Pivotal "
-        + "RabbitMQ; a version that penalized any product word absent from the query text regressed "
-        + "the deliberately-ambiguous apache_http_server/apache_tomcat pair) -- see "
-        + "isDerivedFromSiblingCandidate's own javadoc for why the final, pool-relative token-prefix "
-        + "check avoids both. Left disabled so it can never re-fire on a routine mvn test run -- see "
-        + "class javadoc.")
+@Disabled("Re-measured 2026-09-05 (backlog item 346, max_cataloged_major outlier guard, including "
+        + "the REVISE that extended the same rule A/B guard to findByVendorProductPairs via the "
+        + "shared outlierGuardedAggregateSql helper) against the real dev DB, before vs. after item "
+        + "346's rule A/B outlier guard -- CPE vendor:product exact match is unchanged at 64/68 = "
+        + "0.9412 either way, confirming item 346 (both the collect() path and, after the REVISE, "
+        + "the findByVendorProductPairs path) is neutral for this golden-300 subset (the 4 remaining "
+        + "mismatches -- Metasploit Framework, Notepad++, Zoom, Kibana -- are all unrelated to "
+        + "max_cataloged_major). Left disabled so it can never re-fire on a routine mvn test run -- "
+        + "see class javadoc. The max cataloged major for oracle:vm_virtualbox used to read 71, "
+        + "traced to a single broken NVD version string '71.6' among that product's 270 rows (a "
+        + "typo, not a real major version 71 release) -- backlog item 346's outlier guard now "
+        + "corrects this to 7 (the real highest cataloged major), which is still <= VirtualBox "
+        + "7.0.14's own major, so versionCoverageRank's outcome for this row is unchanged by item "
+        + "346.")
 class Backlog299CpeRankingGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;

@@ -1279,6 +1279,23 @@ public class Stage1IdentificationService {
      * poolTokens} *before* the pairwise scan runs, so the O(n²) part of that method's own cost is pure
      * list lookups and token-list comparisons, never re-tokenization — see that method's own javadoc
      * for the measured 298μs-vs-27μs-per-call gap this precomputation closes.
+     *
+     * <p>Backlog item 308 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3): the
+     * exact-slug-match key itself (the very first one above) is left in its own unconditional top
+     * spot, but is now narrowed by {@link #isOutrankedByCurrentCatalogedSameVendorDuplicate} for one
+     * specific shape — a candidate whose own version coverage is concretely contradicted (K2's own
+     * NOT_COVERS(2), never merely "no evidence") while a *same-CPE-vendor* sibling elsewhere in this
+     * very pool both covers the item's version (K2's COVERS(0)) and is a longer slug this candidate's
+     * own slug is contained in. That is exactly "NVD cataloged the same real product twice, once under
+     * an old short slug and once under a current long slug" ({@code oracle:virtualbox}, 8 rows, max
+     * cataloged major 3, versus {@code oracle:vm_virtualbox}, 270 rows, max cataloged major 7 —
+     * backlog item 346's outlier guard corrects this from a raw 71, which traces to a single broken
+     * NVD version string "71.6" among those 270 rows, not a real major-71 release — for VirtualBox
+     * 7.0.14) — narrow enough that it can only ever fire for a genuine same-vendor
+     * duplicate-cataloging pair, never for an ordinary exact-slug tie like Pillow's own regression test
+     * ({@code exactProductSlugMatchOutranksATargetSwMatchingButDifferentlyNamedCandidate}), where
+     * neither candidate ever reaches K2's NOT_COVERS(2) in the first place. See that method's own
+     * javadoc for the full four-condition test.
      */
     private List<CpeDictionaryEntry> rankCpeCandidates(String vendor, String exactMatchQuery,
             List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit, String itemVersion) {
@@ -1321,15 +1338,32 @@ public class Stage1IdentificationService {
         List<List<String>> poolTokens = poolList.stream()
                 .map(entry -> tokenize(normalizeForContainment(entry.getProduct())))
                 .toList();
+        // Backlog item 308: precomputed once per candidate, same "computed exactly once" invariant as
+        // poolTokens above — reused only by isOutrankedByCurrentCatalogedSameVendorDuplicate's own
+        // pairwise scan below, never recomputed inside it. versionCoverageRank in particular used to
+        // be computed inline per-RankedCandidate below; hoisting it here lets the suppression check
+        // see every candidate's rank before any RankedCandidate exists.
+        List<String> poolNormalizedProductSlugs = poolList.stream()
+                .map(entry -> normalizeForContainment(entry.getProduct()))
+                .toList();
+        List<String> poolCpeVendors = poolList.stream()
+                .map(entry -> normalizeForContainment(cpeVendorOf(entry)))
+                .toList();
+        List<Integer> poolVersionCoverageRanks = poolList.stream()
+                .map(entry -> versionCoverageRank(entry, itemVersion))
+                .toList();
         List<RankedCandidate> ranked = java.util.stream.IntStream.range(0, poolList.size())
                 .mapToObj(i -> {
                     CpeDictionaryEntry entry = poolList.get(i);
+                    boolean exactSlugMatch = exactProductSlugMatch(normalizedExactMatchQuery, entry)
+                            && !isOutrankedByCurrentCatalogedSameVendorDuplicate(
+                                    i, poolNormalizedProductSlugs, poolCpeVendors, poolVersionCoverageRanks);
                     return new RankedCandidate(
                             entry,
-                            exactProductSlugMatch(normalizedExactMatchQuery, entry),
+                            exactSlugMatch,
                             targetSwMatchesEcosystem(entry, mappedTargetSw),
                             unexplainedQueryTokenCount(normalizedExactMatchQuery, entry),
-                            versionCoverageRank(entry, itemVersion),
+                            poolVersionCoverageRanks.get(i),
                             versionCoverageIsPlausible(entry, itemVersion),
                             vendorAgrees(normalizedVendor, entry),
                             isDerivedFromSiblingCandidate(poolTokens.get(i), poolTokens, i),
@@ -1412,6 +1446,15 @@ public class Stage1IdentificationService {
      * trails a few majors behind is exactly the common, innocent case this ratio guard exists to
      * keep plausible, reserving an actual demotion for when the item's version is implausibly far
      * beyond anything ever catalogued for that (vendor, product) pair.
+     *
+     * <p>Backlog item 346: {@code maxCatalogedMajor} itself is already outlier-guarded by the
+     * repository before it ever reaches here, regardless of which repository method found the
+     * candidate — see {@link com.vulncheck.app.repository.CpeDictionaryRepositoryImpl
+     * #outlierGuardedAggregateSql}'s own javadoc for the two rules that keep a single broken NVD
+     * version string (or a minority date-formatted one) from inflating it, applied identically by
+     * both {@code collect} (the fuzzy-match path) and {@code findByVendorProductPairs} (the item 302
+     * exact-match fallback). This method has no additional outlier handling of its own to do; it
+     * trusts {@code maxCatalogedMajor} as already being the credible highest cataloged major.
      */
     private boolean versionCoverageIsPlausible(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
@@ -1562,6 +1605,12 @@ public class Stage1IdentificationService {
      * competitor with zero catalog history) is ranked {@code NOT_COVERS(2)}; "no evidence" and
      * "trails but plausible" both share {@code UNKNOWN(1)}, exactly like {@code
      * versionCoverageIsPlausible} itself treats them.
+     *
+     * <p>Backlog item 346: {@code maxCatalogedMajor} is already outlier-guarded by the repository
+     * before it ever reaches here, regardless of which repository method found the candidate — see
+     * {@link #versionCoverageIsPlausible}'s own javadoc and {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#outlierGuardedAggregateSql}'s javadoc
+     * for the details.
      */
     private int versionCoverageRank(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
@@ -1654,6 +1703,75 @@ public class Stage1IdentificationService {
      *  -product token relationship, never a mere substring or reordering. */
     private boolean isStrictPrefix(List<String> prefix, List<String> whole) {
         return !prefix.isEmpty() && prefix.size() < whole.size() && whole.subList(0, prefix.size()).equals(prefix);
+    }
+
+    /**
+     * Backlog item 308 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3): whether
+     * {@code ownIndex}'s own exact-slug-match win should be suppressed because a same-CPE-vendor
+     * sibling elsewhere in the same pool already covers the item's version under a longer slug this
+     * candidate's own slug is contained in. Deliberately does NOT touch {@link #rankCpeCandidates}'s
+     * own key ORDER — exact-slug-match priority stays exactly where it's always been — this only
+     * narrows what counts as an exact-slug match for candidates matching all four of the following:
+     *
+     * <ol>
+     *   <li>{@code ownIndex}'s own {@link #versionCoverageRank} is 2 (NOT_COVERS) — concrete numeric
+     *       evidence beyond {@link #VERSION_COVERAGE_IMPLAUSIBILITY_RATIO}'s own guard, never merely
+     *       "no evidence" (that stays UNKNOWN(1), untouched by this method).</li>
+     *   <li>some other candidate still in {@code poolVersionCoverageRanks} has rank 0 (COVERS).</li>
+     *   <li>that other candidate's CPE vendor (already normalized in {@code poolCpeVendors}) equals
+     *       {@code ownIndex}'s own CPE vendor exactly — narrow enough that this can only ever match a
+     *       genuine same-vendor duplicate-cataloging case, never an unrelated vendor that merely
+     *       happens to score a stronger version match.</li>
+     *   <li>{@code ownIndex}'s own normalized product slug ({@code poolNormalizedProductSlugs}) is
+     *       contained in that other candidate's normalized slug — see {@link
+     *       #isSlugContainedInOtherSlug} for the exact substring-or-token-subset test.</li>
+     * </ol>
+     *
+     * <p>Every input list is precomputed once per candidate by {@link #rankCpeCandidates} itself
+     * before this pairwise scan runs (same "computed exactly once per candidate" invariant {@link
+     * #isDerivedFromSiblingCandidate}'s own {@code poolTokens} already follows), so this method's own
+     * O(n²) cost is pure list lookups and string comparisons, never re-normalization.
+     */
+    private boolean isOutrankedByCurrentCatalogedSameVendorDuplicate(int ownIndex,
+            List<String> poolNormalizedProductSlugs, List<String> poolCpeVendors, List<Integer> poolVersionCoverageRanks) {
+        if (poolVersionCoverageRanks.get(ownIndex) != 2) {
+            return false;
+        }
+        String ownVendor = poolCpeVendors.get(ownIndex);
+        if (ownVendor.isBlank()) {
+            return false;
+        }
+        String ownSlug = poolNormalizedProductSlugs.get(ownIndex);
+        for (int i = 0; i < poolVersionCoverageRanks.size(); i++) {
+            if (i == ownIndex || poolVersionCoverageRanks.get(i) != 0) {
+                continue;
+            }
+            if (!ownVendor.equals(poolCpeVendors.get(i))) {
+                continue;
+            }
+            if (isSlugContainedInOtherSlug(ownSlug, poolNormalizedProductSlugs.get(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Backlog item 308: whether {@code narrowerSlug} (already run through {@link
+     *  #normalizeForContainment}) is contained in {@code widerSlug} — either as a plain substring, or,
+     *  when underscore-to-space normalization has split it into separate words, as a token subset
+     *  (every one of {@code narrowerSlug}'s own tokens present among {@code widerSlug}'s) — reusing
+     *  {@link #tokenize} rather than inventing a new normalization for this. Directional (unlike
+     *  {@link #containsEitherWay}): only ever asks whether the shorter, stale-cataloged slug is inside
+     *  the longer, currently-cataloged one, never the reverse. */
+    private boolean isSlugContainedInOtherSlug(String narrowerSlug, String widerSlug) {
+        if (narrowerSlug.isBlank() || widerSlug.isBlank()) {
+            return false;
+        }
+        if (widerSlug.contains(narrowerSlug)) {
+            return true;
+        }
+        List<String> narrowerTokens = tokenize(narrowerSlug);
+        return !narrowerTokens.isEmpty() && tokenize(widerSlug).containsAll(narrowerTokens);
     }
 
     private boolean vendorAgrees(String normalizedVendor, CpeDictionaryEntry entry) {
@@ -2080,13 +2198,82 @@ public class Stage1IdentificationService {
                         || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, true))
                 .toList();
         if (!strict.isEmpty()) {
-            return new ContainmentResult(strict, false);
+            return new ContainmentResult(
+                    rescuePoolRelativeSameVendorSupersetCandidates(normalizedQuery, candidates, strict), false);
         }
         List<CpeDictionaryEntry> relaxed = candidates.stream()
                 .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false, false)
                         || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, false))
                 .toList();
         return new ContainmentResult(relaxed, !relaxed.isEmpty());
+    }
+
+    /**
+     * Backlog item 345 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3): a
+     * pool-relative rescue applied only when the strict pass above already admitted at least one
+     * candidate — never a general relaxation of {@link #plausibleContainmentOnly}'s own admission
+     * gate, only a narrow recovery for a candidate whose strict-pass rejection is fully explained by
+     * a same-CPE-vendor sibling the strict pass already admitted under a superset slug.
+     *
+     * <p>Root cause (item 308's own tester findings): a single-token query like "VirtualBox" against
+     * a candidate whose product slug is itself multi-token ({@code oracle:vm_virtualbox}, tokens
+     * {@code ["vm", "virtualbox"]}) fails {@link #explainsQuery}'s Direction 1 ({@link #alignPrefix}
+     * anchors on the leading token "vm", not "virtualbox"), Direction 1's {@link
+     * #alignPrefixAtAnyBoundary} fallback (requires {@code queryTokens.size() >= 2}), and Direction 2
+     * ({@link java.util.Collections#indexOfSubList} needs the candidate's own token count to fit
+     * inside the query's, impossible once the candidate has more tokens than a single-token query) —
+     * so it never reaches {@link #rankCpeCandidates} at all, meaning item 308's own same-vendor
+     * -duplicate ranking fix ({@link #isOutrankedByCurrentCatalogedSameVendorDuplicate}) never gets a
+     * chance to run for it. {@code explainsQuery}/{@code alignPrefix}/{@code
+     * alignPrefixAtAnyBoundary}/{@code indexOfSubList} themselves are left untouched — this rescues
+     * the candidate into the pool {@code rankCpeCandidates} sees, rather than loosening any of those.
+     *
+     * <p>Anchored on the strict pass's own result, never a bare product-slug guess: a rejected
+     * candidate is rescued only if some strict-admitted candidate's own normalized product slug
+     * exactly equals {@code normalizedQuery} (the same "NVD really does catalogue this exact product
+     * under this exact slug" signal {@link #exactProductSlugMatch} uses elsewhere) AND (a) the
+     * rejected candidate shares that anchor's own CPE vendor, and (b) the anchor's own slug is
+     * contained in the rejected candidate's own (wider) slug — reusing {@link
+     * #isSlugContainedInOtherSlug} exactly as item 308's own {@link
+     * #isOutrankedByCurrentCatalogedSameVendorDuplicate} already does, just evaluated here at
+     * admission time instead of at ranking time. Both conditions are required together, same as that
+     * method: a same-vendor candidate with an unrelated slug must not be rescued merely because some
+     * exact-slug anchor happens to exist in the pool, and a superset-slug candidate under a different
+     * CPE vendor must not be rescued either.
+     *
+     * <p>Filters {@code candidates} (the original, still-trigram-ordered pool) by {@code strictMatch
+     * || rescued} rather than concatenating the strict and rescued lists — {@link #rankCpeCandidates}
+     * relies on the incoming list's own trigram order to break ties within each ranking key, so
+     * appending rescued candidates after strict ones would silently give every rescued candidate a
+     * worse trigram-order tie-break than every strict one, regardless of its real similarity score.
+     *
+     * <p>Backlog item 345 REVISE (senior review 2026-09-05): {@code exactProductSlugMatch}'s own
+     * definition means every anchor's normalized product slug is necessarily equal to {@code
+     * normalizedQuery} itself, so the containment check below is evaluated once against {@code
+     * normalizedQuery} rather than once per anchor — an O(candidates + anchors) pass instead of the
+     * previous O(candidates &times; anchors) one.
+     */
+    private List<CpeDictionaryEntry> rescuePoolRelativeSameVendorSupersetCandidates(
+            String normalizedQuery, List<CpeDictionaryEntry> candidates, List<CpeDictionaryEntry> strict) {
+        if (strict.size() == candidates.size()) {
+            return strict;
+        }
+        java.util.Set<String> anchorVendors = strict.stream()
+                .filter(entry -> exactProductSlugMatch(normalizedQuery, entry))
+                .map(entry -> normalizeForContainment(cpeVendorOf(entry)))
+                .filter(vendor -> !vendor.isBlank())
+                .collect(java.util.stream.Collectors.toSet());
+        if (anchorVendors.isEmpty()) {
+            return strict;
+        }
+        java.util.Set<CpeDictionaryEntry> strictSet =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        strictSet.addAll(strict);
+        return candidates.stream()
+                .filter(entry -> strictSet.contains(entry)
+                        || (anchorVendors.contains(normalizeForContainment(cpeVendorOf(entry)))
+                                && isSlugContainedInOtherSlug(normalizedQuery, normalizeForContainment(entry.getProduct()))))
+                .toList();
     }
 
     /** Backlog item 89 P2: outcome of {@link #plausibleContainmentOnly}. {@code usedRelaxedPass} is
