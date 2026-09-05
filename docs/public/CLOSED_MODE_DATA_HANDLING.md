@@ -41,8 +41,8 @@ CSVアップロード後の製品識別・脆弱性調査パイプラインは�
 | 同期 | 有効化フラグ(既定`false`) |
 | --- | --- |
 | NVD CPE辞書の起動時フル同期(`CpeDictionaryBootstrapSync`) | `cpe-full-sync-on-startup`(`CPE_FULL_SYNC_ON_STARTUP`) |
-| NVD CPE辞書の週次フル再同期(`CpeDictionaryScheduledResync`) | `cpe-scheduled-resync-enabled` |
-| レジストリミラー(9エコシステム)の週次同期(`RegistryMirrorScheduledSync`) | `registry-mirror-scheduled-sync-enabled` |
+| NVD CPE辞書の週次フル再同期(`CpeDictionaryScheduledResync`) | `cpe-scheduled-resync-enabled`(`CPE_SCHEDULED_RESYNC_ENABLED`) |
+| レジストリミラー(9エコシステム)の週次同期(`RegistryMirrorScheduledSync`) | `registry-mirror-scheduled-sync-enabled`(`REGISTRY_MIRROR_SCHEDULED_SYNC_ENABLED`) |
 | NVD CVEバックフィル(`NvdCveBackfillScheduledRunner`) | `nvd-cve-backfill.enabled`(`NVD_CVE_BACKFILL_ENABLED`) |
 
 ### 有効化フラグが存在せず、既定設定のまま起動しただけで発火するもの
@@ -59,6 +59,8 @@ CSVアップロード後の製品識別・脆弱性調査パイプラインは�
 
 - GHSA(`GhsaScheduledSync` → `GhsaSyncService#doSyncDelta`)
 - OSV(`OsvScheduledSync` → `OsvSyncService#doSyncDelta`)
+
+これは「baselineを投入しない限りずっと動かない」という意味ではありません。管理者が一度でもbaselineを手動投入すれば、その後は上の3つ(CVE.org/CSAF Red Hat/CSAF Siemens)と同じく、毎日無条件に外部リクエストを発行する定常状態になります。閉域モードを実運用する場合、GHSA/OSVのカバレッジ自体が必要でbaselineを投入するのが通常の使い方なので、実運用上の定常状態は他の3つと変わりません。
 
 上記のいずれも公開されている脆弱性アドバイザリの全件差分取得であり、特定のCSVアップロード内容とは無関係です。
 
@@ -84,7 +86,7 @@ CSVアップロード後の製品識別・脆弱性調査パイプラインは�
 一方で、以下のような経路では、CSVアップロード・識別処理そのものとは別に外部通信が発生しえます。
 
 - CVE.org/CSAF(Red Hat・Siemens)の日次デルタ同期は、有効化フラグが存在せず既定設定のまま起動しただけで自動的に外部へHTTPリクエストを送信します(公開アドバイザリの全件差分取得であり、個々のCSVアップロード内容とは無関係)。
-- GHSA/OSVの日次デルタ同期も同様に無条件でスケジュール登録されますが、管理者がbaselineを手動投入するまでは実際には発火しません。
+- GHSA/OSVの日次デルタ同期も同様に無条件でスケジュール登録されますが、管理者がbaselineを手動投入するまでは実際には発火しません。ただし一度baselineを投入すれば、その後は他の3つと同じ「既定設定のまま自動的に発火する」定常状態になります。
 - レジストリミラー同期(既定無効)を明示的に有効化した場合は、過去のアップロード内容が識別処理を経て解決したパッケージ名が外部レジストリへの問い合わせ対象になり得ます。
 - 管理者がCPE辞書のキーワード同期エンドポイントを手動操作した場合、CSV由来の製品名を含みうるキーワードがNVD CPE APIへ送信されます。
 
@@ -101,11 +103,22 @@ CSVアップロード後の製品識別・脆弱性調査パイプラインは�
 
 自分の環境でこの設計を独立して確認する場合、以下の方法が使えます。
 
-- **ネットワークトラフィックの直接観測**: バックエンドを動かしているコンテナ内で `ss`/`netstat`/`tcpdump` 等を使い、CSVアップロード〜識別処理の実行中にDB以外への接続が発生しないことを確認する。
-- **アプリケーションログでの確認**: 同期系コンポーネントはそれぞれ固有のUser-Agent文字列(例: `vulncheck-server/0.1 (cpe dictionary sync)` のような、コンポーネントごとに異なる識別子)を使ってHTTPリクエストを送るため、識別処理を実行した時間帯のログにこれらの文字列が一切出現しないことを確認する。CVE.org/CSAF(Red Hat・Siemens)の日次デルタ同期には有効化フラグ自体が存在しないため、これらについてはこのログ確認が主な検証手段になる。
-- **設定値の確認**: `cpe-full-sync-on-startup`・`cpe-scheduled-resync-enabled`・`registry-mirror-scheduled-sync-enabled`・`nvd-cve-backfill.enabled`(いずれも既定`false`)が意図せず有効化されていないことを確認する。CVE.org/CSAF(Red Hat・Siemens)には対応するフラグが無く既定のまま自動的に動作するため、これらは設定値の確認では検知できない(上のログ観測、またはネットワークトラフィックの直接観測で確認する)。GHSA/OSVもフラグは無いが、管理画面からbaseline同期を手動実行していないかどうかで判断する。
-- **自動テストでの再現**: `<リポジトリルート>`でリポジトリ標準のテスト実行手順に沿って、以下のように対象テストのみを指定して実行する。
+- **ネットワークトラフィックの直接観測**: バックエンドを動かしているコンテナ内で `ss`/`netstat`/`tcpdump` 等を使い、CSVアップロード〜識別処理の実行中にDB以外への接続が発生しないことを確認する。同期系コンポーネントはそれぞれ固有のUser-Agent文字列(例: `vulncheck-server/0.1 (cve.org sync)` のような、コンポーネントごとに異なる識別子)をリクエストヘッダに付与するため、`tcpdump`やプロキシ側でパケット本体まで観測できる場合は、どのコンポーネントの通信かをこの文字列で識別できる。ただしこのUser-Agent文字列はアプリケーションのログには一切出力されない(送信ヘッダにのみ現れる)ため、ログ確認では代用できない。
+- **アプリケーションログでの確認**: 各同期コンポーネントは`@Scheduled`メソッドの開始時に固有のログ行を`log.info`で出力する(既定ログレベルで出力される)。識別処理を実行した時間帯のログに、以下の行が一切出現しないことを確認する。
+  - `CVE.org scheduled daily delta sync starting`
+  - `Red Hat CSAF scheduled daily delta sync starting`
+  - `Siemens CSAF scheduled daily delta sync starting`
+  - `GHSA scheduled daily delta sync starting`
+  - `OSV scheduled daily delta sync starting`
 
-  ```
-  mvn test -Dtest=ClosedModeArchitectureGateTest,ClosedModeBeanArchitectureGateTest
-  ```
+  CVE.org/CSAF(Red Hat・Siemens)の日次デルタ同期には有効化フラグ自体が存在しないため、これらについてはこのログ確認が主な検証手段になる。**注意**: GHSA/OSVは上記の`starting`行自体は`@Scheduled`ジョブが呼び出されるたびに(baselineの有無に関わらず)出力される。baselineが未投入なら、この行の直後に`GHSA delta sync skipped: baseline has not completed yet`/`OSV delta sync skipped: baseline has not completed yet`という警告ログが続き、実際には外部への通信を行わずに終了したことを示す。`starting`行の有無だけでは実際に外部通信が発生したかどうか判別できず、この`skipped`行の有無まで確認する必要がある。
+- **設定値の確認**: `cpe-full-sync-on-startup`・`cpe-scheduled-resync-enabled`・`registry-mirror-scheduled-sync-enabled`・`nvd-cve-backfill.enabled`(いずれも既定`false`)が意図せず有効化されていないことを確認する。CVE.org/CSAF(Red Hat・Siemens)には対応するフラグが無く既定のまま自動的に動作するため、これらは設定値の確認では検知できない(上のログ観測、またはネットワークトラフィックの直接観測で確認する)。GHSA/OSVもフラグは無いが、管理画面からbaseline同期を手動実行していないかどうかで判断する。
+- **自動テストでの再現**: `<リポジトリルート>`でリポジトリ標準のテスト実行手順に沿って、以下のように対象テストを実行する。2つのテストは前提条件が異なるため分けて説明する。
+  - `ClosedModeArchitectureGateTest`はクラスパスの走査と静的ファイル読み込みのみで完結し、Spring ApplicationContextの起動もデータベースへの接続も必要としない(単体で実行可能)。
+    ```
+    mvn test -Dtest=ClosedModeArchitectureGateTest
+    ```
+  - `ClosedModeBeanArchitectureGateTest`は`@SpringBootTest`で実際にSpringのApplicationContextを起動するため、テスト用データベース(PostgreSQL)へ到達できる環境で実行する必要がある(起動時にFlywayのスキーマ検証が走る)。リポジトリのテスト実行手順に沿ってテスト用データベースを用意した上で実行すること。
+    ```
+    mvn test -Dtest=ClosedModeBeanArchitectureGateTest
+    ```
