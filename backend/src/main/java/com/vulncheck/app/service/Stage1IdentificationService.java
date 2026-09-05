@@ -834,22 +834,6 @@ public class Stage1IdentificationService {
         List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
                 productName, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
         ContainmentResult containment = plausibleContainmentOnly(vendor, productName, pool);
-        if (containment.candidates().isEmpty()) {
-            // Item 302: pg_trgm similarity structurally disadvantages a short dictionary product
-            // slug against a longer query string (measured live, "CrowdStrike Falcon Sensor" against
-            // crowdstrike:falcon: product similarity 0.269 < the 0.3 threshold, title similarity 0.51
-            // < the 0.6 threshold — see findByVendorProductPairs's own javadoc), which keeps such
-            // candidates out of the trigram-ranked pool above entirely, before plausibleContainmentOnly
-            // ever runs. Only tried when the trigram pool's containment check came back completely
-            // empty (never widens an already-nonempty result), and the exact-match pool is fed through
-            // the exact same plausibleContainmentOnly -> rankCpeCandidates -> rankAndGate pipeline as
-            // every other candidate source — no bypass of the existing safety gates, just a second
-            // candidate-pool entry point.
-            List<CpeDictionaryEntry> exactPool = exactVendorProductMatches(vendor, productName);
-            if (!exactPool.isEmpty()) {
-                containment = plausibleContainmentOnly(vendor, productName, exactPool);
-            }
-        }
         List<CpeDictionaryEntry> ranked = rankCpeCandidates(
                 vendor, productName, containment.candidates(), Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
         return new LocalCpeMatches(ranked, containment.usedRelaxedPass());
@@ -870,6 +854,21 @@ public class Stage1IdentificationService {
      * #MAX_EXACT_MATCH_TOKENS_PER_SIDE} tokens (see that constant's javadoc for the worst-case
      * combinatorics this guards against) before combining, bounding the cross-product to at most
      * {@value #MAX_EXACT_MATCH_TOKENS_PER_SIDE}^2 = 64 pairs.
+     *
+     * <p>Called from {@link #resolveCpeCandidates} — deliberately NOT from {@link #localCpeLookup}
+     * (REVISE, senior review 2026-09-05): {@code localCpeLookup} runs concurrently with the registry
+     * fan-out, before {@code registryEcosystem} is known, and its own contract (see its javadoc) is
+     * "literal matches only, DB-only, no network" — every other last-resort search (live NVD,
+     * name-variant) already lives in {@code resolveCpeCandidates} specifically so it sits behind that
+     * method's {@code registryEcosystem.isPresent()} guard, which skips the live/last-resort searches
+     * entirely once a registry match already covers the item. An earlier revision of this fallback
+     * lived inside {@code localCpeLookup} itself and bypassed that guard, which could flip {@code
+     * trustRegistryMatch} (see {@code identify}'s own comment on that flag) from true to false for an
+     * already-identified, version-unconfirmed {@code IDENTIFIED_REGISTRY} item purely because this
+     * fallback manufactured a new, non-null {@code chosenCpe} for it — a real regression risk for
+     * exactly the registry-matched bucket. Calling this only from {@code resolveCpeCandidates}, after
+     * its own registry-ecosystem guard, makes that class of regression structurally unreachable: this
+     * method is simply never called at all whenever a registry match exists.
      */
     private List<CpeDictionaryEntry> exactVendorProductMatches(String vendor, String productName) {
         List<String> vendorTokens = tokenize(normalizeForContainment(vendor));
@@ -1643,6 +1642,15 @@ public class Stage1IdentificationService {
      * belong to (see {@link #passesTargetSwGate}). A rejection empties out whichever branch produced
      * it, which naturally falls through to the next fallback stage exactly like "found nothing" did
      * before this fix — never a silent drop to a lower-ranked candidate within the same branch.
+     *
+     * <p>Item 302 (REVISE, senior review 2026-09-05): the {@code (vendor, product)} exact-match
+     * fallback (see the block right after the {@code registryEcosystem.isPresent()} early return
+     * below) fires whenever {@code gatedLocalMatches} above comes out empty — which is a strictly
+     * wider condition than "the trigram+containment pool was empty": it also fires when that pool was
+     * nonempty but every candidate in it failed the {@code target_sw} gate. This matches {@link
+     * #findByNameVariants}'s own existing firing condition one branch down (also gated on {@code
+     * gatedLocalMatches} being empty, not on {@code localMatches.candidates()} being empty) rather
+     * than introducing a third, narrower notion of "empty" — deliberate, not an oversight.
      */
     private CpeCandidateResult resolveCpeCandidates(String vendor, String productName, Long userId,
             Optional<String> registryEcosystem, Optional<String> registryPackageName,
@@ -1670,6 +1678,48 @@ public class Stage1IdentificationService {
             log.info("Local CPE dictionary had no candidates for '{}' — skipping live NVD CPE lookup "
                     + "since a registry match already covers this item", query);
             return new CpeCandidateResult(List.of(), false, false);
+        }
+
+        // Item 302 (REVISE, senior review 2026-09-05): the (vendor, product) exact-match fallback
+        // used to live inside localCpeLookup itself, but that meant its output reached this method as
+        // ordinary localMatches.candidates() — before the registryEcosystem.isPresent() guard just
+        // above ever got a chance to run, unlike every other fallback source here (live NVD, name-
+        // variant). A registry match with an unconfirmed version relies on chosenCpe staying null to
+        // keep trustRegistryMatch true (see the resolveCandidates-level comment on that flag); this
+        // fallback manufacturing a non-null chosenCpe for such an item flipped trustRegistryMatch to
+        // false, discarding the registry match's ecosystem/package/purl and re-gating on a bare
+        // passesTargetSwGate call that a previously-working IDENTIFIED_REGISTRY item might not survive
+        // — a real regression risk for exactly the golden-300 bucket the original PR's own regression
+        // test excluded. Moving it here (after the registry-ecosystem guard, so it is provably
+        // unreachable whenever a registry match exists) fixes that, and also means it now has the real
+        // targetSwContext to rank/gate against, unlike localCpeLookup's concurrent Optional.empty()
+        // placeholder. Placed before liveNvdCpeLookupWithFallback (a rate-limited network call) since
+        // an exact local index hit is stronger evidence than a keyword search and, when it fires,
+        // saves that round trip entirely — this also removes the extra 43-151ms query from every
+        // item's concurrent localCpeLookup critical path, running it only for the subset that actually
+        // needs a last resort.
+        //
+        // Same pg_trgm-similarity-structurally-disadvantages-a-short-slug rationale as before (see
+        // findByVendorProductPairs's own javadoc): "CrowdStrike Falcon Sensor" against
+        // crowdstrike:falcon scores 0.269/0.51, under the 0.3/0.6 thresholds, so this candidate never
+        // enters the trigram-ranked pool localCpeLookup already tried above.
+        //
+        // Provenance: assigned exactly like the local-dictionary branch above (usedRelaxedPass feeds
+        // both variantDerived and relaxedContainmentDerived), NOT the name-variant branch's
+        // unconditional variantDerived=true — a strict-containment exact-match hit is exactly as
+        // trustworthy as a strict-containment literal-query hit, and forcing AI verification on it
+        // (as variantDerived=true would via resolveSingleCpeCandidate) would silently drop the single
+        // candidate in a no-Claude-key environment, undoing this fallback's own motivating fix
+        // (CrowdStrike Falcon Sensor) in exactly the environment it was measured in.
+        List<CpeDictionaryEntry> exactPool = exactVendorProductMatches(vendor, productName);
+        if (!exactPool.isEmpty()) {
+            ContainmentResult exactContainment = plausibleContainmentOnly(vendor, productName, exactPool);
+            List<CpeDictionaryEntry> gatedExactMatches =
+                    rankAndGate(vendor, exactContainment.candidates(), targetSwContext, itemVersion);
+            if (!gatedExactMatches.isEmpty()) {
+                return new CpeCandidateResult(
+                        gatedExactMatches, exactContainment.usedRelaxedPass(), exactContainment.usedRelaxedPass());
+            }
         }
 
         Optional<String> nvdApiKey = userApiKeyService.getNvdApiKey(userId);

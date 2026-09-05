@@ -25,7 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Item 302 golden-300 regression: verifies the {@code (vendor, product)} exact-match candidate-pool
- * fallback ({@link Stage1IdentificationService#localCpeLookup}, backed by {@link
+ * fallback ({@link Stage1IdentificationService#resolveCpeCandidates}, backed by {@link
  * com.vulncheck.app.repository.CpeDictionaryRepositoryCustom#findByVendorProductPairs}) does not
  * regress golden-300's existing static-pipeline accuracy. Same real-dev-DB, no-cost, in-process
  * shape as {@link ChocolateyRemovalGolden300RecallTest} (static Tier1 + CPE dictionary only —
@@ -41,28 +41,41 @@ import org.springframework.transaction.annotation.Transactional;
  * rate-limited network calls to external package registries (~1 req/sec per {@code
  * ExternalRegistryRateLimiter}) for every row that has a plausible same-named registry candidate —
  * true for most of the 200 registry-bucket rows, each needing several such calls, but not for the
- * CPE/control rows this fallback can actually affect. Excluding the registry bucket is safe for this
- * specific regression check because this fallback only ever changes the local CPE candidate pool
- * (never an item's registry/ecosystem match), and a registry-bucket row's {@code
- * IdentifiedProduct.isPresent()} outcome — the only thing golden-300's recall/false-positive metric
- * reads — depends on ecosystem match succeeding, not on which CPE (if any) ends up attached; this
- * fallback can only ever add a CPE candidate to an already-identified registry row's result, never
- * revoke its identified status. That leaves the CPE-bucket recall and the control-bucket false-
+ * CPE/control rows this fallback can actually affect.
+ *
+ * <p>Excluding the registry bucket is safe for this specific regression check for a structural
+ * reason, not merely a probabilistic one (REVISE, senior review 2026-09-05, following peer review's
+ * discovery of a real regression risk in an earlier revision of this fallback — see {@code
+ * resolveCpeCandidates}'s own comment on the {@code registryEcosystem.isPresent()} early return):
+ * {@link Stage1IdentificationService#exactVendorProductMatches} is called only from {@code
+ * resolveCpeCandidates}, strictly after that method's {@code registryEcosystem.isPresent()} early
+ * return — so whenever an item has a registry match, this fallback is never even invoked for it,
+ * let alone able to change its outcome. That makes every one of the 200 {@code
+ * IDENTIFIED_REGISTRY} rows structurally unreachable by this fallback, not just empirically
+ * unaffected on this one data set — leaving the CPE-bucket recall and the control-bucket false-
  * positive rate as the only two numbers this fallback could plausibly move, which is exactly what
  * this subset measures with full fidelity.
  *
- * <p>The fallback only ever fires when the existing trigram+containment candidate pool comes back
- * completely empty for an item (see {@code localCpeLookup}'s own javadoc), so it can never change
- * the outcome of an item that already had candidates — a plain equality assertion on the recall/
- * false-positive counts is therefore the right regression check here (not just a "no worse than"
- * bound), matching item 302's own backlog description. Empirically confirmed live (2026-09-05, real
- * dev DB) by running this exact subset twice — once with {@link Stage1IdentificationService}'s
- * fallback branch temporarily disabled (a hardcoded {@code false &&} short-circuit), once with it
- * enabled as shipped — and both runs produced byte-for-byte identical results: identification recall
- * 64/66 = 96.97%, control-row false-positive rate 3/34 = 8.82% (the same 3 known pre-existing false
- * positives — Blender, Rufus, Ditto — none newly introduced; none of golden-300's rows happen to hit
- * this fallback's short-slug-vs-long-query shape, see docs/spec/closed-mode-backlog.md item 299 for
- * the residual CPE-matching misses this fallback does not address).
+ * <p>Within the CPE/control rows this fallback CAN reach, it only ever fires when {@code
+ * resolveCpeCandidates}'s {@code gatedLocalMatches} — the existing trigram+containment pool after
+ * the {@code target_sw} gate — comes back completely empty for an item, so it can never change the
+ * outcome of an item that already has a gated candidate. Empirically confirmed live (2026-09-05, real
+ * dev DB, after merging {@code origin/test}'s PR#217/#218 CPE-ranking changes) by running this exact
+ * subset twice — once with the fallback's {@code exactVendorProductMatches} call in {@code
+ * resolveCpeCandidates} temporarily short-circuited to never fire (recall 64/66, control false-
+ * positive rate 3/34), once with it enabled as shipped (recall 65/66, control false-positive rate
+ * unchanged at 3/34). The one row that changed, {@code Cisco IOS XE}, went from a genuine miss to
+ * identified: none of the pool's tokens ({@code cisco}/{@code ios}/{@code xe} against vendor
+ * {@code cisco}) exactly match the dictionary's {@code ios_xe} slug, but the {@code (cisco, ios)}
+ * pair does match a real, generic {@code cisco:ios} (part=o) dictionary row, which then wins via the
+ * existing part=o fallback in {@code rankCpeCandidates} — this project's golden-300 recall metric
+ * (here and in every sibling test in this package) only ever checks {@code
+ * IdentifiedProduct.isPresent()}, not exact CPE-string equality, so this counts as a genuine recall
+ * improvement by the same measure every other golden-300 test in this suite already uses. No other
+ * row changed in either direction, and the control-bucket false-positive rate (the same 3 known
+ * pre-existing false positives — Blender, Rufus, Ditto, unrelated to this fallback) is unchanged —
+ * so a plain equality assertion on both counts is still the right regression check here (not just a
+ * "no worse than" bound), matching item 302's own backlog description.
  *
  * <p>Disabled by default, same convention as every other real-dev-DB test in this package — run
  * once by hand (temporarily remove {@code @Disabled},
@@ -77,11 +90,13 @@ import org.springframework.transaction.annotation.Transactional;
         // same as every other real-dev-DB test in this package.
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Run once (2026-09-05, backlog item 302 vendor/product exact-match fallback) against the "
-        + "real dev DB -- identification recall 64/66=96.97%, control-row false-positive rate "
-        + "3/34=8.82%, confirmed byte-for-byte identical with the fallback temporarily disabled (see "
-        + "class javadoc) -- this fallback never fires for any row in this subset. Left disabled so "
-        + "it can never re-fire on a routine mvn test run.")
+@Disabled("Run once (2026-09-05, backlog item 302 REVISE -- moved the fallback from localCpeLookup "
+        + "into resolveCpeCandidates, behind the registryEcosystem.isPresent() guard, and re-merged "
+        + "origin/test's PR#217/#218 CPE-ranking changes) against the real dev DB -- identification "
+        + "recall 65/66=98.48% (up from a confirmed 64/66 baseline with the fallback disabled -- Cisco "
+        + "IOS XE newly identified via the existing part=o fallback, see class javadoc), control-row "
+        + "false-positive rate unchanged at 3/34=8.82%. Left disabled so it can never re-fire on a "
+        + "routine mvn test run.")
 class VendorProductExactMatchFallbackGolden300Test {
 
     private static final Long REAL_USER_ID = 5L;
@@ -156,11 +171,12 @@ class VendorProductExactMatchFallbackGolden300Test {
         System.out.printf("control-row false-positive rate: %d/%d = %.4f%n", controlFalsePositive, controlTotal,
                 controlTotal == 0 ? 0.0 : (double) controlFalsePositive / controlTotal);
 
-        // Item 302's own design guarantee, empirically confirmed (see class javadoc): the fallback
-        // only ever fires on an already-empty candidate pool, and running this exact subset with the
-        // fallback disabled produced byte-for-byte identical numbers -- so both counts must come out
-        // exactly unchanged from that confirmed baseline, not just "no worse".
-        assertThat(targetIdentified).isEqualTo(64);
+        // Confirmed live (2026-09-05, see class javadoc): recall improved from a confirmed 64/66
+        // baseline (fallback disabled) to 65/66 with the fallback enabled -- Cisco IOS XE newly
+        // identified, no other row changed in either direction -- and the control false-positive
+        // rate is unchanged at 3/34. A plain equality assertion (not just "no worse") is correct here
+        // since both numbers are pinned to specific, individually verified outcomes.
+        assertThat(targetIdentified).isEqualTo(65);
         assertThat(targetTotal).isEqualTo(66);
         assertThat(controlFalsePositive).isEqualTo(3);
         assertThat(controlTotal).isEqualTo(34);

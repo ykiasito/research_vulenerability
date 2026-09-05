@@ -130,7 +130,7 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
 
     /**
      * Item 302 safety net: {@link CpeDictionaryRepositoryCustom#findByVendorProductPairs}'s own
-     * caller ({@code Stage1IdentificationService#localCpeLookup}) already caps generated pairs at 64
+     * caller ({@code Stage1IdentificationService#exactVendorProductMatches}) already caps generated pairs at 64
      * (8 vendor tokens x 8 product tokens, both taken from {@code tokenize()}'s own bounded output —
      * see that method's javadoc for the full worst-case-explosion rationale), but this repository
      * method has no way to know a future caller will respect that, and a {@code product} column being

@@ -55,7 +55,10 @@ public interface CpeDictionaryRepositoryCustom {
     /**
      * Exact-match lookup against the {@code (vendor, product)} composite btree index ({@code
      * idx_cpe_dictionary_vendor_product}, see {@code V31__cpe_dictionary_vendor_product_index.sql}),
-     * backing item 302's candidate-pool fallback in {@code Stage1IdentificationService#localCpeLookup}.
+     * backing item 302's candidate-pool fallback in {@code
+     * Stage1IdentificationService#exactVendorProductMatches} (called from {@code
+     * Stage1IdentificationService#resolveCpeCandidates}, not {@code localCpeLookup} — see that
+     * method's own javadoc for why).
      *
      * <p>Why exact match rather than a lower pg_trgm similarity threshold — same reasoning as {@link
      * #findByLeadingInitialismMatch}'s own javadoc (short dictionary slugs are structurally

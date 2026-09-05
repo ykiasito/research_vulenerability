@@ -2647,10 +2647,11 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
-    void localCpeLookupFallsBackToExactVendorProductMatchWhenTrigramPoolIsEmpty() {
+    void exactVendorProductFallbackFiresWhenNoRegistryMatchAndLocalPoolIsEmpty() {
         // Item 302: the same shape as the real crowdstrike:falcon case this fallback exists for —
-        // findFuzzyMatches (the pg_trgm path) comes back with nothing at all, but the exact
-        // (vendor, product) pair fallback finds the row via the composite index instead.
+        // findFuzzyMatches (the pg_trgm path) comes back with nothing at all, and there's no registry
+        // match to gate on, so resolveCpeCandidates's exact (vendor, product) pair fallback finds the
+        // row via the composite index instead.
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of());
         CpeDictionaryEntry falcon = cpeEntry("cpe:2.3:a:crowdstrike:falcon:1.0.0:*:*:*:*:*:*:*", "falcon");
@@ -2679,9 +2680,9 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
-    void localCpeLookupDoesNotFireExactMatchFallbackWhenTheTrigramContainmentPoolAlreadyHasCandidates() {
-        // The fallback must be a last resort, never a widening of an already-nonempty pool — see
-        // localCpeLookup's own javadoc.
+    void exactVendorProductFallbackDoesNotFireWhenTheLocalPoolAlreadyHasGatedCandidates() {
+        // The fallback must be a last resort, never a widening of an already-nonempty gated pool —
+        // see resolveCpeCandidates's own javadoc.
         CpeDictionaryEntry gson = cpeEntry("cpe:2.3:a:google:gson:1.0.0:*:*:*:*:*:*:*", "gson");
         gson.setVendor("google");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
@@ -2694,6 +2695,78 @@ class Stage1IdentificationServiceTest {
         Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
 
         assertThat(result).isPresent();
+        verify(cpeDictionaryRepository, never()).findByVendorProductPairs(any(), anyInt());
+    }
+
+    @Test
+    void exactVendorProductFallbackFiresWhenTheRawLocalPoolIsNonemptyButTheTargetSwGateEmptiesIt() {
+        // Item 302 REVISE (senior review 2026-09-05): after moving the fallback into
+        // resolveCpeCandidates, it fires whenever gatedLocalMatches is empty — a strictly wider
+        // condition than "the raw trigram+containment pool was empty", since a nonempty pool can still
+        // be emptied out by the target_sw gate. This candidate passes containment (exact product-slug
+        // match) but is unconditionally rejected by passesTargetSwGate (target_sw=jenkins), so the raw
+        // pool is nonempty while the gated pool is empty — the fallback must still get a chance to run.
+        CpeDictionaryEntry jenkinsScoped = cpeEntry("cpe:2.3:a:acme:widget:1.0.0:*:*:*:*:*:*:*", "widget");
+        jenkinsScoped.setVendor("acme");
+        jenkinsScoped.setTargetSwValues(java.util.Set.of("jenkins"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(jenkinsScoped));
+
+        CpeDictionaryEntry exactMatch = cpeEntry("cpe:2.3:a:acme:widget:2.0.0:*:*:*:*:*:*:*", "widget");
+        exactMatch.setVendor("acme");
+        when(cpeDictionaryRepository.findByVendorProductPairs(any(), anyInt())).thenReturn(List.of(exactMatch));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("widget");
+        item.setVendor("Acme");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:widget:1.0.0:*:*:*:*:*:*:*");
+        verify(cpeDictionaryRepository).findByVendorProductPairs(any(), anyInt());
+    }
+
+    @Test
+    void exactVendorProductFallbackIsNeverCalledWhenARegistryMatchAlreadyCoversTheItem() {
+        // Item 302 REVISE (senior review 2026-09-05): the fallback previously lived inside
+        // localCpeLookup, which runs concurrently with the registry fan-out and fed its result into
+        // resolveCpeCandidates as ordinary local matches — reaching the registryEcosystem.isPresent()
+        // early return only AFTER a candidate had already been produced, which could set chosenCpe in
+        // resolveCandidates and flip trustRegistryMatch from true to false for an unconfirmed-version
+        // registry match purely because this fallback manufactured a new, non-null CPE — a real
+        // regression for the IDENTIFIED_REGISTRY bucket (golden-300's 200-row majority). Moving the
+        // fallback behind that guard in resolveCpeCandidates makes it provably unreachable whenever a
+        // registry match exists, regardless of what findByVendorProductPairs would have returned —
+        // stubbed here to return a plausible-looking candidate specifically to prove it is never even
+        // asked for.
+        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("npm", "cobra", "pkg:npm/cobra@1.7.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
+        CpeDictionaryEntry manufactured = cpeEntry("cpe:2.3:a:cobra:cobra:1.0.0:*:*:*:*:*:*:*", "cobra");
+        manufactured.setVendor("cobra");
+        // lenient(): this stub is expected to be unused — that is the whole point of this test — so
+        // Mockito's strict-stubbing check would otherwise fail it as an "unnecessary stubbing".
+        lenient().when(cpeDictionaryRepository.findByVendorProductPairs(any(), anyInt())).thenReturn(List.of(manufactured));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item("cobra"), USER_ID);
+
+        // Same outcome as unconfirmedVersionRegistryMatchIsStillUsedWhenNoCpeCorroborationExists —
+        // the weak registry match is trusted, no manufactured CPE rides along.
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("npm");
+        assertThat(result.get().getPackageName()).isEqualTo("cobra");
+        assertThat(result.get().getCpe()).isNull();
         verify(cpeDictionaryRepository, never()).findByVendorProductPairs(any(), anyInt());
     }
 
