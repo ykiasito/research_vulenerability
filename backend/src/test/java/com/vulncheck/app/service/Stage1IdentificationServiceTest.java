@@ -2841,7 +2841,7 @@ class Stage1IdentificationServiceTest {
         // Backlog item 345 REVISE (senior review 2026-09-05): the same VirtualBox fixture as
         // exactSlugMatchIsSuppressedForAStaleSameVendorDuplicateThatVersionCoverageContradicts above,
         // but oracle:virtualbox's own max cataloged major raised from 3 to 7, so item version 7.0.14's
-        // major (7) no longer exceeds 3*VERSION_COVERAGE_IMPLAUSIBILITY_RATIO(2)=21 either way — both
+        // major (7) no longer exceeds 7*VERSION_COVERAGE_IMPLAUSIBILITY_RATIO(2)=14 either way — both
         // candidates now get versionCoverageRank COVERS, so item 308's own suppression condition 1
         // (the anchor's version coverage must be contradicted) never fires. This is the safety net for
         // item 345's own new admission-time rescue: rescuing oracle:vm_virtualbox into the ranked pool

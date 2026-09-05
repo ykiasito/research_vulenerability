@@ -45,17 +45,20 @@ import org.springframework.transaction.annotation.Transactional;
         "spring.datasource.username=vulncheck",
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Re-measured 2026-09-05 (backlog item 345, pool-relative same-vendor superset rescue in "
-        + "plausibleContainmentOnly) against the real dev DB -- CPE vendor:product exact match is now "
-        + "64/68 = 0.9412, up from 63/68 = 0.9265 before item 345. The 4 remaining mismatches are "
-        + "Metasploit Framework, Notepad++, Zoom, Kibana. VirtualBox is resolved: item 345's "
-        + "pool-relative rescue in plausibleContainmentOnly admits oracle:vm_virtualbox into "
-        + "rankCpeCandidates's candidate pool (via the oracle:virtualbox exact-slug anchor already "
-        + "admitted by the strict pass), which combined with item 308's own versionCoverageRank fix "
-        + "resolves the real golden-300 VirtualBox row. Left disabled so it can never re-fire on a "
-        + "routine mvn test run -- see class javadoc. The max cataloged major 71 figure (for "
-        + "oracle:vm_virtualbox) traces to a single broken NVD version string '71.6' among that "
-        + "product's 270 rows, not a real major version 71 release.")
+@Disabled("Re-measured 2026-09-05 (backlog item 346, max_cataloged_major outlier guard, including "
+        + "the REVISE that extended the same rule A/B guard to findByVendorProductPairs via the "
+        + "shared outlierGuardedAggregateSql helper) against the real dev DB, before vs. after item "
+        + "346's rule A/B outlier guard -- CPE vendor:product exact match is unchanged at 64/68 = "
+        + "0.9412 either way, confirming item 346 (both the collect() path and, after the REVISE, "
+        + "the findByVendorProductPairs path) is neutral for this golden-300 subset (the 4 remaining "
+        + "mismatches -- Metasploit Framework, Notepad++, Zoom, Kibana -- are all unrelated to "
+        + "max_cataloged_major). Left disabled so it can never re-fire on a routine mvn test run -- "
+        + "see class javadoc. The max cataloged major for oracle:vm_virtualbox used to read 71, "
+        + "traced to a single broken NVD version string '71.6' among that product's 270 rows (a "
+        + "typo, not a real major version 71 release) -- backlog item 346's outlier guard now "
+        + "corrects this to 7 (the real highest cataloged major), which is still <= VirtualBox "
+        + "7.0.14's own major, so versionCoverageRank's outcome for this row is unchanged by item "
+        + "346.")
 class Backlog299CpeRankingGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
