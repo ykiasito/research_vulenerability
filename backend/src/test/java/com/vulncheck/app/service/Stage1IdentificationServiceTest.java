@@ -2450,6 +2450,98 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void prefersAParentProductCandidateOverASiblingDerivedProductWithAnInflatedRowCount() {
+        // Backlog item 299 case 5 (closed-mode golden-300 regression, 2026-09-05): "Microsoft Visual
+        // Studio" 17.10 ties microsoft:visual_studio (correct) and microsoft:visual_studio_code
+        // (wrong, a distinct derived product) on every earlier key — both contain "microsoft"/
+        // "visual"/"studio" in their own product/title text, both vendor-agree, and both cover the
+        // item's own major version 17 (real dictionary data: visual_studio's own max cataloged major
+        // is 2017 via its own "Microsoft Visual Studio 2017" release-name versioning, and
+        // visual_studio_code's is 2021 via a bundled target_sw=python-scoped extension's calendar
+        // versioning) — leaving only K3 (raw catalogued-row-count) to decide, and
+        // visual_studio_code's count is inflated into the thousands by exactly that scoped
+        // extension sharing its vendor:product identity. isDerivedFromSiblingCandidate catches this
+        // before K3 ever gets a chance to pick the contaminated pair: visual_studio_code's own
+        // product-slug tokens ("visual", "studio", "code") start with visual_studio's own tokens
+        // ("visual", "studio") plus one extra trailing word — a sibling still present in the very
+        // same ranked pool — so only visual_studio_code is flagged as derived.
+        CpeDictionaryEntry visualStudio = cpeEntry("cpe:2.3:a:microsoft:visual_studio:6.0:*:*:*:*:*:*:*", "visual_studio");
+        visualStudio.setTitle("Microsoft Visual Studio");
+        visualStudio.setMaxCatalogedMajor(2017);
+        visualStudio.setCatalogedRowCount(36);
+        CpeDictionaryEntry visualStudioCode =
+                cpeEntry("cpe:2.3:a:microsoft:visual_studio_code:1.85.0:*:*:*:*:*:*:*", "visual_studio_code");
+        visualStudioCode.setTitle("Microsoft Visual Studio Code 1.85.0");
+        visualStudioCode.setMaxCatalogedMajor(2021);
+        visualStudioCode.setCatalogedRowCount(4065);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(visualStudioCode, visualStudio));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Microsoft Visual Studio");
+        item.setVendor("Microsoft");
+        item.setVersion("17.10");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:microsoft:visual_studio:17.10:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void neverPrefersEitherCandidateWhenNeitherProductSlugIsAPrefixOfTheOther() {
+        // Backlog item 299 case 5: two earlier, less pool-relative versions of this fix (a
+        // target_sw-based one, and one that penalized any candidate word absent from the query text)
+        // were each reverted after wrongly introducing a preference between genuinely unrelated,
+        // equally-plausible candidates — e.g. "apache_http_server" vs. "apache_tomcat" for the bare
+        // query "apache" (see ambiguousCpeCandidatesAreDisambiguatedByLlm and its sibling tests,
+        // which deliberately leave that pair as a tie for Tier2 AI, or list order with no AI, to
+        // settle). isDerivedFromSiblingCandidate must stay silent here too: neither
+        // "widget_tool"'s nor "widget_gadget"'s tokens are a prefix of the other's, so this key ties
+        // (false/false) and the pre-existing stable list-order/no-AI-key degrade decides, exactly as
+        // it always has for a genuinely ambiguous pair. Item vendor deliberately left blank (bare
+        // "Widget" query): a non-blank vendor would trip the unrelated backlog item 89 P3 leftover
+        // -vendor-explanation rule for this single-token query, which isn't what this test is about.
+        CpeDictionaryEntry widgetTool = cpeEntry("cpe:2.3:a:acme:widget_tool:1.0.0:*:*:*:*:*:*:*", "widget_tool");
+        CpeDictionaryEntry widgetGadget = cpeEntry("cpe:2.3:a:acme:widget_gadget:1.0.0:*:*:*:*:*:*:*", "widget_gadget");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(widgetTool, widgetGadget));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Widget"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:widget_tool:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+    }
+
+    @Test
+    void prefersTheBaseProductCandidateWhenItsOwnTokensAreAStrictPrefixOfASiblingsInTheSamePool() {
+        // Backlog item 299 case 5: a second, independent (non-Visual-Studio) fixture directly
+        // exercising isDerivedFromSiblingCandidate's core rule in isolation, with every earlier key
+        // deliberately tied (query includes the vendor word so exactSlugMatch is false for both, and
+        // both candidates' titles account for every query token so K1 ties at 0 too) — "widget_tool"'s
+        // own tokens ("widget", "tool") are a strict prefix of "widget_tool_pro"'s ("widget", "tool",
+        // "pro"), so only the derived one is demoted, mirroring the real HashiCorp Terraform vs.
+        // Terraform Enterprise shape this same key also happens to resolve correctly.
+        CpeDictionaryEntry widgetTool = cpeEntry("cpe:2.3:a:acme:widget_tool:1.0.0:*:*:*:*:*:*:*", "widget_tool");
+        widgetTool.setTitle("Acme Widget Tool");
+        CpeDictionaryEntry widgetToolPro = cpeEntry("cpe:2.3:a:acme:widget_tool_pro:1.0.0:*:*:*:*:*:*:*", "widget_tool_pro");
+        widgetToolPro.setTitle("Acme Widget Tool Pro");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(widgetToolPro, widgetTool));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Acme Widget Tool");
+        item.setVendor("Acme");
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:widget_tool:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
     void relaxedContainmentPass2RecoversASingleTokenCandidateOnlyWhenTheStrictPassFoundNothingAtAll() {
         // Backlog item 89 P2 (senior review 2026-08-30): "Metasploit Framework" against
         // rapid7:metasploit — the strict pass rejects it (Direction 2's single-token-candidate rule
