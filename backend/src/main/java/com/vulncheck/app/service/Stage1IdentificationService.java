@@ -1288,8 +1288,10 @@ public class Stage1IdentificationService {
      * very pool both covers the item's version (K2's COVERS(0)) and is a longer slug this candidate's
      * own slug is contained in. That is exactly "NVD cataloged the same real product twice, once under
      * an old short slug and once under a current long slug" ({@code oracle:virtualbox}, 8 rows, max
-     * cataloged major 3, versus {@code oracle:vm_virtualbox}, 270 rows, max cataloged major 71, for
-     * VirtualBox 7.0.14) — narrow enough that it can only ever fire for a genuine same-vendor
+     * cataloged major 3, versus {@code oracle:vm_virtualbox}, 270 rows, max cataloged major 7 —
+     * backlog item 346's outlier guard corrects this from a raw 71, which traces to a single broken
+     * NVD version string "71.6" among those 270 rows, not a real major-71 release — for VirtualBox
+     * 7.0.14) — narrow enough that it can only ever fire for a genuine same-vendor
      * duplicate-cataloging pair, never for an ordinary exact-slug tie like Pillow's own regression test
      * ({@code exactProductSlugMatchOutranksATargetSwMatchingButDifferentlyNamedCandidate}), where
      * neither candidate ever reaches K2's NOT_COVERS(2) in the first place. See that method's own
@@ -1444,6 +1446,13 @@ public class Stage1IdentificationService {
      * trails a few majors behind is exactly the common, innocent case this ratio guard exists to
      * keep plausible, reserving an actual demotion for when the item's version is implausibly far
      * beyond anything ever catalogued for that (vendor, product) pair.
+     *
+     * <p>Backlog item 346: {@code maxCatalogedMajor} itself is already outlier-guarded by the
+     * repository before it ever reaches here — see {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#collect}'s own comment for the two
+     * rules that keep a single broken NVD version string (or a minority date-formatted one) from
+     * inflating it. This method has no additional outlier handling of its own to do; it trusts
+     * {@code maxCatalogedMajor} as already being the credible highest cataloged major.
      */
     private boolean versionCoverageIsPlausible(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
@@ -1594,6 +1603,10 @@ public class Stage1IdentificationService {
      * competitor with zero catalog history) is ranked {@code NOT_COVERS(2)}; "no evidence" and
      * "trails but plausible" both share {@code UNKNOWN(1)}, exactly like {@code
      * versionCoverageIsPlausible} itself treats them.
+     *
+     * <p>Backlog item 346: {@code maxCatalogedMajor} is already outlier-guarded by the repository
+     * before it ever reaches here — see {@link #versionCoverageIsPlausible}'s own javadoc and {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#collect}'s comment for the details.
      */
     private int versionCoverageRank(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
