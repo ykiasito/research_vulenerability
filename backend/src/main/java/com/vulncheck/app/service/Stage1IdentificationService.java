@@ -2278,11 +2278,60 @@ public class Stage1IdentificationService {
         // Backlog item 89 P2: this specific rule is what plausibleContainmentOnly's relaxed second
         // pass exists to lift (requireTrailingVendorExplanation=false) — see this method's own
         // javadoc for why only this rule, not the whole method, is relaxable.
-        if (requireTrailingVendorExplanation && start == 0 && candidateTokens.size() == 1) {
+        //
+        // Backlog item 319 (senior review 2026-09-05): the candidateTokens.size() == 1 gate above
+        // exempts every multi-token candidate slug from this trailing check entirely, which is
+        // exactly how "Visual Studio Code Server" (item vendor "Coder") reached the nonexistent
+        // microsoft:visual_studio_code:4.9.3 — the 3-token candidate product "visual_studio_code"
+        // matched at start == 0, so the leftover trailing query token "server" was never checked
+        // against anything, since the size-1 gate never applied to a 3-token candidate. Adding an
+        // itemVendorContradicts(...) OR widens the trailing check to also fire whenever the item's
+        // own vendor field actively contradicts the candidate's CPE vendor (Coder vs microsoft),
+        // regardless of how many tokens the candidate slug has — deliberately an OR onto the existing
+        // condition, not a replacement, so the existing single-token trailing check (Metasploit
+        // Framework, item vendor blank or agreeing) keeps working exactly as before. Kept OUTSIDE the
+        // requireTrailingVendorExplanation flag on purpose: gating it on that flag would let
+        // plausibleContainmentOnly's relaxed second pass (which sets
+        // requireTrailingVendorExplanation=false specifically to admit Metasploit Framework back in)
+        // silently re-admit the same vendor-contradicting candidate this exists to reject.
+        boolean vendorContradicts = start == 0 && itemVendorContradicts(normalizedItemVendor, cpeVendor);
+        if ((requireTrailingVendorExplanation && start == 0 && candidateTokens.size() == 1) || vendorContradicts) {
             for (int i = start + candidateTokens.size(); i < queryTokens.size(); i++) {
                 if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
                     return false;
                 }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Backlog item 319: whether the item's own vendor field actively contradicts {@code entry}'s CPE
+     * vendor — as opposed to merely not confirming it. Conservative by design ("no evidence means
+     * permissive", the same default this class uses everywhere else — see {@link #versionCoverageIsPlausible}
+     * and the Direction 1 P3 check above): returns {@code false} (not a contradiction) whenever either
+     * vendor string is blank, whenever {@link #containsEitherWay} finds a raw substring overlap, or
+     * whenever {@link #vendorExplains} succeeds in either direction (an item vendor token explained by
+     * the CPE vendor, or a CPE vendor token explained by the item vendor) — only when none of those
+     * give any evidence of agreement is this {@code true}. "Coder" vs {@code microsoft} hits none of
+     * them (a real contradiction); "JetBrains" vs {@code jetbrains} and "Rapid7" vs {@code rapid7} both
+     * hit {@link #containsEitherWay} (not a contradiction).
+     */
+    private boolean itemVendorContradicts(String normalizedItemVendor, String normalizedCpeVendor) {
+        if (normalizedItemVendor.isBlank() || normalizedCpeVendor.isBlank()) {
+            return false;
+        }
+        if (containsEitherWay(normalizedItemVendor, normalizedCpeVendor)) {
+            return false;
+        }
+        for (String token : tokenize(normalizedItemVendor)) {
+            if (vendorExplains(normalizedCpeVendor, token)) {
+                return false;
+            }
+        }
+        for (String token : tokenize(normalizedCpeVendor)) {
+            if (vendorExplains(normalizedItemVendor, token)) {
+                return false;
             }
         }
         return true;
