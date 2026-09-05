@@ -194,6 +194,35 @@ public class NvdCpeSyncService {
     }
 
     /**
+     * Whether the NVD CPE Dictionary mirror's most recent unfiltered sync (full or delta, same
+     * {@link CpeDictionarySyncState#getLastSyncedAt()} high-water mark {@link #hasCompletedInitialSync()}
+     * and {@link #resolveDeltaCursor} already use) is younger than {@code maxAge} — closed-mode
+     * backlog item 330. {@code CpeDictionaryBootstrapSync} calls this to decide whether its
+     * startup-triggered full sync is even necessary: once the weekly delta chain ({@link
+     * #syncDeltaAndRelease}, {@code CpeDictionaryScheduledResync}) is running healthily, the mirror
+     * never actually goes stale between deltas — delta sync is structurally gap-free (each tick's
+     * window starts from the previous tick's own end, minus {@link #DELTA_SAFETY_MARGIN}), so
+     * forcing a redundant ~103-minute full re-pull every time a long-lived process happens to
+     * restart (or every boot, if {@code CPE_FULL_SYNC_ON_STARTUP} is left on) is pure loss: same
+     * NVD rate-limit load, same {@code cpe_dictionary} upsert traffic, zero additional coverage over
+     * what the delta chain already guarantees.
+     *
+     * <p>Returns {@code false} (never "fresh enough") when no unfiltered sync has ever completed,
+     * or {@link CpeDictionarySyncState#getLastSyncedAt()} is somehow still null despite {@code
+     * initialSyncCompleted} being true (the same defensive case {@link #resolveDeltaCursor} already
+     * guards) — both cases mean there is nothing to trust as "recent" yet, so callers must not skip
+     * their full sync.
+     */
+    public boolean isMirrorFresherThan(Duration maxAge) {
+        return cpeDictionarySyncStateRepository.findById(SYNC_STATE_ID)
+                .filter(CpeDictionarySyncState::isInitialSyncCompleted)
+                .map(CpeDictionarySyncState::getLastSyncedAt)
+                .filter(Objects::nonNull)
+                .map(lastSyncedAt -> lastSyncedAt.isAfter(OffsetDateTime.now(ZoneOffset.UTC).minus(maxAge)))
+                .orElse(false);
+    }
+
+    /**
      * Delta sync: asks NVD for only the CPEs modified since the last successful unfiltered sync
      * (full or delta), via {@code lastModStartDate}/{@code lastModEndDate} — closed-mode backlog
      * item 283. Callers must only invoke this after {@link #tryBeginFullSync} returned {@code

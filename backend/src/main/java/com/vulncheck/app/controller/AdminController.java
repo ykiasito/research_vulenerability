@@ -110,6 +110,13 @@ public class AdminController {
      * holds the single "already running" guard shared by both trigger paths, so a second click (or
      * a click racing the startup sync) while one is already running doesn't start a concurrent
      * mirror competing for the same NVD rate limit and the same {@code cpe_dictionary} upserts.
+     *
+     * <p><b>Do not add {@link NvdCpeSyncService#isMirrorFresherThan}'s freshness gate here</b>
+     * (closed-mode backlog item 330) — that gate exists only to skip the automatic,
+     * unattended-restart case ({@code CpeDictionaryBootstrapSync}); an admin clicking this button
+     * is always a deliberate, explicit request for a full sync and must run unconditionally
+     * (subject only to the shared {@code tryBeginFullSync} guard above), or there would be no way
+     * left to force a full re-sync on demand.
      */
     @PostMapping("/admin/cpe-dictionary/sync-all")
     public String cpeFullSync(Model model) {

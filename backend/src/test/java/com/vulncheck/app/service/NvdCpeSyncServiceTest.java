@@ -238,6 +238,57 @@ class NvdCpeSyncServiceTest {
         assertThat(service.hasCompletedInitialSync()).isTrue();
     }
 
+    // --- closed-mode backlog item 330 (C): freshness gate for CpeDictionaryBootstrapSync --------
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenNoStateRowExists() {
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.empty());
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenInitialSyncNeverCompleted() {
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(false);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenLastSyncedAtIsNullDespiteInitialSyncCompleted() {
+        // Defensive case: same one resolveDeltaCursor already guards against (both fields are set
+        // together in practice, so this should not happen, but must not throw or misreport fresh).
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(null);
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void isMirrorFresherThanIsTrueWhenLastSyncedAtIsWithinTheWindow() {
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC).minusDays(5));
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isTrue();
+    }
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenLastSyncedAtIsOlderThanTheWindow() {
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC).minusDays(45));
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
     @Test
     void syncAllAndReleaseRecordsInitialSyncCompletedOnCleanFinish() {
         syncServer.expect(method(HttpMethod.GET))
