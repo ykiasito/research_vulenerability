@@ -34,9 +34,10 @@ import org.springframework.transaction.annotation.Transactional;
  * restart round trip.
  *
  * <p><b>Scope: {@code golden300-cpe-and-control-subset.csv}, not the full {@code golden-300.csv}.</b>
- * This subset (generated 2026-09-05 from {@code golden-300.csv}) keeps only the 66 {@code
- * IDENTIFIED_CPE} rows and the 34 {@code UNIDENTIFIED} control rows, dropping the 200 {@code
- * IDENTIFIED_REGISTRY} rows. Measured live (2026-09-05): the full 300-row set takes multiple hours
+ * This subset (generated 2026-09-05 from {@code golden-300.csv}, and updated 2026-09-05 for item
+ * 320's Blender/Rufus ground-truth correction -- see that item's own commit for the correction
+ * rationale) keeps only the 68 {@code IDENTIFIED_CPE} rows and the 32 {@code UNIDENTIFIED} control
+ * rows, dropping the 200 {@code IDENTIFIED_REGISTRY} rows. Measured live (2026-09-05): the full 300-row set takes multiple hours
  * per run because {@code Stage1RegistryIdentification}'s registry fan-out makes real, deliberately
  * rate-limited network calls to external package registries (~1 req/sec per {@code
  * ExternalRegistryRateLimiter}) for every row that has a plausible same-named registry candidate —
@@ -71,11 +72,31 @@ import org.springframework.transaction.annotation.Transactional;
  * existing part=o fallback in {@code rankCpeCandidates} — this project's golden-300 recall metric
  * (here and in every sibling test in this package) only ever checks {@code
  * IdentifiedProduct.isPresent()}, not exact CPE-string equality, so this counts as a genuine recall
- * improvement by the same measure every other golden-300 test in this suite already uses. No other
- * row changed in either direction, and the control-bucket false-positive rate (the same 3 known
- * pre-existing false positives — Blender, Rufus, Ditto, unrelated to this fallback) is unchanged —
- * so a plain equality assertion on both counts is still the right regression check here (not just a
- * "no worse than" bound), matching item 302's own backlog description.
+ * improvement by the same measure every other golden-300 test in this suite already uses.
+ *
+ * <p><b>2026-09-05 REVISE (senior review, following item 320's golden-300.csv ground-truth
+ * correction):</b> the 64/66 -&gt; 65/66 recall and 3/34 control false-positive-rate numbers above
+ * were measured against this subset fixture's original Blender/Rufus rows, which were still labeled
+ * {@code UNIDENTIFIED} at the time (a stale label -- item 320 corrected the same two rows to {@code
+ * IDENTIFIED_CPE} in {@code golden-300.csv} itself, and this subset fixture has now been updated to
+ * match, moving Blender and Rufus from the 34-row control bucket into the 66-row target bucket,
+ * hence 68 target / 32 control here). That bucket move invalidates the specific 64/66, 65/66 and
+ * 3/34 figures above as reported (Blender and Rufus are no longer control rows, so the "same 3
+ * known pre-existing false positives — Blender, Rufus, Ditto" description is also no longer
+ * accurate) — but it does not require re-running this test to get correct 68/32-denominator
+ * figures. {@code stage1IdentificationService.identify} is a pure function of an item's own input
+ * columns, which item 320 left untouched (only {@code expected_outcome}/{@code expected_cpe_vendor}/
+ * {@code expected_cpe_product} — the ground-truth columns this test only reads to sort rows into
+ * buckets — changed), so Blender and Rufus resolve to exactly the same identified/not-identified
+ * outcome in the target bucket as they did in the control bucket. In the 3/34 measurement, Blender
+ * and Rufus were two of the three named false positives, i.e. both were {@code identified=true}
+ * rows — so moving them into the target bucket turns those same two {@code identified=true}
+ * outcomes into two target-bucket hits: {@code targetIdentified} = 65 + Blender + Rufus = 67 out of
+ * the new 68 total, and {@code controlFalsePositive} = 3 - Blender - Rufus = 1 out of the new 32
+ * total (the one remaining false positive is Ditto, unaffected by item 320). {@code
+ * targetIdentified} and {@code controlFalsePositive} below are therefore checked with pinned
+ * equality against these exactly-derived values (67 and 1), not the in-range placeholder
+ * assertions an earlier revision of this test used before this derivation was worked out.
  *
  * <p>Disabled by default, same convention as every other real-dev-DB test in this package — run
  * once by hand (temporarily remove {@code @Disabled},
@@ -95,8 +116,11 @@ import org.springframework.transaction.annotation.Transactional;
         + "origin/test's PR#217/#218 CPE-ranking changes) against the real dev DB -- identification "
         + "recall 65/66=98.48% (up from a confirmed 64/66 baseline with the fallback disabled -- Cisco "
         + "IOS XE newly identified via the existing part=o fallback, see class javadoc), control-row "
-        + "false-positive rate unchanged at 3/34=8.82%. Left disabled so it can never re-fire on a "
-        + "routine mvn test run.")
+        + "false-positive rate unchanged at 3/34=8.82%. NOTE (2026-09-05 REVISE, item 320 ground-truth "
+        + "fix): those specific figures predate item 320's Blender/Rufus correction; against this "
+        + "subset's corrected 68/32 bucket split the exactly-derived (not re-measured, see class "
+        + "javadoc) figures are recall 67/68=98.53%, control false-positive rate 1/32=3.13%. Left "
+        + "disabled so it can never re-fire on a routine mvn test run.")
 class VendorProductExactMatchFallbackGolden300Test {
 
     private static final Long REAL_USER_ID = 5L;
@@ -171,15 +195,23 @@ class VendorProductExactMatchFallbackGolden300Test {
         System.out.printf("control-row false-positive rate: %d/%d = %.4f%n", controlFalsePositive, controlTotal,
                 controlTotal == 0 ? 0.0 : (double) controlFalsePositive / controlTotal);
 
-        // Confirmed live (2026-09-05, see class javadoc): recall improved from a confirmed 64/66
-        // baseline (fallback disabled) to 65/66 with the fallback enabled -- Cisco IOS XE newly
-        // identified, no other row changed in either direction -- and the control false-positive
-        // rate is unchanged at 3/34. A plain equality assertion (not just "no worse") is correct here
-        // since both numbers are pinned to specific, individually verified outcomes.
-        assertThat(targetIdentified).isEqualTo(65);
-        assertThat(targetTotal).isEqualTo(66);
-        assertThat(controlFalsePositive).isEqualTo(3);
-        assertThat(controlTotal).isEqualTo(34);
+        // targetTotal/controlTotal are pinned to the subset CSV's actual bucket sizes (68 IDENTIFIED_CPE
+        // rows, 32 UNIDENTIFIED control rows, after item 320's 2026-09-05 Blender/Rufus ground-truth
+        // correction moved those 2 rows from the control bucket into the target bucket -- see class
+        // javadoc). targetIdentified/controlFalsePositive below are NOT a fresh re-measurement -- they
+        // are an exact derivation from the same 2026-09-05 measurement recorded in the class javadoc
+        // (recall 65/66, control false-positive rate 3/34, with the 3 false positives individually
+        // named as Blender, Rufus and Ditto). Both Blender and Rufus were identified=true rows in that
+        // measurement (that's precisely what made them control-bucket false positives), and moving a
+        // row between buckets does not change stage1IdentificationService's per-row identification
+        // outcome for it, only which bucket counts it against. So the new figures follow arithmetically
+        // from the old ones without re-running anything: targetIdentified = 65 + Blender + Rufus = 67,
+        // controlFalsePositive = 3 - Blender - Rufus = 1 (the remaining false positive is Ditto,
+        // unaffected by item 320).
+        assertThat(targetTotal).isEqualTo(68);
+        assertThat(controlTotal).isEqualTo(32);
+        assertThat(targetIdentified).isEqualTo(67);
+        assertThat(controlFalsePositive).isEqualTo(1);
     }
 
     private static String key(String productName, String version) {

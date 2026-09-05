@@ -48,16 +48,22 @@ import org.springframework.transaction.annotation.Transactional;
 @Disabled("Run once (2026-09-05, backlog item 299 case 5 -- isDerivedFromSiblingCandidate ranking "
         + "fix) against the real dev DB -- 'Microsoft Visual Studio' 17.10 now correctly resolves to "
         + "microsoft:visual_studio (was microsoft:visual_studio_code); overall CPE vendor:product "
-        + "exact-match rate went from 59/66 to 60/66, with the exact same 5 remaining mismatches as "
+        + "exact-match rate went from 59/66 to 60/66 (denominator updated 2026-09-05 for item 320's "
+        + "Blender/Rufus golden-300.csv ground-truth correction: both rows now carry an "
+        + "expected_cpe_vendor/expected_cpe_product, so this test's dynamically-counted "
+        + "cpeTargetTotal newly includes them, moving the denominator from 66 to 68 -- NEEDS "
+        + "RE-MEASUREMENT, the 59/60 numerators above predate that correction and are no longer "
+        + "reported against the 68 denominator), with the exact same 5 remaining mismatches as "
         + "baseline minus Visual Studio (Cisco IOS XE/Metasploit Framework/Notepad++/VirtualBox/Zoom, "
         + "none of them regressed or newly introduced by this fix -- confirmed via a stash/rerun "
-        + "before/after comparison). Two earlier, less pool-relative versions of this fix were each "
-        + "measured and reverted first (a target_sw-set-based version regressed Microsoft Office, "
-        + "HashiCorp Terraform and Pivotal RabbitMQ; a version that penalized any product word absent "
-        + "from the query text regressed the deliberately-ambiguous apache_http_server/apache_tomcat "
-        + "pair) -- see isDerivedFromSiblingCandidate's own javadoc for why the final, pool-relative "
-        + "token-prefix check avoids both. Left disabled so it can never re-fire on a routine mvn "
-        + "test run -- see class javadoc.")
+        + "before/after comparison, against the pre-correction 66-row denominator). Two earlier, less "
+        + "pool-relative versions of this fix were each measured and reverted first (a "
+        + "target_sw-set-based version regressed Microsoft Office, HashiCorp Terraform and Pivotal "
+        + "RabbitMQ; a version that penalized any product word absent from the query text regressed "
+        + "the deliberately-ambiguous apache_http_server/apache_tomcat pair) -- see "
+        + "isDerivedFromSiblingCandidate's own javadoc for why the final, pool-relative token-prefix "
+        + "check avoids both. Left disabled so it can never re-fire on a routine mvn test run -- see "
+        + "class javadoc.")
 class Backlog299CpeRankingGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
