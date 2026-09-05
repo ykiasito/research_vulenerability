@@ -17,6 +17,7 @@ import com.vulncheck.app.entity.CpeDictionaryEntry;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
+import com.vulncheck.app.repository.CpeDictionaryRepositoryCustom.VendorProductPair;
 import com.vulncheck.app.repository.EcosystemRegistryRepository;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
 import com.vulncheck.app.repository.ResearchJobItemRepository;
@@ -38,6 +39,7 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -2550,5 +2552,82 @@ class Stage1IdentificationServiceTest {
         String normalizedQuery = service(List.of()).normalizeForContainment("Notepad++");
 
         assertThat(normalizedEscaped).isEqualTo(normalizedQuery);
+    }
+
+    @Test
+    void localCpeLookupFallsBackToExactVendorProductMatchWhenTrigramPoolIsEmpty() {
+        // Item 302: the same shape as the real crowdstrike:falcon case this fallback exists for —
+        // findFuzzyMatches (the pg_trgm path) comes back with nothing at all, but the exact
+        // (vendor, product) pair fallback finds the row via the composite index instead.
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        CpeDictionaryEntry falcon = cpeEntry("cpe:2.3:a:crowdstrike:falcon:1.0.0:*:*:*:*:*:*:*", "falcon");
+        falcon.setVendor("crowdstrike");
+        when(cpeDictionaryRepository.findByVendorProductPairs(any(), anyInt())).thenReturn(List.of(falcon));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("CrowdStrike Falcon Sensor");
+        item.setVendor("CrowdStrike");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:crowdstrike:falcon:1.0.0:*:*:*:*:*:*:*");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<VendorProductPair>> pairsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(cpeDictionaryRepository).findByVendorProductPairs(pairsCaptor.capture(), anyInt());
+        // Vendor side limited to the item's own vendor text ("crowdstrike"), product side to the
+        // item's own tokenized product name ("crowdstrike", "falcon", "sensor") — never an unrelated
+        // vendor/product pulled from elsewhere.
+        assertThat(pairsCaptor.getValue()).containsExactlyInAnyOrder(
+                new VendorProductPair("crowdstrike", "crowdstrike"),
+                new VendorProductPair("crowdstrike", "falcon"),
+                new VendorProductPair("crowdstrike", "sensor"));
+    }
+
+    @Test
+    void localCpeLookupDoesNotFireExactMatchFallbackWhenTheTrigramContainmentPoolAlreadyHasCandidates() {
+        // The fallback must be a last resort, never a widening of an already-nonempty pool — see
+        // localCpeLookup's own javadoc.
+        CpeDictionaryEntry gson = cpeEntry("cpe:2.3:a:google:gson:1.0.0:*:*:*:*:*:*:*", "gson");
+        gson.setVendor("google");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(gson));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("gson");
+        item.setVendor("Google");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        verify(cpeDictionaryRepository, never()).findByVendorProductPairs(any(), anyInt());
+    }
+
+    @Test
+    void exactVendorProductFallbackCapsGeneratedPairsToAnEightByEightCrossProduct() {
+        // Item 302 / MAX_EXACT_MATCH_TOKENS_PER_SIDE: 10 vendor tokens x 10 product tokens would
+        // naively be 100 pairs; only the first 8 of each side may contribute, bounding the
+        // cross-product to 64 pairs and excluding the 9th/10th token on either side entirely.
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findByVendorProductPairs(any(), anyInt())).thenReturn(List.of());
+
+        String tenVendorWords = "v1 v2 v3 v4 v5 v6 v7 v8 v9 v10";
+        String tenProductWords = "p1 p2 p3 p4 p5 p6 p7 p8 p9 p10";
+        ResearchJobItem item = item(tenProductWords);
+        item.setVendor(tenVendorWords);
+
+        service(List.of()).identify(item, USER_ID);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<VendorProductPair>> pairsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(cpeDictionaryRepository).findByVendorProductPairs(pairsCaptor.capture(), anyInt());
+        List<VendorProductPair> pairs = pairsCaptor.getValue();
+
+        assertThat(pairs).hasSizeLessThanOrEqualTo(64);
+        assertThat(pairs).noneMatch(p -> "v9".equals(p.vendor()) || "v10".equals(p.vendor())
+                || "p9".equals(p.product()) || "p10".equals(p.product()));
     }
 }

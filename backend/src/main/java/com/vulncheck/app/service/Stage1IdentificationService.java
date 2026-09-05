@@ -4,6 +4,7 @@ import com.vulncheck.app.entity.CpeDictionaryEntry;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
+import com.vulncheck.app.repository.CpeDictionaryRepositoryCustom;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
 import com.vulncheck.app.service.llm.LlmServiceModels.DisambiguateResponse;
 import com.vulncheck.app.service.nvd.CpeNameVariantCache;
@@ -89,6 +90,20 @@ public class Stage1IdentificationService {
      * something, so the common case (literal search already succeeds) pays none of this.
      */
     private static final int MAX_NAME_VARIANT_QUERIES_PER_ITEM = 3;
+    /**
+     * Item 302: how many of the item's own leading tokenized words (vendor side and product-name
+     * side, each capped independently) feed the exact {@code (vendor, product)} pair fallback in
+     * {@link #localCpeLookup} ({@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryCustom#findByVendorProductPairs}). A naive
+     * full cross-product has no natural bound of its own: {@code product} is {@code VARCHAR(255)},
+     * so a pathological single-character-token-separated string could tokenize into ~128 words on
+     * either side, which would be up to ~16,000 pairs (128 x 125) — one bind parameter pair each — in
+     * the worst case. Capping each side to this many tokens before combining bounds the cross-product
+     * at {@value #MAX_EXACT_MATCH_TOKENS_PER_SIDE}^2 = 64 pairs, comfortably covering every real
+     * product name (which rarely exceeds a handful of words) while keeping the query's bind-parameter
+     * count small regardless of adversarial/malformed CSV input.
+     */
+    private static final int MAX_EXACT_MATCH_TOKENS_PER_SIDE = 8;
     /**
      * Hard cap on the initialism-expansion anchor search ({@link #expandLeadingInitialism}), a
      * left-anchored regex search against the {@code product} column (see {@link
@@ -819,9 +834,61 @@ public class Stage1IdentificationService {
         List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
                 productName, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
         ContainmentResult containment = plausibleContainmentOnly(vendor, productName, pool);
+        if (containment.candidates().isEmpty()) {
+            // Item 302: pg_trgm similarity structurally disadvantages a short dictionary product
+            // slug against a longer query string (measured live, "CrowdStrike Falcon Sensor" against
+            // crowdstrike:falcon: product similarity 0.269 < the 0.3 threshold, title similarity 0.51
+            // < the 0.6 threshold — see findByVendorProductPairs's own javadoc), which keeps such
+            // candidates out of the trigram-ranked pool above entirely, before plausibleContainmentOnly
+            // ever runs. Only tried when the trigram pool's containment check came back completely
+            // empty (never widens an already-nonempty result), and the exact-match pool is fed through
+            // the exact same plausibleContainmentOnly -> rankCpeCandidates -> rankAndGate pipeline as
+            // every other candidate source — no bypass of the existing safety gates, just a second
+            // candidate-pool entry point.
+            List<CpeDictionaryEntry> exactPool = exactVendorProductMatches(vendor, productName);
+            if (!exactPool.isEmpty()) {
+                containment = plausibleContainmentOnly(vendor, productName, exactPool);
+            }
+        }
         List<CpeDictionaryEntry> ranked = rankCpeCandidates(
                 vendor, productName, containment.candidates(), Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
         return new LocalCpeMatches(ranked, containment.usedRelaxedPass());
+    }
+
+    /**
+     * Item 302 fallback: generates {@code (vendor, product)} pairs from the plain cross-product of
+     * the item's own tokenized vendor text and tokenized product-name text, then looks them up via
+     * the {@code (vendor, product)} composite index ({@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryCustom#findByVendorProductPairs}'s own
+     * javadoc has the full exact-vs-similarity rationale).
+     *
+     * <p>Vendor side is deliberately limited to tokens drawn from this item's own text (vendor field
+     * only) — not, say, every vendor the dictionary happens to know about — because pairing an
+     * unrelated vendor with a real product token would let this fallback manufacture candidates with
+     * no connection to the item at all (e.g. an unrelated vendor whose own product catalog happens to
+     * contain one of this item's product-name words). Both sides are capped to {@value
+     * #MAX_EXACT_MATCH_TOKENS_PER_SIDE} tokens (see that constant's javadoc for the worst-case
+     * combinatorics this guards against) before combining, bounding the cross-product to at most
+     * {@value #MAX_EXACT_MATCH_TOKENS_PER_SIDE}^2 = 64 pairs.
+     */
+    private List<CpeDictionaryEntry> exactVendorProductMatches(String vendor, String productName) {
+        List<String> vendorTokens = tokenize(normalizeForContainment(vendor));
+        List<String> productTokens = tokenize(normalizeForContainment(productName));
+        if (vendorTokens.isEmpty() || productTokens.isEmpty()) {
+            return List.of();
+        }
+        List<String> cappedVendorTokens =
+                vendorTokens.subList(0, Math.min(vendorTokens.size(), MAX_EXACT_MATCH_TOKENS_PER_SIDE));
+        List<String> cappedProductTokens =
+                productTokens.subList(0, Math.min(productTokens.size(), MAX_EXACT_MATCH_TOKENS_PER_SIDE));
+
+        java.util.LinkedHashSet<CpeDictionaryRepositoryCustom.VendorProductPair> pairs = new java.util.LinkedHashSet<>();
+        for (String vendorToken : cappedVendorTokens) {
+            for (String productToken : cappedProductTokens) {
+                pairs.add(new CpeDictionaryRepositoryCustom.VendorProductPair(vendorToken, productToken));
+            }
+        }
+        return cpeDictionaryRepository.findByVendorProductPairs(List.copyOf(pairs), CPE_CANDIDATE_POOL);
     }
 
     /** Backlog item 89 P2: pairs {@link #localCpeLookup}'s ranked candidate list with whether {@link
