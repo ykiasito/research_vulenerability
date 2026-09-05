@@ -525,4 +525,198 @@ class CpeDictionaryRepositoryImplTest {
 
         assertThat(results).noneMatch(e -> "zzzrevise302capproduct64".equals(e.getProduct()));
     }
+
+    /** Bulk-inserts {@code toMajorInclusive - fromMajorInclusive + 1} synthetic rows sharing one
+     *  (vendor, product) pair (both set to {@code vendorProduct}), each with a distinct simple
+     *  numeric major version {@code fromMajorInclusive..toMajorInclusive} (segment 6) — used by the
+     *  item 346 outlier-guard tests below to build partitions large enough (up to a few hundred rows)
+     *  for {@code percentile_disc(0.99)} to behave meaningfully, without hand-writing one {@link
+     *  #insert} call per row. {@code vendorProduct} is always one of this test class's own hardcoded
+     *  {@code zzzitem346case*} literals below, never external input, so building the SQL text via
+     *  direct interpolation is safe here (this is test-only code, not a caller-facing repository
+     *  method). */
+    private void insertMajorSequence(String vendorProduct, int fromMajorInclusive, int toMajorInclusive) {
+        jdbcTemplate.update(String.format(
+                "INSERT INTO cpe_dictionary (cpe_string, title, vendor, product, last_synced_at) "
+                        + "SELECT 'cpe:2.3:a:%1$s:%1$s:' || g || '.0:*:*:*:*:*:*:*', '%1$s', '%1$s', '%1$s', now() "
+                        + "FROM generate_series(%2$d, %3$d) g",
+                vendorProduct, fromMajorInclusive, toMajorInclusive));
+    }
+
+    /**
+     * Backlog item 346, case (a): a single broken NVD version string (real example: {@code
+     * oracle:vm_virtualbox}'s "71.6" among 270 rows, i.e. a typo, not a genuine major-71 release)
+     * must not permanently inflate the whole (vendor, product) pair's {@code max_cataloged_major} —
+     * rule B replaces it with the 99th percentile instead. 100 rows at majors 1..100 (p99 lands on
+     * 100, the second-highest observed value for this partition size — see this test class's own
+     * measurement against the real dictionary before picking 100) plus one outlier row at major 710
+     * (arbitrarily far beyond everything else, standing in for "71.6"-style NVD data): max(710) is
+     * more than 4x p99(100), rows/distinct/p99 all clear their own thresholds, so rule B fires and
+     * the outlier is replaced by 100, not 710.
+     */
+    @Test
+    void maxCatalogedMajorFallsBackToP99ForASingleTypoStyleOutlier() {
+        insertMajorSequence("zzzitem346casea", 1, 100);
+        // Title matches the (vendor, product) pair, same as insertMajorSequence's own rows, so the
+        // product-column and title-column collect() calls inside findFuzzyMatches agree on which
+        // single row DISTINCT ON keeps as the pair's representative -- otherwise the two calls could
+        // pick two different physical rows for the same pair and this would come back as 2 results
+        // instead of 1 (max_cataloged_major is a whole-partition aggregate either way, but the
+        // returned CpeDictionaryEntry identity is per-row).
+        insert("cpe:2.3:a:zzzitem346casea:zzzitem346casea:710.6:*:*:*:*:*:*:*", "zzzitem346casea",
+                "zzzitem346casea", "zzzitem346casea");
+
+        List<CpeDictionaryEntry> results =
+                cpeDictionaryRepository.findFuzzyMatches("zzzitem346casea", 0.3, 0.3, 10);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getMaxCatalogedMajor()).isEqualTo(100);
+    }
+
+    /**
+     * Backlog item 346, case (b): a date-formatted version segment (the item 289 {@code
+     * google:android} shape, e.g. "2024-01-01" parsing to major 2024) that is a small minority of the
+     * partition (here, 1 of 21 rows, well under rule A's 10% threshold) must be excluded from
+     * {@code max_cataloged_major} entirely, not just outrank the real majors. 20 rows at majors
+     * 1..20 plus one date-formatted row land the date row's major (2024) as the raw {@code max()},
+     * but rule A drops every {@code major >= 1000} row here, leaving {@code max_cataloged_major} at
+     * 20, the true highest real major.
+     */
+    @Test
+    void maxCatalogedMajorExcludesAMinorityDateFormattedOutlier() {
+        insertMajorSequence("zzzitem346caseb", 1, 20);
+        // Title matches the pair for the same DISTINCT-ON-agreement reason as case (a) above.
+        insert("cpe:2.3:a:zzzitem346caseb:zzzitem346caseb:2024-01-01:*:*:*:*:*:*:*", "zzzitem346caseb",
+                "zzzitem346caseb", "zzzitem346caseb");
+
+        List<CpeDictionaryEntry> results =
+                cpeDictionaryRepository.findFuzzyMatches("zzzitem346caseb", 0.3, 0.3, 10);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getMaxCatalogedMajor()).isEqualTo(20);
+    }
+
+    /**
+     * Backlog item 346, case (c): retention/regression guard — when date-formatted (or otherwise
+     * {@code >= 1000}) majors are the *majority* of a partition, not a small minority, rule A must
+     * NOT exclude them (a genuine year-based versioning product must not be silently gutted). 18 rows
+     * with date-formatted versions ("2001-01-01".."2018-01-01", so majors 2001..2018) against only 3
+     * plain-numeric rows (majors 1..3): {@code rows_wide} (18) is 85.7% of {@code rows_all} (21), far
+     * above rule A's 10% minority threshold, so rule A leaves the whole partition credible and rule B
+     * doesn't fire either (max 2018 is nowhere near 4x its own p99 2018) — {@code max_cataloged_major}
+     * stays at the raw {@code max()}, 2018.
+     */
+    @Test
+    void maxCatalogedMajorKeepsAMajorityDateFormattedValue() {
+        // Title matches the pair for the same DISTINCT-ON-agreement reason as case (a) above.
+        for (int year = 1; year <= 18; year++) {
+            insert("cpe:2.3:a:zzzitem346casec:zzzitem346casec:" + (2000 + year) + "-01-01:*:*:*:*:*:*:*",
+                    "zzzitem346casec", "zzzitem346casec", "zzzitem346casec");
+        }
+        insertMajorSequence("zzzitem346casec", 1, 3);
+
+        List<CpeDictionaryEntry> results =
+                cpeDictionaryRepository.findFuzzyMatches("zzzitem346casec", 0.3, 0.3, 10);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getMaxCatalogedMajor()).isEqualTo(2018);
+    }
+
+    /**
+     * Backlog item 346, case (d): retention/regression guard — a genuine latest major version that
+     * happens to have only a single cataloged row (the item 89 {@code pdf-xchange:pdf-xchange_editor}
+     * shape this rule set must not break) must not be treated as an outlier merely for being alone,
+     * as long as it stays within rule B's own 4x-of-p99 tolerance. 99 rows at majors 1..99 (p99 lands
+     * on 99) plus a single row at major 150: 150 is only ~1.5x p99, well inside the 4x tolerance, so
+     * rule B does not fire and {@code max_cataloged_major} stays at the raw {@code max()}, 150.
+     */
+    @Test
+    void maxCatalogedMajorKeepsASingleRowLatestMajorWithinFourTimesP99() {
+        insertMajorSequence("zzzitem346cased", 1, 99);
+        // Title matches the pair for the same DISTINCT-ON-agreement reason as case (a) above.
+        insert("cpe:2.3:a:zzzitem346cased:zzzitem346cased:150.0:*:*:*:*:*:*:*", "zzzitem346cased",
+                "zzzitem346cased", "zzzitem346cased");
+
+        List<CpeDictionaryEntry> results =
+                cpeDictionaryRepository.findFuzzyMatches("zzzitem346cased", 0.3, 0.3, 10);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getMaxCatalogedMajor()).isEqualTo(150);
+    }
+
+    /**
+     * Backlog item 346, case (e): retention/regression guard — rule B never fires on a partition with
+     * fewer than 20 rows, regardless of how extreme the ratio between its max and its p99 would look;
+     * small (vendor, product) pairs are common and this rule set must not touch them at all. 9 rows
+     * at majors 1..9 plus one outlier row at major 100 (a ratio that would trip rule B at a larger
+     * partition size) stays under the 20-row floor, so {@code max_cataloged_major} is left as the raw
+     * {@code max()}, 100, completely unaffected by either rule.
+     */
+    @Test
+    void maxCatalogedMajorKeepsRawMaxForAPartitionUnderTwentyRows() {
+        insertMajorSequence("zzzitem346casee", 1, 9);
+        // Title matches the pair for the same DISTINCT-ON-agreement reason as case (a) above.
+        insert("cpe:2.3:a:zzzitem346casee:zzzitem346casee:100.0:*:*:*:*:*:*:*", "zzzitem346casee",
+                "zzzitem346casee", "zzzitem346casee");
+
+        List<CpeDictionaryEntry> results =
+                cpeDictionaryRepository.findFuzzyMatches("zzzitem346casee", 0.3, 0.3, 10);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getMaxCatalogedMajor()).isEqualTo(100);
+    }
+
+    /**
+     * Backlog item 346, case (f): retention/regression guard — rule B never fires when the credible
+     * set's own 99th percentile is below 4, regardless of how large the max-to-p99 ratio looks; a
+     * partition dominated by very low majors (a "low ladder") is exactly the shape a percentile-based
+     * rule is least meaningful for. 300 rows at major 1, one row each at majors 2 and 3, and one
+     * outlier row at major 500: with 303 of 303 non-outlier-adjacent rows at or below 3, p99 lands at
+     * 1 (well under the 4 floor) even though 500 is 500x that p99 — rule B's own {@code p99 >= 4}
+     * guard blocks it, so {@code max_cataloged_major} is left as the raw {@code max()}, 500.
+     */
+    @Test
+    void maxCatalogedMajorKeepsRawMaxWhenP99IsBelowFour() {
+        insertMajorSequence("zzzitem346casef", 1, 1);
+        // Title matches the pair for the same DISTINCT-ON-agreement reason as case (a) above.
+        for (int i = 1; i < 300; i++) {
+            insert("cpe:2.3:a:zzzitem346casef:zzzitem346casef:1." + i + ":*:*:*:*:*:*:*", "zzzitem346casef",
+                    "zzzitem346casef", "zzzitem346casef");
+        }
+        insert("cpe:2.3:a:zzzitem346casef:zzzitem346casef:2.0:*:*:*:*:*:*:*", "zzzitem346casef",
+                "zzzitem346casef", "zzzitem346casef");
+        insert("cpe:2.3:a:zzzitem346casef:zzzitem346casef:3.0:*:*:*:*:*:*:*", "zzzitem346casef",
+                "zzzitem346casef", "zzzitem346casef");
+        insert("cpe:2.3:a:zzzitem346casef:zzzitem346casef:500.0:*:*:*:*:*:*:*", "zzzitem346casef",
+                "zzzitem346casef", "zzzitem346casef");
+
+        List<CpeDictionaryEntry> results =
+                cpeDictionaryRepository.findFuzzyMatches("zzzitem346casef", 0.3, 0.3, 10);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getMaxCatalogedMajor()).isEqualTo(500);
+    }
+
+    /**
+     * Backlog item 346, case (g): when every row in the partition has an unparseable (non-numeric
+     * leading digit run) version segment, {@code max_cataloged_major} must still collapse to SQL
+     * NULL, exactly like the pre-item-346 plain {@code max()} did — {@code
+     * Stage1IdentificationService#versionCoverageIsPlausible}/{@code versionCoverageRank} both treat
+     * NULL as "no evidence" (always plausible / UNKNOWN), so this must never come back as 0 or any
+     * other sentinel.
+     */
+    @Test
+    void maxCatalogedMajorIsNullWhenNoRowHasAParseableMajor() {
+        // Title matches the pair for the same DISTINCT-ON-agreement reason as case (a) above.
+        insert("cpe:2.3:a:zzzitem346caseg:zzzitem346caseg:-:*:*:*:*:*:*:*", "zzzitem346caseg",
+                "zzzitem346caseg", "zzzitem346caseg");
+        insert("cpe:2.3:a:zzzitem346caseg:zzzitem346caseg:na:*:*:*:*:*:*:*", "zzzitem346caseg",
+                "zzzitem346caseg", "zzzitem346caseg");
+
+        List<CpeDictionaryEntry> results =
+                cpeDictionaryRepository.findFuzzyMatches("zzzitem346caseg", 0.3, 0.3, 10);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getMaxCatalogedMajor()).isNull();
+    }
 }
