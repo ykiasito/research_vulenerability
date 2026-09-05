@@ -1448,11 +1448,13 @@ public class Stage1IdentificationService {
      * beyond anything ever catalogued for that (vendor, product) pair.
      *
      * <p>Backlog item 346: {@code maxCatalogedMajor} itself is already outlier-guarded by the
-     * repository before it ever reaches here — see {@link
-     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#collect}'s own comment for the two
-     * rules that keep a single broken NVD version string (or a minority date-formatted one) from
-     * inflating it. This method has no additional outlier handling of its own to do; it trusts
-     * {@code maxCatalogedMajor} as already being the credible highest cataloged major.
+     * repository before it ever reaches here, regardless of which repository method found the
+     * candidate — see {@link com.vulncheck.app.repository.CpeDictionaryRepositoryImpl
+     * #outlierGuardedAggregateSql}'s own javadoc for the two rules that keep a single broken NVD
+     * version string (or a minority date-formatted one) from inflating it, applied identically by
+     * both {@code collect} (the fuzzy-match path) and {@code findByVendorProductPairs} (the item 302
+     * exact-match fallback). This method has no additional outlier handling of its own to do; it
+     * trusts {@code maxCatalogedMajor} as already being the credible highest cataloged major.
      */
     private boolean versionCoverageIsPlausible(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
@@ -1605,8 +1607,10 @@ public class Stage1IdentificationService {
      * versionCoverageIsPlausible} itself treats them.
      *
      * <p>Backlog item 346: {@code maxCatalogedMajor} is already outlier-guarded by the repository
-     * before it ever reaches here — see {@link #versionCoverageIsPlausible}'s own javadoc and {@link
-     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#collect}'s comment for the details.
+     * before it ever reaches here, regardless of which repository method found the candidate — see
+     * {@link #versionCoverageIsPlausible}'s own javadoc and {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#outlierGuardedAggregateSql}'s javadoc
+     * for the details.
      */
     private int versionCoverageRank(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
