@@ -102,8 +102,18 @@ import org.springframework.transaction.annotation.Transactional;
         + "Server' (real product is Coder's unrelated code-server) incorrectly resolves to "
         + "microsoft:visual_studio_code:4.9.3 (a version that doesn't even exist for that CPE) "
         + "instead of coder:code-server -- filed as backlog item 319, not fixed here (out of this "
-        + "task's scope). Left disabled so it can never re-fire on a routine mvn test run -- see "
-        + "class javadoc.")
+        + "task's scope). Item 319 fixed 2026-09-05 (Stage1IdentificationService#itemVendorContradicts, "
+        + "senior-reviewer-designed): the nonexistent-CPE misresolution above is now closed -- 'Visual "
+        + "Studio Code Server' resolves to UNIDENTIFIED instead, not coder:code-server (see the "
+        + "fixture row's own ground_truth_source note for why that row is a permanent, known "
+        + "static-pipeline miss rather than a fixable one -- Coder's own vendor cannot explain the "
+        + "leading 'Visual'/'Studio' tokens, so this candidate is rejected before it ever reaches "
+        + "itemVendorContradicts). Re-running this measurement after item 319 would therefore show the "
+        + "control-row score unchanged at 5/6 (still one miss, just no longer a wrong-CPE miss) -- not "
+        + "re-measured here since this fixture's own baseline purpose (recording the pre-item-303 "
+        + "control state) doesn't need updating for an unrelated fix; see Stage1IdentificationServiceTest's "
+        + "own item 319 unit tests for the actual regression coverage. Left disabled so it can never "
+        + "re-fire on a routine mvn test run -- see class javadoc.")
 class MarketplaceExtensionFixtureRecallTest {
 
     private static final Long REAL_USER_ID = 5L;

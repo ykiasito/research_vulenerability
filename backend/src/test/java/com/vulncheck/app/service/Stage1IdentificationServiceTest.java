@@ -2888,6 +2888,66 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void itemVendorContradictingCpeVendorRejectsAMultiTokenCandidateWithUnexplainedTrailingTokens() {
+        // Backlog item 319 (senior review 2026-09-05): "Visual Studio Code Server" (item vendor
+        // "Coder" -- a real Coder code-server install, not a Microsoft product, per
+        // marketplace-extension-fixture.csv's own row 30) previously resolved to the nonexistent
+        // microsoft:visual_studio_code:4.9.3 -- Direction 2's REVISE item 5 trailing-vendor-
+        // explanation check only ever fired for a single-token candidate, and the 3-token candidate
+        // product "visual_studio_code" matched at the very head of the query with nothing preceding
+        // it, so the leftover trailing query token "server" was never checked against anything.
+        // itemVendorContradicts widens that same trailing check to also fire whenever the item's own
+        // vendor ("Coder") actively contradicts the candidate's CPE vendor (microsoft) -- unlike the
+        // existing single-token gate, this fires regardless of candidate token count. Only one
+        // candidate is stubbed here, so the strict containment pass (requireTrailingVendorExplanation
+        // =true) rejecting it also forces plausibleContainmentOnly's own relaxed second pass to run
+        // against the exact same pool, proving the new signal stays unconditional there too (not
+        // gated behind that flag, which would otherwise let the relaxed pass silently re-admit it —
+        // see explainsQuery's own javadoc for why). This intentionally does not (and cannot, by
+        // static logic alone) resolve to the real coder:code-server -- see
+        // MarketplaceExtensionFixtureRecallTest's own class javadoc and the fixture row's
+        // ground_truth_source note for why the fixture's own expected label stays coder:code-server
+        // (a permanent, known static-pipeline miss) while this test only asserts the previous
+        // misresolution is now gone (UNIDENTIFIED, not a nonexistent CPE).
+        CpeDictionaryEntry visualStudioCode =
+                cpeEntry("cpe:2.3:a:microsoft:visual_studio_code:1.99.3:*:*:*:*:-:*:*", "visual_studio_code");
+        visualStudioCode.setTitle("Microsoft Visual Studio Code 1.99.3");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(visualStudioCode));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Visual Studio Code Server");
+        item.setVendor("Coder");
+
+        assertThat(service(List.of()).identify(item, USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void explicitJetbrainsItemVendorDoesNotContradictTheJetbrainsCpeVendorAndStillMatches() {
+        // Backlog item 319: proves itemVendorContradicts only ever fires on a genuine vendor
+        // mismatch, never merely because the item happens to have a non-blank vendor at all -- an
+        // explicit item vendor "JetBrains" against jetbrains:intellij_idea's own CPE vendor must
+        // still match via containsEitherWay (case-insensitive, same as
+        // onlyLeadingLeftoverWordsAreHeldAgainstACandidateNotTrailingOnes already proves for a blank
+        // item vendor on this exact same candidate/query pair).
+        CpeDictionaryEntry intellij =
+                cpeEntry("cpe:2.3:a:jetbrains:intellij_idea:2023.1:*:*:*:*:*:*:*", "intellij_idea");
+        intellij.setTitle("JetBrains IntelliJ IDEA 2023.1");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(intellij));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("IntelliJ IDEA Community Edition");
+        item.setVendor("JetBrains");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:jetbrains:intellij_idea:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
     void rejectsASingleTokenQueryMatchingOnlyALeadingPortionOfAMultiTokenCandidateWhenItemVendorDoesNotExplainTheLeftover() {
         // Backlog item 89 P3 (senior review 2026-08-30): "Slack" (item vendor "Slack Technologies")
         // against slack_archivebot_project:slack_archivebot — Direction 1 previously accepted this
