@@ -2746,6 +2746,132 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void exactSlugMatchIsSuppressedForAStaleSameVendorDuplicateThatVersionCoverageContradicts() {
+        // Backlog item 308 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3):
+        // real data confirmed oracle:virtualbox (8 rows, max cataloged major 3, exact-slug match for
+        // query "VirtualBox") outranking the real current entry oracle:vm_virtualbox (270 rows, max
+        // cataloged major 7, NOT an exact-slug match) purely because exactSlugMatch sits ahead of
+        // everything else in rankCpeCandidates's own key chain — even though the current entry's own
+        // version coverage is the only one of the two that actually covers VirtualBox 7.0.14
+        // (7 > 3*VERSION_COVERAGE_IMPLAUSIBILITY_RATIO(2)=6, so the old entry's own versionCoverageRank
+        // is NOT_COVERS). Reproduced here with the real dictionary's own leading-qualifier product
+        // shape ({@code vm_virtualbox}, not a reshaped {@code virtualbox_vm}) and the item's own real
+        // vendor field ("Oracle") — item 345's own pool-relative rescue in plausibleContainmentOnly
+        // is what admits oracle:vm_virtualbox into this ranked pool at all now (a single-token query
+        // "virtualbox" can never align against a leading "vm" token via explainsQuery's own Direction
+        // 1/2, so the strict admission gate rejects it outright; only having oracle:virtualbox already
+        // admitted, as an exact-slug same-CPE-vendor anchor whose own slug is contained in
+        // "vm_virtualbox", rescues it) — so this test now exercises both item 308's ranking fix and
+        // item 345's admission-gate rescue together, exactly as the real VirtualBox data does.
+        CpeDictionaryEntry oracleVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:virtualbox:6.1.38:*:*:*:*:*:*:*", "virtualbox");
+        oracleVirtualbox.setMaxCatalogedMajor(3);
+        CpeDictionaryEntry oracleVmVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:vm_virtualbox:7.0.6:*:*:*:*:*:*:*", "vm_virtualbox");
+        oracleVmVirtualbox.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVirtualbox, oracleVmVirtualbox));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle");
+        item.setVersion("7.0.14");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:oracle:vm_virtualbox:7.0.14:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void poolRelativeRescueNeverFiresWithoutAnExactSlugAnchorInThePool() {
+        // Backlog item 345 negative fixture (a): the same oracle:vm_virtualbox candidate as the test
+        // above, but with no oracle:virtualbox anchor anywhere in the pool this time — the rescue must
+        // never fire on a bare superset-slug/same-vendor guess alone, only when an actual exact-slug
+        // match already earned admission through the strict pass. Without an anchor, oracle:vm_virtualbox
+        // is rejected outright by the strict admission gate (same reasoning as the test above) and the
+        // pool has nothing left to fall back on, so this item correctly stays UNIDENTIFIED.
+        CpeDictionaryEntry oracleVmVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:vm_virtualbox:7.0.6:*:*:*:*:*:*:*", "vm_virtualbox");
+        oracleVmVirtualbox.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVmVirtualbox));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle");
+        item.setVersion("7.0.14");
+
+        assertThat(service(List.of()).identify(item, USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void poolRelativeRescueNeverFiresAcrossADifferentCpeVendor() {
+        // Backlog item 345 negative fixture (b): a superset-slug candidate under a DIFFERENT CPE
+        // vendor ("otherco", not "oracle") must not be rescued just because an exact-slug anchor
+        // happens to exist elsewhere in the same pool — the rescue is same-vendor-scoped, exactly
+        // like item 308's own isOutrankedByCurrentCatalogedSameVendorDuplicate it mirrors. Asserting
+        // cpeCandidateCount (rather than just the final chosen CPE, which the anchor alone would also
+        // win on exact-slug-match priority even if the cross-vendor candidate leaked into the pool)
+        // is what actually proves the cross-vendor candidate was excluded from admission at all.
+        CpeDictionaryEntry oracleVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:virtualbox:6.1.38:*:*:*:*:*:*:*", "virtualbox");
+        oracleVirtualbox.setMaxCatalogedMajor(3);
+        CpeDictionaryEntry otherVendorVmVirtualbox =
+                cpeEntry("cpe:2.3:a:otherco:vm_virtualbox:7.0.6:*:*:*:*:*:*:*", "vm_virtualbox");
+        otherVendorVmVirtualbox.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVirtualbox, otherVendorVmVirtualbox));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle");
+        item.setVersion("7.0.14");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:oracle:virtualbox:7.0.14:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void poolRelativeRescueDoesNotLetASupersetCandidateOutrankAnAnchorWhenCoverageIsntContradicted() {
+        // Backlog item 345 REVISE (senior review 2026-09-05): the same VirtualBox fixture as
+        // exactSlugMatchIsSuppressedForAStaleSameVendorDuplicateThatVersionCoverageContradicts above,
+        // but oracle:virtualbox's own max cataloged major raised from 3 to 7, so item version 7.0.14's
+        // major (7) no longer exceeds 7*VERSION_COVERAGE_IMPLAUSIBILITY_RATIO(2)=14 either way — both
+        // candidates now get versionCoverageRank COVERS, so item 308's own suppression condition 1
+        // (the anchor's version coverage must be contradicted) never fires. This is the safety net for
+        // item 345's own new admission-time rescue: rescuing oracle:vm_virtualbox into the ranked pool
+        // must not, by itself, let it outrank the exact-slug-match anchor in the normal case where
+        // nothing actually contradicts the anchor's own version coverage — exact-slug-match still sits
+        // ahead of everything else in rankCpeCandidates's own key chain. Asserting cpeCandidateCount
+        // alongside the chosen CPE proves the rescue itself still happened (both candidates reached the
+        // ranked pool) even though the ranking outcome didn't change.
+        CpeDictionaryEntry oracleVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:virtualbox:6.1.38:*:*:*:*:*:*:*", "virtualbox");
+        oracleVirtualbox.setMaxCatalogedMajor(7);
+        CpeDictionaryEntry oracleVmVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:vm_virtualbox:7.0.6:*:*:*:*:*:*:*", "vm_virtualbox");
+        oracleVmVirtualbox.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVirtualbox, oracleVmVirtualbox));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle");
+        item.setVersion("7.0.14");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:oracle:virtualbox:7.0.14:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+    }
+
+    @Test
     void prefersAParentProductCandidateOverASiblingDerivedProductWithAnInflatedRowCount() {
         // Backlog item 299 case 5 (closed-mode golden-300 regression, 2026-09-05): "Microsoft Visual
         // Studio" 17.10 ties microsoft:visual_studio (correct) and microsoft:visual_studio_code

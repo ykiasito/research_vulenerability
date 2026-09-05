@@ -1,5 +1,7 @@
 package com.vulncheck.app.service;
 
+import com.vulncheck.app.entity.NvdCveSyncState;
+import com.vulncheck.app.repository.NvdCveSyncStateRepository;
 import com.vulncheck.app.service.NvdCveSyncService.RunBudget;
 import com.vulncheck.app.service.NvdCveSyncService.SyncOutcome;
 import java.time.Duration;
@@ -41,6 +43,7 @@ import org.springframework.stereotype.Component;
 public class NvdCveBackfillScheduledRunner {
 
     private final NvdCveSyncService nvdCveSyncService;
+    private final NvdCveSyncStateRepository nvdCveSyncStateRepository;
     private final UserApiKeyService userApiKeyService;
 
     @Value("${app.nvd-cve-backfill.enabled:false}")
@@ -66,6 +69,9 @@ public class NvdCveBackfillScheduledRunner {
         if (!enabled) {
             return;
         }
+        if (isBaselineCompleted()) {
+            return;
+        }
         if (!nvdCveSyncService.tryBeginRun()) {
             log.warn("Scheduled NVD CVE backfill tick skipped: another NVD CVE mirror run is already in progress");
             return;
@@ -78,6 +84,19 @@ public class NvdCveBackfillScheduledRunner {
             nvdCveSyncService.releaseRunGuard();
             log.error("Scheduled NVD CVE backfill tick failed to start -- run guard released", t);
         }
+    }
+
+    /** {@code true} only once {@code nvd_cve_sync_state.baseline_completed} is set — checked here,
+     *  before ever touching {@link NvdCveSyncService#tryBeginRun}, so a post-completion tick really
+     *  does return immediately as the class javadoc promises, instead of still winning the shared
+     *  run guard and resolving the admin's NVD key just to reach {@link
+     *  NvdCveSyncService#runBackfillTickAndRelease}'s own one-row {@code SELECT} no-op. Same
+     *  approach as {@code NvdCveDeltaScheduledRunner#isBaselineCompleted}; a missing state row
+     *  (should not happen once the V39 migration has run) is treated the same as "not completed". */
+    private boolean isBaselineCompleted() {
+        return nvdCveSyncStateRepository.findById((short) 1)
+                .map(NvdCveSyncState::isBaselineCompleted)
+                .orElse(false);
     }
 
     /** Spawns and starts the worker thread that runs {@link #runTick}. Package-private so a unit

@@ -12,6 +12,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.vulncheck.app.entity.NvdCveSyncState;
+import com.vulncheck.app.repository.NvdCveSyncStateRepository;
 import com.vulncheck.app.service.NvdCveSyncService.RunBudget;
 import com.vulncheck.app.service.NvdCveSyncService.SyncOutcome;
 import java.util.Optional;
@@ -22,18 +24,27 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * Unit coverage for {@link NvdCveBackfillScheduledRunner} — the {@code enabled} gate, the
- * concurrency guard hand-off with {@link NvdCveSyncService#tryBeginRun}, and the
- * baseline-completed-vs-still-in-progress outcome handling. {@link NvdCveSyncService} itself is
- * mocked: its own chunking/budget/split behavior is covered by {@code NvdCveSyncServiceTest}, so
- * this class only needs to verify the scheduler calls it correctly and reacts correctly to what it
- * returns. Same structure as {@code CpeDictionaryScheduledResyncTest}.
+ * baseline-completed pre-check (and that it short-circuits before ever touching {@link
+ * NvdCveSyncService#tryBeginRun}, closed-mode backlog item 331), the concurrency guard hand-off
+ * with {@link NvdCveSyncService#tryBeginRun}, and the still-in-progress outcome handling. {@link
+ * NvdCveSyncService} itself is mocked: its own chunking/budget/split behavior is covered by
+ * {@code NvdCveSyncServiceTest}, so this class only needs to verify the scheduler calls it
+ * correctly and reacts correctly to what it returns. Same structure as {@code
+ * NvdCveDeltaScheduledRunnerTest}.
  */
 class NvdCveBackfillScheduledRunnerTest {
 
     private final NvdCveSyncService nvdCveSyncService = mock(NvdCveSyncService.class);
+    private final NvdCveSyncStateRepository nvdCveSyncStateRepository = mock(NvdCveSyncStateRepository.class);
     private final UserApiKeyService userApiKeyService = mock(UserApiKeyService.class);
     private final NvdCveBackfillScheduledRunner runner =
-            new NvdCveBackfillScheduledRunner(nvdCveSyncService, userApiKeyService);
+            new NvdCveBackfillScheduledRunner(nvdCveSyncService, nvdCveSyncStateRepository, userApiKeyService);
+
+    private static NvdCveSyncState stateWithBaselineCompleted(boolean completed) {
+        NvdCveSyncState state = new NvdCveSyncState();
+        state.setBaselineCompleted(completed);
+        return state;
+    }
 
     @Test
     void disabledByDefaultSkipsEntirelyWithoutTouchingTheGuard() {
@@ -41,12 +52,31 @@ class NvdCveBackfillScheduledRunnerTest {
 
         runner.runBackfillTick();
 
+        verifyNoInteractions(nvdCveSyncStateRepository);
         verifyNoInteractions(nvdCveSyncService);
+    }
+
+    @Test
+    void enabledButBaselineAlreadyCompletedReturnsImmediatelyWithoutTouchingTheRunGuard() {
+        // Regression test for closed-mode backlog item 331: once the baseline is done, this must
+        // return before ever calling tryBeginRun() -- not fall through into winning the shared
+        // guard and resolving the admin's NVD key just to reach NvdCveSyncService's own
+        // one-row-SELECT no-op.
+        ReflectionTestUtils.setField(runner, "enabled", true);
+        when(nvdCveSyncStateRepository.findById((short) 1))
+                .thenReturn(Optional.of(stateWithBaselineCompleted(true)));
+
+        runner.runBackfillTick();
+
+        verifyNoInteractions(nvdCveSyncService);
+        verifyNoInteractions(userApiKeyService);
     }
 
     @Test
     void enabledButAnotherRunAlreadyInProgressSkipsWithoutStartingASecondOne() {
         ReflectionTestUtils.setField(runner, "enabled", true);
+        when(nvdCveSyncStateRepository.findById((short) 1))
+                .thenReturn(Optional.of(stateWithBaselineCompleted(false)));
         when(nvdCveSyncService.tryBeginRun()).thenReturn(false);
 
         runner.runBackfillTick();
@@ -58,6 +88,8 @@ class NvdCveBackfillScheduledRunnerTest {
     @Test
     void enabledAndGuardWonRunsTheTickOnAWorkerThread() throws InterruptedException {
         ReflectionTestUtils.setField(runner, "enabled", true);
+        when(nvdCveSyncStateRepository.findById((short) 1))
+                .thenReturn(Optional.of(stateWithBaselineCompleted(false)));
         when(nvdCveSyncService.tryBeginRun()).thenReturn(true);
         when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.empty());
         CountDownLatch tickInvoked = new CountDownLatch(1);
@@ -81,6 +113,8 @@ class NvdCveBackfillScheduledRunnerTest {
         // runBackfillTickAndRelease()'s own finally-release never runs.
         NvdCveBackfillScheduledRunner spyRunner = spy(runner);
         ReflectionTestUtils.setField(spyRunner, "enabled", true);
+        when(nvdCveSyncStateRepository.findById((short) 1))
+                .thenReturn(Optional.of(stateWithBaselineCompleted(false)));
         when(nvdCveSyncService.tryBeginRun()).thenReturn(true);
         doThrow(new RuntimeException("unable to create native thread")).when(spyRunner).startWorker();
 

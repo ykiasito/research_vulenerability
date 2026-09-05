@@ -1,6 +1,7 @@
 package com.vulncheck.app.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -10,6 +11,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -82,6 +84,77 @@ class CpeDictionaryBootstrapSyncTest {
         spyBootstrapSync.run(args);
 
         verify(nvdCpeSyncService, times(1)).releaseFullSyncGuard();
+        verify(nvdCpeSyncService, never()).syncAllAndRelease(Optional.empty());
+    }
+
+    // --- closed-mode backlog item 330 (C): freshness gate ---------------------------------------
+
+    @Test
+    void freshMirrorWithinTheConfiguredWindowSkipsWithoutEverAcquiringTheGuard() {
+        ReflectionTestUtils.setField(bootstrapSync, "enabled", true);
+        ReflectionTestUtils.setField(bootstrapSync, "maxAgeDays", 30);
+        when(nvdCpeSyncService.isMirrorFresherThan(Duration.ofDays(30))).thenReturn(true);
+
+        bootstrapSync.run(args);
+
+        verify(nvdCpeSyncService, never()).tryBeginFullSync();
+        verify(nvdCpeSyncService, never()).syncAllAndRelease(Optional.empty());
+    }
+
+    @Test
+    void staleOrNeverSyncedMirrorRunsTheStartupFullSyncNormally() throws InterruptedException {
+        ReflectionTestUtils.setField(bootstrapSync, "enabled", true);
+        ReflectionTestUtils.setField(bootstrapSync, "maxAgeDays", 30);
+        when(nvdCpeSyncService.isMirrorFresherThan(Duration.ofDays(30))).thenReturn(false);
+        when(nvdCpeSyncService.tryBeginFullSync()).thenReturn(true);
+        CountDownLatch syncInvoked = new CountDownLatch(1);
+        when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenAnswer(invocation -> {
+            syncInvoked.countDown();
+            return new NvdCpeSyncService.SyncOutcome(42, true);
+        });
+
+        bootstrapSync.run(args);
+
+        assertThat(syncInvoked.await(5, TimeUnit.SECONDS))
+                .as("a stale/never-synced mirror must still run the startup full sync")
+                .isTrue();
+        verify(nvdCpeSyncService, times(1)).tryBeginFullSync();
+    }
+
+    @Test
+    void maxAgeDaysZeroOrNegativeDisablesTheGateAndAlwaysRunsRegardlessOfFreshness() throws InterruptedException {
+        ReflectionTestUtils.setField(bootstrapSync, "enabled", true);
+        ReflectionTestUtils.setField(bootstrapSync, "maxAgeDays", 0);
+        when(nvdCpeSyncService.tryBeginFullSync()).thenReturn(true);
+        CountDownLatch syncInvoked = new CountDownLatch(1);
+        when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenAnswer(invocation -> {
+            syncInvoked.countDown();
+            return new NvdCpeSyncService.SyncOutcome(42, true);
+        });
+
+        bootstrapSync.run(args);
+
+        assertThat(syncInvoked.await(5, TimeUnit.SECONDS))
+                .as("maxAgeDays<=0 must disable the freshness gate entirely")
+                .isTrue();
+        verify(nvdCpeSyncService, never()).isMirrorFresherThan(any());
+    }
+
+    @Test
+    void freshnessCheckThrowingSkipsWithoutAcquiringOrReleasingTheGuard() {
+        // Fail-closed (skip), not fail-open -- see shouldSkipStartupFullSync's own javadoc for why
+        // this differs from CpeDictionaryScheduledResync's guard-release choice: no slot has been
+        // acquired yet at this point, so there is nothing to release, and releasing a slot that was
+        // never acquired would just be a no-op with a misleading log message.
+        ReflectionTestUtils.setField(bootstrapSync, "enabled", true);
+        ReflectionTestUtils.setField(bootstrapSync, "maxAgeDays", 30);
+        when(nvdCpeSyncService.isMirrorFresherThan(Duration.ofDays(30)))
+                .thenThrow(new RuntimeException("db not ready yet"));
+
+        bootstrapSync.run(args);
+
+        verify(nvdCpeSyncService, never()).tryBeginFullSync();
+        verify(nvdCpeSyncService, never()).releaseFullSyncGuard();
         verify(nvdCpeSyncService, never()).syncAllAndRelease(Optional.empty());
     }
 }
