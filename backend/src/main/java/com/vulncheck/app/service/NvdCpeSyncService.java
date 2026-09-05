@@ -100,9 +100,28 @@ public class NvdCpeSyncService {
      *  guard exists to close. */
     private final AtomicBoolean fullSyncRunning = new AtomicBoolean(false);
 
-    /** Syncs only CPEs matching the given keyword — the practical way to populate/test locally. */
+    /**
+     * Syncs only CPEs matching the given keyword — the practical way to populate/test locally.
+     *
+     * @throws IllegalArgumentException if {@code keyword} is null or blank. A blank keyword makes
+     *         {@link #fetchPage} omit the {@code keywordSearch} query parameter entirely, silently
+     *         turning what looks like a scoped, single-keyword sync into a full, unfiltered
+     *         ~1.8M-entry mirror sync — closed-mode backlog item 330. {@code
+     *         AdminController#sync} exposes this as an admin-form POST with only client-side
+     *         {@code required} validation, so a direct POST with a blank/whitespace keyword would
+     *         otherwise run a ~103-minute full sync on the Tomcat request thread itself, without
+     *         ever going through {@link #tryBeginFullSync}'s guard.
+     */
     public int syncByKeyword(String keyword, Optional<String> apiKey) {
+        requireNonBlankKeyword(keyword);
         return sync(keyword, apiKey, null, null).upserted();
+    }
+
+    private static void requireNonBlankKeyword(String keyword) {
+        if (keyword == null || keyword.isBlank()) {
+            throw new IllegalArgumentException("keyword must not be blank — a blank keyword would run an "
+                    + "unfiltered full sync instead of a scoped one");
+        }
     }
 
     /**
@@ -226,6 +245,7 @@ public class NvdCpeSyncService {
      * an incremental cache warm for future items with the same/similar product name.
      */
     public int syncKeywordSinglePage(String keyword, int resultsPerPage, Optional<String> apiKey) {
+        requireNonBlankKeyword(keyword);
         nvdRateLimiter.awaitTurn(apiKey.isPresent());
         JsonNode page = fetchPage(keyword, 0, resultsPerPage, apiKey);
         if (page == null) {

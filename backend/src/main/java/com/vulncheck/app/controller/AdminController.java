@@ -76,8 +76,22 @@ public class AdminController {
         return "admin/cpe-dictionary";
     }
 
+    /**
+     * Closed-mode backlog item 330 (先行修正): the form's {@code required} attribute is
+     * client-side only, so a direct POST can still supply a blank/whitespace keyword. Without this
+     * guard, {@link NvdCpeSyncService#syncByKeyword} would still run — {@code fetchPage} omits
+     * {@code keywordSearch} entirely for a blank keyword, silently turning this into an unfiltered
+     * ~1.8M-entry full sync running on this very request thread for ~103 minutes, without ever
+     * going through {@link NvdCpeSyncService#tryBeginFullSync}'s guard. Validated here (a friendly
+     * model error, not a 500) in addition to {@link NvdCpeSyncService}'s own defensive check, so
+     * this path never even reaches the service call.
+     */
     @PostMapping("/admin/cpe-dictionary/sync")
     public String sync(@RequestParam("keyword") String keyword, @AuthenticationPrincipal UserDetails userDetails, Model model) {
+        if (keyword == null || keyword.isBlank()) {
+            model.addAttribute("result", "キーワードを入力してください（空欄のままでは同期できません）。");
+            return "admin/cpe-dictionary";
+        }
         User user = userRepository.findByEmail(userDetails.getUsername())
                 .orElseThrow(() -> new IllegalStateException("認証済みユーザーが見つかりません。"));
         int count = nvdCpeSyncService.syncByKeyword(keyword, userApiKeyService.getNvdApiKey(user.getId()));

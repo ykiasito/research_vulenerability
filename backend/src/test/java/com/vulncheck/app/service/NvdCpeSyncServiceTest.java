@@ -325,6 +325,37 @@ class NvdCpeSyncServiceTest {
                 .isTrue();
     }
 
+    // --- closed-mode backlog item 330 (A): blank keyword must never fall through to an unfiltered
+    // full sync ---------------------------------------------------------------------------------
+
+    @Test
+    void syncByKeywordRejectsNullKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncByKeyword(null, Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
+    @Test
+    void syncByKeywordRejectsEmptyKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncByKeyword("", Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
+    @Test
+    void syncByKeywordRejectsWhitespaceOnlyKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncByKeyword("   ", Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
+    @Test
+    void syncKeywordSinglePageRejectsBlankKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncKeywordSinglePage("  ", 1, Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
     @Test
     void syncDeltaAndReleaseFreesTheGuardSlotEvenWhenTheSyncThrows() {
         assertThat(service.tryBeginFullSync()).isTrue();

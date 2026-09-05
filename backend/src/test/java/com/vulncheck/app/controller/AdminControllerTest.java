@@ -41,6 +41,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.ui.ExtendedModelMap;
 import org.springframework.ui.Model;
 import org.springframework.web.client.RestClient;
@@ -205,6 +206,21 @@ class AdminControllerTest {
         // The controller's attempt must never have reached syncAllAndRelease at all, let alone
         // made a network call or touched the repository, once the slot was denied.
         verifyNoInteractions(sharedRepository);
+    }
+
+    // --- closed-mode backlog item 330 (A): blank keyword must never reach NvdCpeSyncService -----
+
+    @Test
+    void syncRejectsBlankKeywordWithoutCallingTheServiceOrLookingUpTheUser() {
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+        UserDetails userDetails = mock(UserDetails.class);
+
+        String view = controller.sync("   ", userDetails, model);
+
+        assertThat(view).isEqualTo("admin/cpe-dictionary");
+        assertThat(model.getAttribute("result")).asString().contains("空欄");
+        verifyNoInteractions(nvdCpeSyncService, userRepository, userDetails);
     }
 
     @Test
