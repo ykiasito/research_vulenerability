@@ -1,6 +1,7 @@
 package com.vulncheck.app.controller;
 
 import com.vulncheck.app.entity.User;
+import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
@@ -64,6 +65,7 @@ public class AdminController {
     private final RegistryMirrorSyncService registryMirrorSyncService;
     private final NvdCveSyncService nvdCveSyncService;
     private final NvdCveSyncStateRepository nvdCveSyncStateRepository;
+    private final CpeDictionarySyncStateRepository cpeDictionarySyncStateRepository;
 
     @Value("${app.nvd-cve-backfill.max-requests-per-run:60}")
     private int nvdCveBackfillMaxRequestsPerRun;
@@ -72,7 +74,8 @@ public class AdminController {
     private int nvdCveBackfillMaxDurationMinutes;
 
     @GetMapping("/admin/cpe-dictionary")
-    public String form() {
+    public String form(Model model) {
+        model.addAttribute("syncState", cpeDictionarySyncStateRepository.findById((short) 1).orElse(null));
         return "admin/cpe-dictionary";
     }
 
