@@ -90,8 +90,11 @@ class ChocolateyRemovalGolden300RecallTest {
         List<ResearchJobItem> items = researchJobItemRepository.findByJobIdOrderById(job.getId());
 
         // Keyed on (raw product_name, version) — the same pair test-data/compute_golden_300_metrics*.py
-        // uses to join golden-300.csv's ground truth against a job's actual results.
-        Map<String, String> expectedOutcomeByKey = new HashMap<>();
+        // uses to join golden-300.csv's ground truth against a job's actual results. A record key
+        // (rather than a delimiter-joined string) avoids any separator-character collision risk and
+        // keeps this file plain text for `git diff`/`gh pr diff` (backlog item 323 — a literal "\0"
+        // separator here previously made git treat the whole file as binary).
+        Map<ProductKey, String> expectedOutcomeByKey = new HashMap<>();
         try (InputStream csv = getClass().getClassLoader().getResourceAsStream("golden-300.csv");
                 CSVParser parser = CSVParser.parse(new InputStreamReader(csv, StandardCharsets.UTF_8),
                         CSVFormat.DEFAULT.builder().setHeader().setSkipHeaderRecord(true).build())) {
@@ -142,7 +145,10 @@ class ChocolateyRemovalGolden300RecallTest {
                 controlTotal == 0 ? 0.0 : (double) controlFalsePositive / controlTotal);
     }
 
-    private static String key(String productName, String version) {
-        return productName + " " + version;
+    private record ProductKey(String productName, String version) {
+    }
+
+    private static ProductKey key(String productName, String version) {
+        return new ProductKey(productName, version);
     }
 }
