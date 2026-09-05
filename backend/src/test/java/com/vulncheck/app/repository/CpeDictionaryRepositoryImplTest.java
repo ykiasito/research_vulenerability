@@ -3,6 +3,7 @@ package com.vulncheck.app.repository;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.vulncheck.app.entity.CpeDictionaryEntry;
+import com.vulncheck.app.repository.CpeDictionaryRepositoryCustom.VendorProductPair;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -419,5 +420,109 @@ class CpeDictionaryRepositoryImplTest {
         String secondRowVersion = rowVersion(cpeString);
 
         assertThat(secondRowVersion).isEqualTo(firstRowVersion);
+    }
+
+    /**
+     * Item 302: {@code findByVendorProductPairs} must find an exact {@code (vendor, product)} row
+     * even though it would never surface via {@code findFuzzyMatches}'s pg_trgm threshold — same
+     * short-slug-vs-long-query shape as the real {@code crowdstrike:falcon} case this fallback exists
+     * for (measured live 2026-09-05 against the real dictionary: product similarity 0.269 < 0.3,
+     * title similarity 0.51 < 0.6).
+     */
+    @Test
+    void findByVendorProductPairsFindsAnExactMatchThatFuzzyMatchesWouldMiss() {
+        // Same shape as the real crowdstrike:falcon case this fallback exists for: a short product
+        // slug against a much longer query string, so the query's own extra words dominate the
+        // trigram union and drag similarity below both thresholds despite the slug being a genuine
+        // substring match. Measured live against the real Postgres instance before picking this
+        // fixture (0.229 product-similarity < 0.3, 0.346 title-similarity < 0.6).
+        insert(
+                "cpe:2.3:a:zzzr302vendor:zzzr302fal:1.0:*:*:*:*:*:*:*",
+                "Zzzr302vendor Zzzr302fal 1.0",
+                "zzzr302vendor",
+                "zzzr302fal");
+
+        String query = "Zzzr302vendor Zzzr302fal Sensor Suite Professional Edition";
+        List<CpeDictionaryEntry> fuzzy = cpeDictionaryRepository.findFuzzyMatches(query, 0.3, 0.6, 10);
+        assertThat(fuzzy).noneMatch(e -> "zzzr302fal".equals(e.getProduct()));
+
+        List<CpeDictionaryEntry> exact = cpeDictionaryRepository.findByVendorProductPairs(
+                List.of(new VendorProductPair("zzzr302vendor", "zzzr302fal")), 10);
+
+        assertThat(exact).hasSize(1);
+        assertThat(exact.get(0).getCpeString())
+                .isEqualTo("cpe:2.3:a:zzzr302vendor:zzzr302fal:1.0:*:*:*:*:*:*:*");
+    }
+
+    /**
+     * Item 302: unlike {@code collect()}'s trigram path, this path has no similarity filter to gate
+     * {@code target_sw_values} on, so the LATERAL aggregate must cover the row's own target_sw
+     * unconditionally (see {@code CpeDictionaryRepositoryImpl#findByVendorProductPairs}'s own comment
+     * for why carrying {@code collect()}'s FILTER clause over here would be a semantics bug, not just
+     * a style choice). Also covers {@code max_cataloged_major}/{@code cataloged_row_count} being
+     * populated the same unconditional whole-partition way {@code collect()} already computes them.
+     */
+    @Test
+    void findByVendorProductPairsPopulatesLateralAggregatesAcrossWholePartition() {
+        insert(
+                "cpe:2.3:a:zzzrevise302lateralvendor:zzzrevise302lateralproduct:1.0:*:*:*:*:windows:*:*",
+                "Zzzrevise302lateralproduct One",
+                "zzzrevise302lateralvendor",
+                "zzzrevise302lateralproduct");
+        insert(
+                "cpe:2.3:a:zzzrevise302lateralvendor:zzzrevise302lateralproduct:9.0:*:*:*:*:linux:*:*",
+                "Zzzrevise302lateralproduct Nine",
+                "zzzrevise302lateralvendor",
+                "zzzrevise302lateralproduct");
+
+        List<CpeDictionaryEntry> results = cpeDictionaryRepository.findByVendorProductPairs(
+                List.of(new VendorProductPair("zzzrevise302lateralvendor", "zzzrevise302lateralproduct")), 10);
+
+        assertThat(results).hasSize(1);
+        CpeDictionaryEntry entry = results.get(0);
+        // Both versions' target_sw values are present -- no trigram/similarity gate exists on this
+        // path to exclude either one, unlike collect()'s target_sw_values FILTER.
+        assertThat(entry.getTargetSwValues()).isEqualTo(Set.of("windows", "linux"));
+        assertThat(entry.getMaxCatalogedMajor()).isEqualTo(9);
+        assertThat(entry.getCatalogedRowCount()).isEqualTo(2);
+    }
+
+    /** Item 302: an empty pair list must short-circuit to an empty result with no query at all
+     *  (an empty SQL {@code IN ()} list is a syntax error, not merely a no-match predicate). */
+    @Test
+    void findByVendorProductPairsReturnsEmptyForEmptyPairList() {
+        assertThat(cpeDictionaryRepository.findByVendorProductPairs(List.of(), 10)).isEmpty();
+    }
+
+    /**
+     * Item 302: a caller passing more than {@code MAX_VENDOR_PRODUCT_PAIRS} (64) pairs must not blow
+     * up the query -- this repository method defensively truncates rather than trusting every caller
+     * to already respect {@code Stage1IdentificationService}'s own 8x8 token cap (see that class's
+     * {@code MAX_EXACT_MATCH_TOKENS_PER_SIDE} javadoc for the caller-side rationale). Builds 100
+     * distinct pairs, only one of which (the 65th, beyond the cap) actually matches a row in the
+     * dictionary, and asserts that row is silently dropped rather than returned or erroring.
+     */
+    @Test
+    void findByVendorProductPairsTruncatesOversizedPairListsRatherThanErroring() {
+        insert(
+                "cpe:2.3:a:zzzrevise302capvendor64:zzzrevise302capproduct64:1.0:*:*:*:*:*:*:*",
+                "Zzzrevise302capproduct64",
+                "zzzrevise302capvendor64",
+                "zzzrevise302capproduct64");
+
+        List<VendorProductPair> pairs = new java.util.ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            if (i == 64) {
+                // The one pair that actually exists in the dictionary, placed just past the 64-pair
+                // cap so it would be included if truncation didn't happen.
+                pairs.add(new VendorProductPair("zzzrevise302capvendor64", "zzzrevise302capproduct64"));
+            } else {
+                pairs.add(new VendorProductPair("zzzrevise302nomatchvendor" + i, "zzzrevise302nomatchproduct" + i));
+            }
+        }
+
+        List<CpeDictionaryEntry> results = cpeDictionaryRepository.findByVendorProductPairs(pairs, 200);
+
+        assertThat(results).noneMatch(e -> "zzzrevise302capproduct64".equals(e.getProduct()));
     }
 }

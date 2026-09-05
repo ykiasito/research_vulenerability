@@ -3,6 +3,7 @@ package com.vulncheck.app.repository;
 import com.vulncheck.app.entity.CpeDictionaryEntry;
 import java.sql.Array;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -124,6 +125,101 @@ class CpeDictionaryRepositoryImpl implements CpeDictionaryRepositoryCustom {
             entry.setLastSyncedAt(rs.getObject("last_synced_at", OffsetDateTime.class));
             results.add(entry);
         }, regex.toString(), limit);
+        return results;
+    }
+
+    /**
+     * Item 302 safety net: {@link CpeDictionaryRepositoryCustom#findByVendorProductPairs}'s own
+     * caller ({@code Stage1IdentificationService#localCpeLookup}) already caps generated pairs at 64
+     * (8 vendor tokens x 8 product tokens, both taken from {@code tokenize()}'s own bounded output —
+     * see that method's javadoc for the full worst-case-explosion rationale), but this repository
+     * method has no way to know a future caller will respect that, and a {@code product} column being
+     * {@code VARCHAR(255)} means a naive caller could otherwise reach tens of thousands of bind
+     * parameters in one query. Silently truncating (rather than throwing) matches this fallback's own
+     * "best effort, never block the item" spirit — same reasoning as {@code
+     * MAX_NAME_VARIANT_QUERIES_PER_ITEM}'s cap in {@code Stage1IdentificationService}.
+     */
+    private static final int MAX_VENDOR_PRODUCT_PAIRS = 64;
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<CpeDictionaryEntry> findByVendorProductPairs(
+            List<CpeDictionaryRepositoryCustom.VendorProductPair> pairs, int limit) {
+        if (pairs.isEmpty()) {
+            return List.of();
+        }
+        List<CpeDictionaryRepositoryCustom.VendorProductPair> capped =
+                pairs.size() > MAX_VENDOR_PRODUCT_PAIRS ? pairs.subList(0, MAX_VENDOR_PRODUCT_PAIRS) : pairs;
+
+        // Row-value IN list, e.g. "(vendor, product) IN ((?, ?), (?, ?))" — every value is a JDBC
+        // bind parameter, never string-interpolated (the pair's vendor/product text ultimately comes
+        // from item CSV data, so this must never be built via string concatenation of the values
+        // themselves). Postgres can rewrite a row-value IN list with a fixed set of tuples into an OR
+        // of per-tuple equalities, each of which can use the (vendor, product) btree index (V31) via
+        // a BitmapOr — the same index this fallback exists to exploit.
+        StringBuilder valuesList = new StringBuilder();
+        List<Object> params = new ArrayList<>();
+        for (int i = 0; i < capped.size(); i++) {
+            if (i > 0) {
+                valuesList.append(", ");
+            }
+            valuesList.append("(?, ?)");
+            params.add(capped.get(i).vendor());
+            params.add(capped.get(i).product());
+        }
+
+        // Reuses collect()'s own CROSS JOIN LATERAL shape for target_sw_values/max_cataloged_major/
+        // cataloged_row_count (see that method's own extensive comment for what each column means and
+        // why the LATERAL join, rather than a window function, is required for max_cataloged_major/
+        // cataloged_row_count's whole-partition semantics) — but target_sw_values here has NO
+        // "FILTER (WHERE d.<column> % ? AND similarity(...) > ?)" clause, unlike collect()'s version.
+        // collect()'s FILTER deliberately preserves the existing trigram-gate semantics (target_sw_
+        // values there is scoped to only the rows that ALSO matched that call's own similarity
+        // filter). There is no similarity filter at all on this exact-match path — every row sharing
+        // the (vendor, product) pair is an equally valid piece of evidence for what target_sw values
+        // exist for that pair — so this aggregates unconditionally over the whole partition, exactly
+        // like max_cataloged_major/cataloged_row_count already do. Carrying collect()'s FILTER over
+        // unchanged here would silently and incorrectly re-introduce a "must also similarity-match"
+        // requirement that has no meaning on an exact-match query with no query string to score
+        // against in the first place.
+        String sql = "SELECT t.*, a.target_sw_values, a.max_cataloged_major, a.cataloged_row_count FROM ("
+                + "SELECT DISTINCT ON (vendor, product) id, cpe_string, title, vendor, product, last_synced_at "
+                + "FROM cpe_dictionary WHERE (vendor, product) IN (" + valuesList + ") "
+                // Same determinism reasoning as findByLeadingInitialismMatch's own inner ORDER BY:
+                // without "id" trailing "vendor, product", DISTINCT ON's representative-row choice per
+                // pair is unspecified.
+                + "ORDER BY vendor, product, id"
+                + ") t "
+                + "CROSS JOIN LATERAL ("
+                + "SELECT array_agg(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 11)) AS target_sw_values, "
+                + "max((NULLIF(substring(split_part(regexp_replace(d.cpe_string, '\\\\:', '', 'g'), ':', 6) "
+                + "from '^[0-9]{1,9}'), ''))::integer) AS max_cataloged_major, "
+                + "count(*)::integer AS cataloged_row_count "
+                + "FROM cpe_dictionary d "
+                + "WHERE d.vendor = t.vendor AND d.product = t.product"
+                + ") a "
+                // Outer ORDER BY id: same defensive determinism reasoning as collect()'s own outer
+                // ORDER BY (see that method's comment) — no score column exists on this exact-match
+                // path to order by, so id is the only ordering key available, kept purely so the
+                // returned row order for tied/duplicate pairs is reproducible rather than plan-shape-
+                // dependent.
+                + "ORDER BY t.id LIMIT ?";
+        params.add(limit);
+
+        List<CpeDictionaryEntry> results = new ArrayList<>();
+        jdbcTemplate.query(sql, rs -> {
+            CpeDictionaryEntry entry = new CpeDictionaryEntry();
+            entry.setId(rs.getLong("id"));
+            entry.setCpeString(rs.getString("cpe_string"));
+            entry.setTitle(rs.getString("title"));
+            entry.setVendor(rs.getString("vendor"));
+            entry.setProduct(rs.getString("product"));
+            entry.setLastSyncedAt(rs.getObject("last_synced_at", OffsetDateTime.class));
+            entry.setTargetSwValues(toStringSet(rs.getArray("target_sw_values")));
+            entry.setMaxCatalogedMajor(rs.getObject("max_cataloged_major", Integer.class));
+            entry.setCatalogedRowCount(rs.getObject("cataloged_row_count", Integer.class));
+            results.add(entry);
+        }, params.toArray());
         return results;
     }
 
