@@ -1,5 +1,7 @@
 package com.vulncheck.app.service;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJob;
 import com.vulncheck.app.entity.ResearchJobItem;
@@ -34,7 +36,7 @@ import org.springframework.transaction.annotation.Transactional;
  * rows. This fixture (29 rows: VS Code/Chrome/JetBrains/Firefox extension rows with {@code
  * install_url} filled in, plus mandatory negative controls — the base platforms themselves, the
  * backlog-item-299-case-5 Visual Studio/Visual Studio Code regression row, and a confusing-name
- * decoy that is neither Visual Studio Code nor the real Coder {@code code-server} it resembles)
+ * decoy whose real product is Coder's unrelated {@code code-server}, not Visual Studio Code itself)
  * exists purely to record the <em>current</em> (pre-item-303) baseline, so item 303's own recall
  * measurement has something to diff against. See {@code test-data/marketplace-extension-fixture.csv}
  * ground_truth_source column for how every expected_outcome/expected_cpe_vendor/expected_cpe_product
@@ -60,26 +62,27 @@ import org.springframework.transaction.annotation.Transactional;
         // same as every other real-dev-DB test in this package.
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Run once (2026-09-05, backlog item 304 marketplace-extension fixture baseline) against "
-        + "the real dev DB -- pre-item-303 baseline (measured 2026-09-05): 23 extension rows (the "
-        + "ones with install_url filled in) score 13/23=0.5652 against their ground truth -- of the "
-        + "12 rows expected IDENTIFIED_CPE, only the 2 LastPass rows (Chrome/Firefox) actually "
-        + "resolve correctly (via a registry-match-adjacent static path, not the target_sw gate); "
-        + "the other 10 (GitLens, Python, ESLint, Continue, Adblock Plus, Grammarly, Evernote Web "
-        + "Clipper, McAfee WebAdvisor, FireGPG, Avira Password Manager) come back UNIDENTIFIED or "
-        + "with a wrong slug (McAfee resolves to mcafee:webadvisor, not the dictionary's real "
-        + "mcafee:web_advisor) -- consistent with passesTargetSwGate rejecting a target_sw-scoped "
-        + "CPE candidate whenever there's no registry match, regardless of what install_url says "
-        + "(item305/306); the 11 rows expected UNIDENTIFIED (Prettier, Live Share, Honey, Momentum, "
-        + "all 5 JetBrains-plugin rows, Firefox Multi-Account Containers, Tab Session Manager) all "
-        + "correctly come back UNIDENTIFIED. The 6 negative-control rows score 5/6=0.8333 -- Visual "
-        + "Studio Code/Google Chrome/Mozilla Firefox/IntelliJ IDEA/Microsoft Visual Studio all "
-        + "resolve correctly to their own platform CPE, but 'Visual Studio Code Server' (the "
-        + "confusing-name decoy, real product is Coder's unrelated code-server) incorrectly "
-        + "resolves to microsoft:visual_studio_code:4.9.3 (a version that doesn't even exist for "
-        + "that CPE) instead of staying UNIDENTIFIED -- filed as a new finding, backlog item 319, "
-        + "not fixed here (out of this task's scope). Left disabled so it can never re-fire on a "
-        + "routine mvn test run -- see class javadoc.")
+@Disabled("Run once (2026-09-05, backlog item 304 marketplace-extension fixture baseline; ground "
+        + "truth for 3 rows corrected and re-measured 2026-09-05 per senior-reviewer REVISE on "
+        + "PR#224) against the real dev DB -- pre-item-303 baseline: 23 extension rows (install_url "
+        + "filled in) score 12/23=0.5217 against their ground truth -- of the 13 rows expected "
+        + "IDENTIFIED_CPE, only the 2 LastPass "
+        + "rows (Chrome/Firefox) actually resolve correctly (via a registry-match-adjacent static "
+        + "path, not the target_sw gate); the other 11 (GitLens, Python, ESLint, Continue, Prettier - "
+        + "Code formatter, Adblock Plus, Grammarly, Evernote Web Clipper, McAfee WebAdvisor, FireGPG, "
+        + "Avira Password Manager) come back UNIDENTIFIED or with a wrong slug (McAfee resolves to "
+        + "mcafee:webadvisor, not the dictionary's real mcafee:web_advisor) -- consistent with "
+        + "passesTargetSwGate rejecting a target_sw-scoped CPE candidate whenever there's no "
+        + "registry match, regardless of what install_url says (item305/306); the 10 rows expected "
+        + "UNIDENTIFIED (Live Share, Honey, Momentum, all 5 JetBrains-plugin rows, Firefox "
+        + "Multi-Account Containers, Tab Session Manager) all correctly come back UNIDENTIFIED. The "
+        + "6 negative-control rows score 5/6=0.8333 -- Visual Studio Code/Google Chrome/Mozilla "
+        + "Firefox/IntelliJ IDEA/Microsoft Visual Studio all resolve correctly to their own platform "
+        + "CPE, but 'Visual Studio Code Server' (real product is Coder's unrelated code-server) "
+        + "incorrectly resolves to microsoft:visual_studio_code:4.9.3 (a version that doesn't even "
+        + "exist for that CPE) instead of coder:code-server -- filed as backlog item 319, not fixed "
+        + "here (out of this task's scope). Left disabled so it can never re-fire on a routine mvn "
+        + "test run -- see class javadoc.")
 class MarketplaceExtensionFixtureRecallTest {
 
     private static final Long REAL_USER_ID = 5L;
@@ -106,14 +109,24 @@ class MarketplaceExtensionFixtureRecallTest {
         List<ResearchJobItem> items = researchJobItemRepository.findByJobIdOrderById(job.getId());
 
         // Keyed on (raw product_name, version) — same convention as ChocolateyRemovalGolden300RecallTest.
+        // A duplicate key here would silently overwrite one row's ground truth with another's and
+        // under-count both extensionTotal/controlTotal below — fail loudly instead (senior-reviewer
+        // REVISE on PR#224, item 3) rather than let that happen quietly as this fixture grows for item303.
         Map<String, ExpectedRow> expectedByKey = new HashMap<>();
+        int fixtureRowCount = 0;
         try (InputStream csv = getClass().getClassLoader().getResourceAsStream(FIXTURE_CSV);
                 CSVParser parser = CSVParser.parse(new InputStreamReader(csv, StandardCharsets.UTF_8),
                         CSVFormat.DEFAULT.builder().setHeader().setSkipHeaderRecord(true).build())) {
             for (CSVRecord record : parser) {
-                expectedByKey.put(key(record.get("product_name"), record.get("version")),
+                fixtureRowCount++;
+                String rowKey = key(record.get("product_name"), record.get("version"));
+                ExpectedRow previous = expectedByKey.put(rowKey,
                         new ExpectedRow(record.get("expected_outcome"), record.get("expected_cpe_vendor"),
                                 record.get("expected_cpe_product")));
+                if (previous != null) {
+                    throw new IllegalStateException(
+                            "Duplicate (product_name, version) key in " + FIXTURE_CSV + ": " + rowKey);
+                }
             }
         }
 
@@ -161,6 +174,13 @@ class MarketplaceExtensionFixtureRecallTest {
                 extensionTotal, extensionTotal == 0 ? 0.0 : (double) extensionIdentifiedCorrectly / extensionTotal);
         System.out.printf("control rows matching ground truth: %d/%d = %.4f%n", controlCorrect, controlTotal,
                 controlTotal == 0 ? 0.0 : (double) controlCorrect / controlTotal);
+
+        // Sanity guards on the measurement itself (senior-reviewer REVISE on PR#224, item 3) --
+        // printed metrics above are useless if some job item silently had no ground truth row, or
+        // if the extension/control split silently dropped rows.
+        assertEquals(0, missingExpected, "every job item must have a matching fixture row by (product_name, version)");
+        assertEquals(fixtureRowCount, extensionTotal + controlTotal,
+                "every fixture row must be counted as exactly one of extension/control");
     }
 
     /** For {@code UNIDENTIFIED} expectations, only presence/absence of a result matters. For
