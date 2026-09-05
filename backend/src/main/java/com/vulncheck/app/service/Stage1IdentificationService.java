@@ -180,15 +180,25 @@ public class Stage1IdentificationService {
      * separately in {@link #declaredTargetSwFromInstallUrl}) since {@code chrome.google.com} alone
      * isn't specific enough to a webstore listing to declare a platform from the host alone.
      */
+    /** The {@code target_sw} value for a Chrome extension — pulled out as its own constant (senior
+     *  -reviewer REVISE on PR#229) since both {@link #INSTALL_URL_HOST_TO_TARGET_SW}'s current-host
+     *  entry and {@link #declaredTargetSwFromInstallUrl}'s legacy-host-shape handling need to agree
+     *  on the exact same value; a literal string in both places would be a silent-drift risk. */
+    private static final String CHROME_TARGET_SW = "chrome";
+
     private static final java.util.Map<String, String> INSTALL_URL_HOST_TO_TARGET_SW = java.util.Map.of(
             "marketplace.visualstudio.com", "visual_studio_code",
-            "chromewebstore.google.com", "chrome",
+            "chromewebstore.google.com", CHROME_TARGET_SW,
             "plugins.jetbrains.com", "jetbrains",
             "addons.mozilla.org", "firefox");
 
     /** Legacy Chrome Web Store host — see {@link #INSTALL_URL_HOST_TO_TARGET_SW}'s own javadoc for
      *  why this needs a path-prefix check too, rather than a bare host-suffix map entry. */
     private static final String CHROME_WEBSTORE_LEGACY_HOST = "chrome.google.com";
+    /** Compared against the URI path with segment-boundary awareness (see {@link
+     *  #declaredTargetSwFromInstallUrl}'s own use of this) — never a bare {@code startsWith}, which
+     *  would also match an unrelated path like {@code /webstoreEVIL/x} or {@code /webstore-foo}
+     *  (senior-reviewer REVISE on PR#229, measured live). */
     private static final String CHROME_WEBSTORE_LEGACY_PATH_PREFIX = "/webstore";
 
     /**
@@ -1869,23 +1879,41 @@ public class Stage1IdentificationService {
         return Optional.ofNullable(ecosystem).map(ECOSYSTEM_TO_TARGET_SW::get);
     }
 
+    /** Matches a URI scheme prefix (e.g. {@code https://}, {@code http://}) — used only to detect
+     *  whether {@link #declaredTargetSwFromInstallUrl} needs to supply one itself (see that
+     *  method's own javadoc for why). */
+    private static final java.util.regex.Pattern URL_SCHEME_PATTERN =
+            java.util.regex.Pattern.compile("^[a-zA-Z][a-zA-Z0-9+.-]*://");
+
     /**
      * Backlog item 303 (task B): resolves {@code installUrl}'s host to a declared {@code target_sw}
      * value via {@link #INSTALL_URL_HOST_TO_TARGET_SW}, matching by trailing-label host suffix
      * (never substring — see that map's own javadoc for why) so a spoofed URL whose path merely
      * contains a marketplace hostname can't be mistaken for the real thing. Returns empty for a
-     * blank/unparseable {@code installUrl}, a host with no mapping, or (deliberately) a
-     * scheme-relative/host-less URL — {@link java.net.URI#getHost()} returns {@code null} for any
-     * URL without an authority component, and this treats that exactly like "no install_url at all"
-     * rather than trying to guess a host out of a bare path.
+     * blank/unparseable {@code installUrl} or a host with no mapping.
+     *
+     * <p>Senior-reviewer REVISE (PR#229): a scheme-less {@code install_url} (e.g. a non-engineer
+     * pasting {@code marketplace.visualstudio.com/items?itemName=x} without {@code https://})
+     * would otherwise parse as a relative URI with no authority component at all — {@link
+     * java.net.URI#getHost()} returns {@code null} for that, silently disabling this whole feature
+     * for exactly the CSV shape {@code jobs/new.html}'s own {@code vulncheckGetUrlHost} already
+     * tolerates for this same {@code install_url} column (see that function's own comment). This
+     * prepends {@code https://} ONLY when {@link #URL_SCHEME_PATTERN} finds no scheme already
+     * present, so every already-schemed URL (the common case) is parsed byte-for-byte unchanged.
+     * Spoof resistance is unaffected either way — {@link java.net.URI} still does the real
+     * authority/path parsing after the prefix is (maybe) added, so a path-embedded or
+     * suffix-embedded spoof is rejected exactly as before regardless of which branch supplied the
+     * scheme (verified by this class's own spoof tests, both schemed and scheme-less).
      */
     private static Optional<String> declaredTargetSwFromInstallUrl(String installUrl) {
         if (installUrl == null || installUrl.isBlank()) {
             return Optional.empty();
         }
+        String stripped = installUrl.strip();
+        String withScheme = URL_SCHEME_PATTERN.matcher(stripped).find() ? stripped : "https://" + stripped;
         java.net.URI uri;
         try {
-            uri = new java.net.URI(installUrl.strip());
+            uri = new java.net.URI(withScheme);
         } catch (java.net.URISyntaxException e) {
             return Optional.empty();
         }
@@ -1901,11 +1929,16 @@ public class Stage1IdentificationService {
         }
         // Legacy Chrome Web Store shape (chrome.google.com/webstore/...) — chrome.google.com alone
         // isn't specific enough to a webstore listing to declare a platform from the host alone (it
-        // hosts plenty of non-extension pages too), so this also requires the legacy path prefix.
+        // hosts plenty of non-extension pages too), so this also requires the legacy path prefix,
+        // with a segment boundary (equals, or followed by "/") rather than a bare startsWith —
+        // senior-reviewer REVISE on PR#229, measured live: a bare startsWith also matched an
+        // unrelated path like /webstoreEVIL/x or /webstore-foo, neither of which is the real
+        // /webstore/... shape.
         if (isHostOrTrailingLabelMatch(normalizedHost, CHROME_WEBSTORE_LEGACY_HOST)) {
             String path = uri.getPath();
-            if (path != null && path.startsWith(CHROME_WEBSTORE_LEGACY_PATH_PREFIX)) {
-                return Optional.of("chrome");
+            if (path != null && (path.equals(CHROME_WEBSTORE_LEGACY_PATH_PREFIX)
+                    || path.startsWith(CHROME_WEBSTORE_LEGACY_PATH_PREFIX + "/"))) {
+                return Optional.of(CHROME_TARGET_SW);
             }
         }
         return Optional.empty();
@@ -1937,10 +1970,19 @@ public class Stage1IdentificationService {
      * TargetSwContext#declaredTargetSw} now also covers an {@code install_url}-derived declaration,
      * so an item with no registry ecosystem but a recognized marketplace {@code install_url} (e.g.
      * a VS Code extension) can still pass this gate against a target_sw-scoped candidate, exactly
-     * the same way a registry-sourced item always could. The hex/maven "registry matched but its
-     * ecosystem has no mapping" default-allow below is untouched by this — it's still keyed off
-     * {@code hasRegistryMatch} specifically, not off {@code declaredTargetSw}, so it doesn't flip to
-     * a reject just because neither source happens to produce a mapped value.
+     * the same way a registry-sourced item always could.
+     *
+     * <p>Senior-reviewer REVISE (PR#229): the hex/maven "registry matched but its ecosystem has no
+     * mapping" default-allow below is narrower than it may look — it only remains reachable when
+     * <em>both</em> sources decline to declare a platform (no install_url declaration AND no mapped
+     * registry ecosystem). Whenever an {@code install_url} declaration IS present, {@link
+     * TargetSwContext#declaredTargetSw} returns it regardless of whether the item's registry
+     * ecosystem happens to be one of the two unmapped ones (hex/maven) — so a hex/maven-registry
+     * item whose {@code install_url} also happens to resolve to, say, {@code jetbrains} is held to
+     * the same strict equality check as any other declared-platform item, not the default-allow.
+     * This is a deliberate behavior change from the pre-item-303 gate (which had no install_url
+     * signal to consult at all), judged correct on review: install_url is the more specific,
+     * item-level signal whenever it's present.
      */
     private boolean passesTargetSwGate(CpeDictionaryEntry entry, TargetSwContext ctx) {
         java.util.Set<String> targetSwValues = entry.getTargetSwValues();
