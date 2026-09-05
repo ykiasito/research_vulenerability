@@ -63,26 +63,30 @@ import org.springframework.transaction.annotation.Transactional;
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
 @Disabled("Run once (2026-09-05, backlog item 304 marketplace-extension fixture baseline; ground "
-        + "truth for 3 rows corrected and re-measured 2026-09-05 per senior-reviewer REVISE on "
-        + "PR#224) against the real dev DB -- pre-item-303 baseline: 23 extension rows (install_url "
-        + "filled in) score 12/23=0.5217 against their ground truth -- of the 13 rows expected "
-        + "IDENTIFIED_CPE, only the 2 LastPass "
-        + "rows (Chrome/Firefox) actually resolve correctly (via a registry-match-adjacent static "
-        + "path, not the target_sw gate); the other 11 (GitLens, Python, ESLint, Continue, Prettier - "
-        + "Code formatter, Adblock Plus, Grammarly, Evernote Web Clipper, McAfee WebAdvisor, FireGPG, "
-        + "Avira Password Manager) come back UNIDENTIFIED or with a wrong slug (McAfee resolves to "
-        + "mcafee:webadvisor, not the dictionary's real mcafee:web_advisor) -- consistent with "
-        + "passesTargetSwGate rejecting a target_sw-scoped CPE candidate whenever there's no "
-        + "registry match, regardless of what install_url says (item305/306); the 10 rows expected "
-        + "UNIDENTIFIED (Live Share, Honey, Momentum, all 5 JetBrains-plugin rows, Firefox "
-        + "Multi-Account Containers, Tab Session Manager) all correctly come back UNIDENTIFIED. The "
-        + "6 negative-control rows score 5/6=0.8333 -- Visual Studio Code/Google Chrome/Mozilla "
-        + "Firefox/IntelliJ IDEA/Microsoft Visual Studio all resolve correctly to their own platform "
-        + "CPE, but 'Visual Studio Code Server' (real product is Coder's unrelated code-server) "
-        + "incorrectly resolves to microsoft:visual_studio_code:4.9.3 (a version that doesn't even "
-        + "exist for that CPE) instead of coder:code-server -- filed as backlog item 319, not fixed "
-        + "here (out of this task's scope). Left disabled so it can never re-fire on a routine mvn "
-        + "test run -- see class javadoc.")
+        + "truth corrected and re-measured twice 2026-09-05 per two rounds of senior-reviewer "
+        + "REVISE on PR#224 -- round 1: Visual Studio Code Server/Prettier/Tab Session Manager; "
+        + "round 2: Live Share flipped to IDENTIFIED_CPE, Prettier reverted back to UNIDENTIFIED) "
+        + "against the real dev DB -- pre-item-303 baseline (actually re-run both times, not "
+        + "arithmetic-only): 23 extension rows (install_url filled in) score 12/23=0.5217 against "
+        + "their ground truth -- of the 13 rows expected IDENTIFIED_CPE, only the 2 LastPass rows "
+        + "(Chrome/Firefox) actually resolve correctly (via a registry-match-adjacent static path, "
+        + "not the target_sw gate); the other 11 (GitLens, Python, ESLint, Continue, Live Share, "
+        + "Adblock Plus, Grammarly, Evernote Web Clipper, McAfee WebAdvisor, FireGPG, Avira Password "
+        + "Manager) come back UNIDENTIFIED or with a wrong slug (McAfee resolves to mcafee:webadvisor, "
+        + "not the dictionary's real mcafee:web_advisor; Live Share's real CPE microsoft:"
+        + "visual_studio_live_share is target_sw=visual_studio-scoped only, no visual_studio_code-"
+        + "scoped row exists) -- consistent with passesTargetSwGate rejecting a target_sw-scoped CPE "
+        + "candidate whenever there's no registry match, regardless of what install_url says "
+        + "(item305/306); the 10 rows expected UNIDENTIFIED (Prettier - Code formatter, Honey, "
+        + "Momentum, all 5 JetBrains-plugin rows, Firefox Multi-Account Containers, Tab Session "
+        + "Manager) all correctly come back UNIDENTIFIED. The 6 negative-control rows score "
+        + "5/6=0.8333 -- Visual Studio Code/Google Chrome/Mozilla Firefox/IntelliJ IDEA/Microsoft "
+        + "Visual Studio all resolve correctly to their own platform CPE, but 'Visual Studio Code "
+        + "Server' (real product is Coder's unrelated code-server) incorrectly resolves to "
+        + "microsoft:visual_studio_code:4.9.3 (a version that doesn't even exist for that CPE) "
+        + "instead of coder:code-server -- filed as backlog item 319, not fixed here (out of this "
+        + "task's scope). Left disabled so it can never re-fire on a routine mvn test run -- see "
+        + "class javadoc.")
 class MarketplaceExtensionFixtureRecallTest {
 
     private static final Long REAL_USER_ID = 5L;
@@ -120,9 +124,10 @@ class MarketplaceExtensionFixtureRecallTest {
             for (CSVRecord record : parser) {
                 fixtureRowCount++;
                 String rowKey = key(record.get("product_name"), record.get("version"));
-                ExpectedRow previous = expectedByKey.put(rowKey,
-                        new ExpectedRow(record.get("expected_outcome"), record.get("expected_cpe_vendor"),
-                                record.get("expected_cpe_product")));
+                ExpectedRow row = new ExpectedRow(record.get("expected_outcome"), record.get("expected_cpe_vendor"),
+                        record.get("expected_cpe_product"));
+                validateExpectedRow(rowKey, row);
+                ExpectedRow previous = expectedByKey.put(rowKey, row);
                 if (previous != null) {
                     throw new IllegalStateException(
                             "Duplicate (product_name, version) key in " + FIXTURE_CSV + ": " + rowKey);
@@ -181,6 +186,30 @@ class MarketplaceExtensionFixtureRecallTest {
         assertEquals(0, missingExpected, "every job item must have a matching fixture row by (product_name, version)");
         assertEquals(fixtureRowCount, extensionTotal + controlTotal,
                 "every fixture row must be counted as exactly one of extension/control");
+    }
+
+    /** Ground-truth self-consistency guard (senior-reviewer REVISE on PR#224, round 2, item 4) --
+     *  this fixture's own ground truth has already had multiple authoring mistakes caught by later
+     *  review passes (Visual Studio Code Server, Prettier, Live Share), and {@link #matches}
+     *  compares expected_cpe_vendor/expected_cpe_product against the actual CPE's parts as plain
+     *  strings — a blank or nonsensical value there wouldn't throw, it would just silently mismatch
+     *  every row that legitimately resolves. Fail at parse time instead of letting that hide behind
+     *  a plausible-looking printed score. */
+    private static void validateExpectedRow(String rowKey, ExpectedRow row) {
+        if (!"IDENTIFIED_CPE".equals(row.outcome()) && !"UNIDENTIFIED".equals(row.outcome())) {
+            throw new IllegalStateException(
+                    "Row " + rowKey + " has an unrecognized expected_outcome: " + row.outcome());
+        }
+        boolean vendorBlank = row.cpeVendor() == null || row.cpeVendor().isBlank();
+        boolean productBlank = row.cpeProduct() == null || row.cpeProduct().isBlank();
+        if ("IDENTIFIED_CPE".equals(row.outcome()) && (vendorBlank || productBlank)) {
+            throw new IllegalStateException(
+                    "Row " + rowKey + " is IDENTIFIED_CPE but expected_cpe_vendor/expected_cpe_product is blank");
+        }
+        if ("UNIDENTIFIED".equals(row.outcome()) && (!vendorBlank || !productBlank)) {
+            throw new IllegalStateException(
+                    "Row " + rowKey + " is UNIDENTIFIED but expected_cpe_vendor/expected_cpe_product is non-blank");
+        }
     }
 
     /** For {@code UNIDENTIFIED} expectations, only presence/absence of a result matters. For
