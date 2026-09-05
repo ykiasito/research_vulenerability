@@ -1,6 +1,7 @@
 package com.vulncheck.app.service;
 
 import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
+import java.time.Duration;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -30,6 +31,19 @@ import org.springframework.stereotype.Component;
  * AdminController#cpeFullSync}) — both are the same underlying operation on the same NVD rate
  * limit and the same {@code cpe_dictionary} upserts, so only one may run at a time regardless of
  * which trigger started it.
+ *
+ * <p><b>Freshness gate</b> (closed-mode backlog item 330): before this class existed, {@code
+ * CPE_FULL_SYNC_ON_STARTUP=true} meant an unconditional ~103-minute, ~692MB full re-sync on
+ * <em>every</em> restart, with no way to tell "already synced, this is just a redeploy" apart from
+ * "never synced, this environment actually needs it" — the mirror had no DB-side completion state
+ * at all until closed-mode backlog item 283 added {@link NvdCpeSyncService#isMirrorFresherThan}.
+ * {@link #run} now checks that first: if the mirror's last unfiltered sync (full or delta) is
+ * still within {@code app.cpe-full-sync-max-age-days}, the startup full sync is skipped entirely.
+ * This is sound specifically because the weekly delta chain ({@link
+ * NvdCpeSyncService#syncDeltaAndRelease}, {@code CpeDictionaryScheduledResync}) is structurally
+ * gap-free once it's running — a fresh mirror by that measure really has no missing coverage to
+ * make up for, so re-running the full sync on top of it would only reproduce work the delta chain
+ * already did.
  */
 @Component
 @RequiredArgsConstructor
@@ -41,9 +55,17 @@ public class CpeDictionaryBootstrapSync implements ApplicationRunner {
     @Value("${app.cpe-full-sync-on-startup:false}")
     private boolean enabled;
 
+    /** 0 or negative disables the freshness gate entirely (every enabled startup always runs the
+     *  full sync) — same escape-hatch convention as {@code RegistryMirrorSyncService#freshnessDays}. */
+    @Value("${app.cpe-full-sync-max-age-days:30}")
+    private int maxAgeDays;
+
     @Override
     public void run(ApplicationArguments args) {
         if (!enabled) {
+            return;
+        }
+        if (shouldSkipStartupFullSync()) {
             return;
         }
         if (!nvdCpeSyncService.tryBeginFullSync()) {
@@ -63,6 +85,46 @@ public class CpeDictionaryBootstrapSync implements ApplicationRunner {
     }
 
     /**
+     * The freshness gate itself (closed-mode backlog item 330) — deliberately evaluated here,
+     * <em>before</em> {@link NvdCpeSyncService#tryBeginFullSync} is ever called: no sync slot is
+     * held yet at this point, so this method has nothing to release on failure, unlike {@link
+     * #run}'s own catch block or {@code CpeDictionaryScheduledResync#runScheduledResync}'s
+     * equivalent {@link NvdCpeSyncService#hasCompletedInitialSync()} read (which runs
+     * <em>after</em> that scheduler already won its slot, and therefore must release it on
+     * failure instead of merely skipping).
+     *
+     * <p>Fails closed (skips the full sync) on any read failure — the opposite choice from
+     * fail-open — because a read this early in the app lifecycle can plausibly fail simply
+     * because postgres itself is still coming up; fail-open would force a ~103-minute full sync on
+     * every one of those slow-DB-startup boots, defeating the entire point of this gate. Skipping
+     * is safe operationally either way: {@code /admin/cpe-dictionary/sync-all} remains available,
+     * unconditionally, to force a full sync by hand.
+     */
+    private boolean shouldSkipStartupFullSync() {
+        if (maxAgeDays <= 0) {
+            return false;
+        }
+        try {
+            boolean fresh = nvdCpeSyncService.isMirrorFresherThan(Duration.ofDays(maxAgeDays));
+            if (fresh) {
+                log.info("CPE dictionary mirror's last unfiltered sync (cpe_dictionary_sync_state."
+                        + "last_synced_at) is within the configured {}-day freshness window "
+                        + "(app.cpe-full-sync-max-age-days) — skipping the startup full sync. Use "
+                        + "/admin/cpe-dictionary/sync-all to force one.", maxAgeDays);
+            } else {
+                log.warn("CPE dictionary mirror has never completed an unfiltered sync, or its last one is "
+                        + "older than the configured {}-day freshness window (app.cpe-full-sync-max-age-days) "
+                        + "— running the startup full sync.", maxAgeDays);
+            }
+            return fresh;
+        } catch (Throwable t) {
+            log.warn("Could not determine CPE dictionary mirror freshness — skipping the startup full sync "
+                    + "(use /admin/cpe-dictionary/sync-all to force one)", t);
+            return true;
+        }
+    }
+
+    /**
      * Spawns and starts the worker thread that runs the actual sync. Package-private (rather than
      * inlined in {@link #run}) so a unit test can force this step to fail (e.g. via a Mockito spy)
      * without needing a real thread-creation failure (native-thread exhaustion, a SecurityManager
@@ -70,8 +132,9 @@ public class CpeDictionaryBootstrapSync implements ApplicationRunner {
      */
     void startWorker() {
         Thread worker = new Thread(() -> {
-            log.warn("Full NVD CPE dictionary sync starting — this takes hours; set "
-                    + "CPE_FULL_SYNC_ON_STARTUP=false once it has completed so it doesn't re-run on every boot");
+            log.warn("Full NVD CPE dictionary sync starting — this takes hours; safe to leave "
+                    + "CPE_FULL_SYNC_ON_STARTUP=true across future restarts (app.cpe-full-sync-max-age-days's "
+                    + "freshness gate will skip this again on the next boot once the mirror is up to date)");
             long startedAt = System.currentTimeMillis();
             try {
                 SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
