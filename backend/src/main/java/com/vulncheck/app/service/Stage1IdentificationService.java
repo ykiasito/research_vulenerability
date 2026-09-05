@@ -160,6 +160,38 @@ public class Stage1IdentificationService {
             "nuget", ".net");
 
     /**
+     * Backlog item 303 (task B, item 297 senior-reviewer design): {@code install_url} marketplace
+     * hostname -&gt; CPE {@code target_sw} value. Unlike {@link #ECOSYSTEM_TO_TARGET_SW} (derived
+     * from a registry match), this is derived straight from the CSV's own {@code install_url}
+     * column — the only signal available at all for the marketplace-extension ecosystems (VS
+     * Code/Chrome/JetBrains/Firefox extensions), which have no package-registry ecosystem to route
+     * through in the first place. Item 297's tester findings: {@code cpe_dictionary} already has
+     * 4,065 VS Code extension / 342 Chrome extension / 286 JetBrains plugin rows, structurally
+     * unreachable under the pre-existing {@link #passesTargetSwGate} design because it hard-rejects
+     * any target_sw-scoped candidate whenever there's no registry match at all.
+     *
+     * <p>Matched by trailing-label host suffix (see {@link #declaredTargetSwFromInstallUrl}), never
+     * substring — a naive substring check would be fooled by a spoofed URL like {@code
+     * https://evil.com/marketplace.visualstudio.com/...}, where the real marketplace hostname lives
+     * in the PATH of an unrelated host, not its actual authority.
+     *
+     * <p>{@code chromewebstore.google.com} is the current (2026) Chrome Web Store hostname; the
+     * older {@code chrome.google.com/webstore} URL shape needs a path-prefix check too (handled
+     * separately in {@link #declaredTargetSwFromInstallUrl}) since {@code chrome.google.com} alone
+     * isn't specific enough to a webstore listing to declare a platform from the host alone.
+     */
+    private static final java.util.Map<String, String> INSTALL_URL_HOST_TO_TARGET_SW = java.util.Map.of(
+            "marketplace.visualstudio.com", "visual_studio_code",
+            "chromewebstore.google.com", "chrome",
+            "plugins.jetbrains.com", "jetbrains",
+            "addons.mozilla.org", "firefox");
+
+    /** Legacy Chrome Web Store host — see {@link #INSTALL_URL_HOST_TO_TARGET_SW}'s own javadoc for
+     *  why this needs a path-prefix check too, rather than a bare host-suffix map entry. */
+    private static final String CHROME_WEBSTORE_LEGACY_HOST = "chrome.google.com";
+    private static final String CHROME_WEBSTORE_LEGACY_PATH_PREFIX = "/webstore";
+
+    /**
      * REVISE item 2 (senior review, job 37 root-cause): {@code target_sw} values that scope a CPE to
      * an operating system/CPU architecture rather than to being a *component of some other software
      * platform* — the actual thing {@link #passesTargetSwGate} exists to reject. {@code
@@ -229,7 +261,7 @@ public class Stage1IdentificationService {
         Optional<String> registryEcosystem = registryResolution.match().map(RegistryMatch::ecosystem);
         Optional<String> registryPackageName = registryResolution.match().map(RegistryMatch::packageName);
         CpeCandidateResult cpeCandidateResult = resolveCpeCandidates(item.getVendor(), item.getProductName(), userId,
-                registryEcosystem, registryPackageName, localCpeFuture.join(), item.getVersion());
+                registryEcosystem, registryPackageName, localCpeFuture.join(), item.getVersion(), item.getInstallUrl());
 
         Optional<IdentifiedProduct> result = (registryResolution.match().isEmpty() && cpeCandidateResult.candidates().isEmpty())
                 ? aiArbitration.tryTier3(item, userId, this::fuzzyMatchCpe, this::resolveCandidates)
@@ -447,7 +479,10 @@ public class Stage1IdentificationService {
             // itself is being discarded as untrustworthy, that ecosystem context goes with it, so the
             // CPE must be re-checked against a bare no-registry-context gate before it's allowed to
             // survive on its own.
-            if (chosenCpe != null && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), ""))) {
+            // installUrl deliberately omitted (null) here too — this re-check exists purely to
+            // strip the now-distrusted registry match's own ecosystem context (Round-5 fix's own
+            // scope), not to touch any other declared-platform source.
+            if (chosenCpe != null && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), "", null))) {
                 log.info("Dropping CPE {} for item {} — it only passed the target_sw gate via the "
                         + "now-distrusted registry match's ecosystem context, so it cannot stand on its own",
                         chosenCpe.getCpeString(), item.getId());
@@ -568,7 +603,7 @@ public class Stage1IdentificationService {
             ResearchJobItem item, Long userId, String vendorForCpeRescue, String productNameForCpeRescue) {
         CpeCandidateResult rescueResult =
                 fuzzyMatchCpe(vendorForCpeRescue, productNameForCpeRescue, userId, Optional.empty(), Optional.empty(),
-                        item.getVersion());
+                        item.getVersion(), item.getInstallUrl());
         List<CpeDictionaryEntry> rescueCandidates = rescueResult.candidates();
         if (rescueCandidates.isEmpty()) {
             return null;
@@ -671,7 +706,9 @@ public class Stage1IdentificationService {
      */
     private CpeDictionaryEntry selectFallbackCpeCandidateAfterRegistryDistrust(
             CpeDictionaryEntry discardedCpe, List<CpeDictionaryEntry> cpeCandidates) {
-        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "");
+        // installUrl deliberately omitted (null) — same "bare (no-ecosystem-context) gate" scope as
+        // this method's own javadoc, item 176's fix, unrelated to item 303's install_url signal.
+        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "", null);
         for (CpeDictionaryEntry candidate : cpeCandidates) {
             if (candidate == discardedCpe) {
                 continue;
@@ -798,9 +835,10 @@ public class Stage1IdentificationService {
      * ranking preference — likewise empty whenever there's no registry match to draw one from.
      */
     private CpeCandidateResult fuzzyMatchCpe(String vendor, String productName, Long userId,
-            Optional<String> registryEcosystem, Optional<String> registryPackageName, String itemVersion) {
+            Optional<String> registryEcosystem, Optional<String> registryPackageName, String itemVersion,
+            String installUrl) {
         return resolveCpeCandidates(vendor, productName, userId, registryEcosystem, registryPackageName,
-                localCpeLookup(vendor, productName, itemVersion), itemVersion);
+                localCpeLookup(vendor, productName, itemVersion), itemVersion, installUrl);
     }
 
     /** Just the local-dictionary half of {@link #fuzzyMatchCpe} — DB-only, no network, literal
@@ -1654,7 +1692,7 @@ public class Stage1IdentificationService {
      */
     private CpeCandidateResult resolveCpeCandidates(String vendor, String productName, Long userId,
             Optional<String> registryEcosystem, Optional<String> registryPackageName,
-            LocalCpeMatches localMatches, String itemVersion) {
+            LocalCpeMatches localMatches, String itemVersion, String installUrl) {
         // REVISE item 1: a registry-sourced item's own resolved package name — reduced to its one
         // meaningful segment the same way Fix 5's cpeCorroboratesRegistryPackage already does for a
         // Maven groupId:artifactId coordinate or a Go module path — is a strictly more precise exact
@@ -1662,7 +1700,9 @@ public class Stage1IdentificationService {
         // name rather than whatever free text the inventory happened to record. Falls back to
         // productName whenever there's no registry match to draw on.
         String exactMatchQuery = registryPackageName.map(this::lastMeaningfulPackageSegment).orElse(productName);
-        TargetSwContext targetSwContext = TargetSwContext.from(registryEcosystem, exactMatchQuery);
+        // Item 303 (task B): installUrl feeds TargetSwContext's own second declared-platform source
+        // — see that record's javadoc for how it combines with registryEcosystem.
+        TargetSwContext targetSwContext = TargetSwContext.from(registryEcosystem, exactMatchQuery, installUrl);
 
         List<CpeDictionaryEntry> gatedLocalMatches = rankAndGate(vendor, localMatches.candidates(), targetSwContext, itemVersion);
         if (!gatedLocalMatches.isEmpty()) {
@@ -1773,7 +1813,7 @@ public class Stage1IdentificationService {
      *  that would have rejected the other 2 finalists (and kept {@code hyper}) ever got to run. */
     private List<CpeDictionaryEntry> rankAndGate(
             String vendor, List<CpeDictionaryEntry> candidates, TargetSwContext ctx, String itemVersion) {
-        return rankCpeCandidates(vendor, ctx.exactMatchQuery(), candidates, ctx.mappedTargetSw(), CPE_CANDIDATE_POOL, itemVersion)
+        return rankCpeCandidates(vendor, ctx.exactMatchQuery(), candidates, ctx.declaredTargetSw(), CPE_CANDIDATE_POOL, itemVersion)
                 .stream()
                 .filter(entry -> passesTargetSwGate(entry, ctx))
                 .limit(CPE_CANDIDATE_LIMIT)
@@ -1782,7 +1822,8 @@ public class Stage1IdentificationService {
 
     /**
      * Gating/ranking context for target_sw-aware CPE matching (REVISE items 1/3, senior review
-     * 2026-08-26 / job 36 root-cause). {@code hasRegistryMatch} distinguishes two cases {@link
+     * 2026-08-26 / job 36 root-cause; generalized by backlog item 303/task B, item 297 senior
+     * -reviewer design). {@code hasRegistryMatch} distinguishes two cases {@link
      * #passesTargetSwGate} treats differently: "no registry match at all" (desktop software with no
      * ecosystem to map, e.g. Slack/Atom/OWASP ZAP/Camtasia — the stricter "reject anything entirely
      * platform-scoped" gate) versus "a registry matched, but its ecosystem has no target_sw mapping"
@@ -1790,17 +1831,94 @@ public class Stage1IdentificationService {
      * own javadoc and REVISE item 8, which leaves hex's "tesla" alone entirely). {@code
      * mappedTargetSw} is therefore only ever present when there IS a registry match AND its
      * ecosystem is one of the eight mapped ones.
+     *
+     * <p>Item 303 (task B): {@code installUrlDeclaredTargetSw} is a second, independent source for
+     * the exact same kind of platform declaration — the item's own {@code install_url} column,
+     * resolved via {@link #INSTALL_URL_HOST_TO_TARGET_SW} (see {@link
+     * #declaredTargetSwFromInstallUrl}) — for items with no registry ecosystem to draw a mapping
+     * from at all (the marketplace-extension case {@link #ECOSYSTEM_TO_TARGET_SW} was never able to
+     * cover). {@link #declaredTargetSw} is the single value both {@link #passesTargetSwGate} and
+     * the ranking preference ({@link #targetSwMatchesEcosystem}) actually consult; the two
+     * underlying fields are kept separate rather than merged into one at construction time so {@code
+     * hasRegistryMatch} can still distinguish the hex/maven "registry matched but no mapping" case
+     * from "no registry match at all" (see {@link #passesTargetSwGate}'s own logic for exactly where
+     * that distinction still matters).
      */
-    private record TargetSwContext(boolean hasRegistryMatch, Optional<String> mappedTargetSw, String exactMatchQuery) {
-        static TargetSwContext from(Optional<String> registryEcosystem, String exactMatchQuery) {
+    private record TargetSwContext(boolean hasRegistryMatch, Optional<String> mappedTargetSw, String exactMatchQuery,
+            Optional<String> installUrlDeclaredTargetSw) {
+        static TargetSwContext from(Optional<String> registryEcosystem, String exactMatchQuery, String installUrl) {
+            Optional<String> installUrlDeclaredTargetSw = declaredTargetSwFromInstallUrl(installUrl);
             return registryEcosystem.isEmpty()
-                    ? new TargetSwContext(false, Optional.empty(), exactMatchQuery)
-                    : new TargetSwContext(true, mapEcosystemToTargetSw(registryEcosystem.get()), exactMatchQuery);
+                    ? new TargetSwContext(false, Optional.empty(), exactMatchQuery, installUrlDeclaredTargetSw)
+                    : new TargetSwContext(true, mapEcosystemToTargetSw(registryEcosystem.get()), exactMatchQuery,
+                            installUrlDeclaredTargetSw);
+        }
+
+        /** Item 303: the one declared-platform value gating/ranking actually consult, regardless of
+         *  which of the two independent sources produced it. {@code install_url} wins when both
+         *  happen to be present — a real registry match for the item's own package AND an
+         *  install_url marketplace declaration on the same row isn't a realistic combination in
+         *  practice, but install_url is the more direct, item-specific signal of the two, so this
+         *  keeps the priority explicit rather than accidental. */
+        Optional<String> declaredTargetSw() {
+            return installUrlDeclaredTargetSw.isPresent() ? installUrlDeclaredTargetSw : mappedTargetSw;
         }
     }
 
     private static Optional<String> mapEcosystemToTargetSw(String ecosystem) {
         return Optional.ofNullable(ecosystem).map(ECOSYSTEM_TO_TARGET_SW::get);
+    }
+
+    /**
+     * Backlog item 303 (task B): resolves {@code installUrl}'s host to a declared {@code target_sw}
+     * value via {@link #INSTALL_URL_HOST_TO_TARGET_SW}, matching by trailing-label host suffix
+     * (never substring — see that map's own javadoc for why) so a spoofed URL whose path merely
+     * contains a marketplace hostname can't be mistaken for the real thing. Returns empty for a
+     * blank/unparseable {@code installUrl}, a host with no mapping, or (deliberately) a
+     * scheme-relative/host-less URL — {@link java.net.URI#getHost()} returns {@code null} for any
+     * URL without an authority component, and this treats that exactly like "no install_url at all"
+     * rather than trying to guess a host out of a bare path.
+     */
+    private static Optional<String> declaredTargetSwFromInstallUrl(String installUrl) {
+        if (installUrl == null || installUrl.isBlank()) {
+            return Optional.empty();
+        }
+        java.net.URI uri;
+        try {
+            uri = new java.net.URI(installUrl.strip());
+        } catch (java.net.URISyntaxException e) {
+            return Optional.empty();
+        }
+        String host = uri.getHost();
+        if (host == null) {
+            return Optional.empty();
+        }
+        String normalizedHost = host.toLowerCase(java.util.Locale.ROOT);
+        for (java.util.Map.Entry<String, String> entry : INSTALL_URL_HOST_TO_TARGET_SW.entrySet()) {
+            if (isHostOrTrailingLabelMatch(normalizedHost, entry.getKey())) {
+                return Optional.of(entry.getValue());
+            }
+        }
+        // Legacy Chrome Web Store shape (chrome.google.com/webstore/...) — chrome.google.com alone
+        // isn't specific enough to a webstore listing to declare a platform from the host alone (it
+        // hosts plenty of non-extension pages too), so this also requires the legacy path prefix.
+        if (isHostOrTrailingLabelMatch(normalizedHost, CHROME_WEBSTORE_LEGACY_HOST)) {
+            String path = uri.getPath();
+            if (path != null && path.startsWith(CHROME_WEBSTORE_LEGACY_PATH_PREFIX)) {
+                return Optional.of("chrome");
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** Whether {@code host} equals {@code candidateSuffix}, or ends with it as a whole trailing
+     *  label (i.e. immediately preceded by a {@code .}) — never a bare substring match. This is what
+     *  keeps {@code evil.com} from matching {@code marketplace.visualstudio.com} (no relation at
+     *  all) while still matching a real subdomain like {@code www.marketplace.visualstudio.com}, and
+     *  what keeps a spoofed host like {@code marketplace.visualstudio.com.evil.com} from matching
+     *  either (it ends with {@code .evil.com}, not {@code .marketplace.visualstudio.com}). */
+    private static boolean isHostOrTrailingLabelMatch(String host, String candidateSuffix) {
+        return host.equals(candidateSuffix) || host.endsWith("." + candidateSuffix);
     }
 
     /**
@@ -1813,6 +1931,16 @@ public class Stage1IdentificationService {
      * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#findFuzzyMatches} ever get one
      * populated at all (see {@link CpeDictionaryEntry#getTargetSwValues}) — means there's no signal
      * to gate on at all, so it always passes rather than being treated as evidence of anything.
+     *
+     * <p>Item 303 (task B): the previous unconditional "no registry match at all -&gt; reject" rule
+     * is generalized to "no <em>declared platform</em> at all -&gt; reject" — {@link
+     * TargetSwContext#declaredTargetSw} now also covers an {@code install_url}-derived declaration,
+     * so an item with no registry ecosystem but a recognized marketplace {@code install_url} (e.g.
+     * a VS Code extension) can still pass this gate against a target_sw-scoped candidate, exactly
+     * the same way a registry-sourced item always could. The hex/maven "registry matched but its
+     * ecosystem has no mapping" default-allow below is untouched by this — it's still keyed off
+     * {@code hasRegistryMatch} specifically, not off {@code declaredTargetSw}, so it doesn't flip to
+     * a reject just because neither source happens to produce a mapped value.
      */
     private boolean passesTargetSwGate(CpeDictionaryEntry entry, TargetSwContext ctx) {
         java.util.Set<String> targetSwValues = entry.getTargetSwValues();
@@ -1832,18 +1960,19 @@ public class Stage1IdentificationService {
         if (isWildcardOrNotApplicableOrNonScoping) {
             return true;
         }
-        if (!ctx.hasRegistryMatch()) {
-            // No registry match at all, so no ecosystem of the item's own to compare against — a
-            // CPE scoped only to being a component of *some* other platform can never be this
-            // standalone item's identity.
+        if (ctx.declaredTargetSw().isEmpty() && !ctx.hasRegistryMatch()) {
+            // No declared platform at all — neither a registry ecosystem mapping nor an install_url
+            // marketplace declaration — so no ecosystem/platform of the item's own to compare
+            // against. A CPE scoped only to being a component of *some* other platform can never be
+            // this standalone item's identity.
             return false;
         }
-        if (ctx.mappedTargetSw().isPresent()) {
-            return targetSwValues.contains(ctx.mappedTargetSw().get());
+        if (ctx.declaredTargetSw().isPresent()) {
+            return targetSwValues.contains(ctx.declaredTargetSw().get());
         }
-        // A registry match exists but its ecosystem has no target_sw mapping (hex/maven) reaches
-        // here — default-allow (see ECOSYSTEM_TO_TARGET_SW's own javadoc for why guessing a mapping
-        // for those two would be worse than having none).
+        // A registry match exists but its ecosystem has no target_sw mapping (hex/maven), and no
+        // install_url declaration either, reaches here — default-allow (see ECOSYSTEM_TO_TARGET_SW's
+        // own javadoc for why guessing a mapping for those two would be worse than having none).
         return true;
     }
 
