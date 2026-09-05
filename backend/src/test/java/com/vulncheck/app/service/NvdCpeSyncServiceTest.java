@@ -175,6 +175,55 @@ class NvdCpeSyncServiceTest {
         syncServer.verify();
     }
 
+    // --- closed-mode backlog item 330 (B): a missing/contradictory totalResults must never be
+    // recorded as a clean finish -----------------------------------------------------------------
+
+    @Test
+    void syncReportsIncompleteWhenTotalResultsIsMissingButProductsIsNonEmpty() {
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"products\":[{\"cpe\":{\"cpeName\":"
+                                + "\"cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*\",\"titles\":[]}}]}",
+                        MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isFalse();
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+        syncServer.verify();
+    }
+
+    @Test
+    void syncReportsIncompleteWhenTotalResultsIsZeroButProductsIsNonEmpty() {
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"totalResults\":0,\"products\":[{\"cpe\":{\"cpeName\":"
+                                + "\"cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*\",\"titles\":[]}}]}",
+                        MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isFalse();
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+        syncServer.verify();
+    }
+
+    @Test
+    void syncAllAndReleaseRecordsInitialSyncCompletedWhenTotalResultsAndProductsAreBothLegitimatelyZero() {
+        // Regression guard: a legitimate no-change delta/full page (totalResults:0, products:[])
+        // must keep reporting a clean finish -- the item 330 (B) contradiction check above must
+        // only fire when totalResults is missing/non-numeric or self-contradictory, never for this
+        // ordinary "nothing to sync" case.
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isTrue();
+        verify(cpeDictionarySyncStateRepository).save(any());
+        syncServer.verify();
+    }
+
     // --- closed-mode backlog item 283: delta sync -------------------------------------------
 
     @Test

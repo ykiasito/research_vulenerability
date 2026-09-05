@@ -285,8 +285,33 @@ public class NvdCpeSyncService {
                 return new SyncOutcome(totalUpserted, false);
             }
 
-            totalResults = page.path("totalResults").asInt(0);
+            JsonNode totalResultsNode = page.path("totalResults");
             JsonNode products = page.path("products");
+            // Closed-mode backlog item 330 (先行修正 B): a page missing a numeric totalResults
+            // (or carrying something non-numeric) can't be trusted to say whether pagination is
+            // actually finished -- without this check, page.path("totalResults").asInt(0)'s silent
+            // default of 0 would make `startIndex < totalResults` false immediately, misreporting
+            // this as a clean, fully-exhausted finish (and, for an unfiltered sync, recording
+            // cpe_dictionary_sync_state.initial_sync_completed=true off whatever partial dictionary
+            // had synced so far). Treated the same as fetchPage() returning null: an early abort.
+            if (totalResultsNode.isMissingNode() || !totalResultsNode.canConvertToInt()) {
+                log.error("NVD CPE API page at startIndex={} is missing a numeric totalResults -- "
+                        + "treating as a failed fetch (keyword={})", startIndex, LogSanitizer.sanitize(keyword));
+                return new SyncOutcome(totalUpserted, false);
+            }
+            totalResults = totalResultsNode.asInt();
+            // Self-contradictory page: NVD reports zero results overall, yet this very page still
+            // carries products. Left unchecked, `startIndex < totalResults` (0 < 0) would be false
+            // right away, again misreporting a clean finish off a page that plainly still had data.
+            // Deliberately NOT "totalResults decreased from the previous page" -- NVD's own
+            // dictionary can legitimately shrink or grow mid-sync over a ~103-minute run, so that
+            // alone is not a sign of a bad page.
+            if (totalResults == 0 && products.size() > 0) {
+                log.error("NVD CPE API page at startIndex={} reported totalResults=0 but returned {} "
+                        + "products -- treating as a failed fetch (keyword={})", startIndex, products.size(),
+                        LogSanitizer.sanitize(keyword));
+                return new SyncOutcome(totalUpserted, false);
+            }
 
             // Batched rather than a statement per row: a full sync is ~1.8M rows, where per-row
             // round trips dominate the runtime far more than the NVD transfer itself does.
