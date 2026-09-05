@@ -57,7 +57,8 @@ public class Stage1AiArbitration {
     @FunctionalInterface
     public interface CpeCandidateLookup {
         Stage1IdentificationService.CpeCandidateResult fuzzyMatchCpe(String vendor, String productName, Long userId,
-                Optional<String> registryEcosystem, Optional<String> registryPackageName, String itemVersion);
+                Optional<String> registryEcosystem, Optional<String> registryPackageName, String itemVersion,
+                String installUrl);
     }
 
     /** {@code resolveCandidates}, handed to {@link #tryTier3} the same way as {@link
@@ -126,7 +127,7 @@ public class Stage1AiArbitration {
         Stage1IdentificationService.CpeCandidateResult requeryCpe = cpeCandidateLookup.fuzzyMatchCpe(
                 resolvedVendor, resolvedProductName, userId,
                 requeryRegistry.match().map(RegistryMatch::ecosystem),
-                requeryRegistry.match().map(RegistryMatch::packageName), item.getVersion());
+                requeryRegistry.match().map(RegistryMatch::packageName), item.getVersion(), item.getInstallUrl());
 
         if (requeryRegistry.match().isEmpty() && requeryCpe.candidates().isEmpty()) {
             // Tier3 learned the real name, but re-querying Tier1 with it still found nothing
