@@ -1158,6 +1158,13 @@ public class Stage1IdentificationService {
      * the {@link java.util.Comparator} on every one of the O(n log n) comparisons the way the
      * pre-existing keys always were. K1 in particular re-tokenizes text, so leaving it comparator-side
      * would have made the existing re-normalization cost newly visible at this candidate-pool size.
+     * {@link #isDerivedFromSiblingCandidate}'s own O(n²) pairwise scan (REVISE, senior review, PR
+     * #215) is held to this exact same "computed exactly once per candidate" invariant even though it
+     * inherently needs every candidate's product-slug tokens, not just its own: {@code
+     * rankCpeCandidates} itself tokenizes each candidate's product slug exactly once into {@code
+     * poolTokens} *before* the pairwise scan runs, so the O(n²) part of that method's own cost is pure
+     * list lookups and token-list comparisons, never re-tokenization — see that method's own javadoc
+     * for the measured 298μs-vs-27μs-per-call gap this precomputation closes.
      */
     private List<CpeDictionaryEntry> rankCpeCandidates(String vendor, String exactMatchQuery,
             List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit, String itemVersion) {
@@ -1191,18 +1198,29 @@ public class Stage1IdentificationService {
 
         String normalizedVendor = normalizeForContainment(vendor);
         String normalizedExactMatchQuery = normalizeForContainment(exactMatchQuery);
-        java.util.Collection<CpeDictionaryEntry> pool = bestPerProduct.values();
-        List<RankedCandidate> ranked = pool.stream()
-                .map(entry -> new RankedCandidate(
-                        entry,
-                        exactProductSlugMatch(normalizedExactMatchQuery, entry),
-                        targetSwMatchesEcosystem(entry, mappedTargetSw),
-                        unexplainedQueryTokenCount(normalizedExactMatchQuery, entry),
-                        versionCoverageRank(entry, itemVersion),
-                        versionCoverageIsPlausible(entry, itemVersion),
-                        vendorAgrees(normalizedVendor, entry),
-                        isDerivedFromSiblingCandidate(entry, pool),
-                        catalogedRowCount(entry)))
+        // REVISE (senior review, PR #215, backlog item 89's own "computed exactly once per candidate"
+        // invariant): poolTokens is built here — once per candidate, not once per pairwise comparison
+        // — so isDerivedFromSiblingCandidate below never re-tokenizes anything; see that method's own
+        // javadoc for why this precomputation, not the pairwise scan itself, is what the invariant is
+        // actually about.
+        List<CpeDictionaryEntry> poolList = List.copyOf(bestPerProduct.values());
+        List<List<String>> poolTokens = poolList.stream()
+                .map(entry -> tokenize(normalizeForContainment(entry.getProduct())))
+                .toList();
+        List<RankedCandidate> ranked = java.util.stream.IntStream.range(0, poolList.size())
+                .mapToObj(i -> {
+                    CpeDictionaryEntry entry = poolList.get(i);
+                    return new RankedCandidate(
+                            entry,
+                            exactProductSlugMatch(normalizedExactMatchQuery, entry),
+                            targetSwMatchesEcosystem(entry, mappedTargetSw),
+                            unexplainedQueryTokenCount(normalizedExactMatchQuery, entry),
+                            versionCoverageRank(entry, itemVersion),
+                            versionCoverageIsPlausible(entry, itemVersion),
+                            vendorAgrees(normalizedVendor, entry),
+                            isDerivedFromSiblingCandidate(poolTokens.get(i), poolTokens, i),
+                            catalogedRowCount(entry));
+                })
                 .toList();
         // Stable sort: preserves the underlying trigram ranking within each group (RankedCandidate
         // is built directly off bestPerProduct.values()'s own already-ordered stream), so this only
@@ -1493,15 +1511,24 @@ public class Stage1IdentificationService {
      * parent-product/derived-product shape this backlog item is about, leaving every other tie
      * (including genuinely unrelated same-vendor products, and identical-slug pairs like RabbitMQ's
      * {@code pivotal_software}/{@code vmware} renaming) to whichever later key already decided them.
+     *
+     * <p>REVISE (senior review, PR #215): takes each candidate's own already-tokenized product slug
+     * ({@code ownTokens}) plus the whole pool's own precomputed token lists ({@code poolTokens},
+     * built once by {@link #rankCpeCandidates} before this method is ever called) and this
+     * candidate's own index into that list ({@code ownIndex}, used only to skip comparing a
+     * candidate against itself) rather than re-tokenizing every candidate's product slug on every one
+     * of the O(n²) pairwise comparisons this method's own scan requires — measured live (PR #215
+     * review): re-tokenizing per comparison cost ~298μs/call against a 40-candidate pool versus
+     * ~27μs/call precomputed, and the gap is quadratic in {@value #CPE_CANDIDATE_POOL} (a precision
+     * -tuning knob, not a constant this method can assume stays small). Index-based self-exclusion
+     * also removes the previous reference-identity ({@code other == entry}) dependency.
      */
-    private boolean isDerivedFromSiblingCandidate(CpeDictionaryEntry entry, java.util.Collection<CpeDictionaryEntry> pool) {
-        List<String> ownTokens = tokenize(normalizeForContainment(entry.getProduct()));
-        for (CpeDictionaryEntry other : pool) {
-            if (other == entry) {
+    private boolean isDerivedFromSiblingCandidate(List<String> ownTokens, List<List<String>> poolTokens, int ownIndex) {
+        for (int i = 0; i < poolTokens.size(); i++) {
+            if (i == ownIndex) {
                 continue;
             }
-            List<String> otherTokens = tokenize(normalizeForContainment(other.getProduct()));
-            if (isStrictPrefix(otherTokens, ownTokens)) {
+            if (isStrictPrefix(poolTokens.get(i), ownTokens)) {
                 return true;
             }
         }

@@ -74,7 +74,7 @@ class Backlog299CpeRankingGolden300RecallTest {
 
     @Test
     @Transactional
-    void measureCpeVendorProductAccuracyAfterHasScopingTargetSwVariantFix() throws Exception {
+    void measureCpeVendorProductAccuracyAfterDerivedSiblingRankingFix() throws Exception {
         ResearchJob job;
         try (InputStream csv = getClass().getClassLoader().getResourceAsStream("golden-300.csv")) {
             job = researchJobService.createJob(
