@@ -2274,6 +2274,107 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void chromeGoogleComLegacyPathLookalikeDoesNotDeclareAPlatform() {
+        // Senior-reviewer REVISE (PR#229, measured live): a bare startsWith("/webstore") check also
+        // matched an unrelated path like "/webstoreEVIL/x" or "/webstore-foo" -- neither is the real
+        // legacy chrome.google.com/webstore/... shape, so neither must declare chrome.
+        CpeDictionaryEntry chromeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:chrome:*:*", "foo_extension");
+        chromeExtension.setTitle("Foo Extension for Chrome 2.0");
+        chromeExtension.setTargetSwValues(java.util.Set.of("chrome"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(chromeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://chrome.google.com/webstoreEVIL/detail/foo-extension/abcdefghijklmnop");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlWithNoSchemeStillDeclaresThePlatform() {
+        // Senior-reviewer REVISE (PR#229): a non-engineer pasting an install_url without "https://"
+        // must not silently disable this whole feature -- jobs/new.html's own vulncheckGetUrlHost
+        // already tolerates the same scheme-less shape for this same install_url column.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_extension:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
+    void installUrlWithNoSchemeHostSpoofedInThePathStillDoesNotDeclareAPlatform() {
+        // Senior-reviewer REVISE (PR#229): the scheme-less tolerance above must not weaken the
+        // existing path-spoof resistance -- prepending "https://" to a scheme-less URL still leaves
+        // URI itself to do the real authority/path parsing, so the real marketplace hostname sitting
+        // in an unrelated host's path must still fail to declare a platform.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("evil.com/marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlDeclarationOverridesAnUnmappedRegistryEcosystemsDefaultAllow() {
+        // Senior-reviewer REVISE (PR#229): maven has no ECOSYSTEM_TO_TARGET_SW mapping, so without
+        // an install_url declaration this would reach passesTargetSwGate's hex/maven default-allow.
+        // But this item's own install_url declares "jetbrains" -- that declaration must take
+        // priority and be held to the same strict equality check as any other declared platform,
+        // rejecting a candidate scoped to an unrelated target_sw ("python" here) rather than
+        // falling through to the default-allow.
+        PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch(
+                        "maven", "somelib", "pkg:maven/some/somelib@1.0.0", new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "maven";
+            }
+        };
+        CpeDictionaryEntry pythonScopedSomelib = cpeEntry("cpe:2.3:a:somevendor:somelib:1.0.0:*:*:*:*:python:*:*", "somelib");
+        pythonScopedSomelib.setTargetSwValues(java.util.Set.of("python"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(pythonScopedSomelib));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("somelib");
+        item.setInstallUrl("https://plugins.jetbrains.com/plugin/1234-somelib");
+
+        Optional<IdentifiedProduct> result = service(List.of(mavenLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("maven");
+        assertThat(result.get().getCpe()).isNull();
+    }
+
+    @Test
     void versionCoverageTieBreakPrefersACandidateWhoseCatalogedVersionsCoverTheItemsVersion() {
         // Backlog item 15, P2 (senior review 2026-08-30); ratio value updated for backlog item 36
         // (senior review 2026-08-30, ratio-guard rewrite): two same-slug candidates tie on
