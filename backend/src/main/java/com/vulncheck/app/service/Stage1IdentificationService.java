@@ -1288,7 +1288,7 @@ public class Stage1IdentificationService {
      * very pool both covers the item's version (K2's COVERS(0)) and is a longer slug this candidate's
      * own slug is contained in. That is exactly "NVD cataloged the same real product twice, once under
      * an old short slug and once under a current long slug" ({@code oracle:virtualbox}, 8 rows, max
-     * cataloged major 3, versus {@code oracle:vm_virtualbox}, 270 rows, max cataloged major 7, for
+     * cataloged major 3, versus {@code oracle:vm_virtualbox}, 270 rows, max cataloged major 71, for
      * VirtualBox 7.0.14) — narrow enough that it can only ever fire for a genuine same-vendor
      * duplicate-cataloging pair, never for an ordinary exact-slug tie like Pillow's own regression test
      * ({@code exactProductSlugMatchOutranksATargetSwMatchingButDifferentlyNamedCandidate}), where
@@ -2181,13 +2181,87 @@ public class Stage1IdentificationService {
                         || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, true))
                 .toList();
         if (!strict.isEmpty()) {
-            return new ContainmentResult(strict, false);
+            return new ContainmentResult(
+                    rescuePoolRelativeSameVendorSupersetCandidates(normalizedQuery, candidates, strict), false);
         }
         List<CpeDictionaryEntry> relaxed = candidates.stream()
                 .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false, false)
                         || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, false))
                 .toList();
         return new ContainmentResult(relaxed, !relaxed.isEmpty());
+    }
+
+    /**
+     * Backlog item 345 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3): a
+     * pool-relative rescue applied only when the strict pass above already admitted at least one
+     * candidate — never a general relaxation of {@link #plausibleContainmentOnly}'s own admission
+     * gate, only a narrow recovery for a candidate whose strict-pass rejection is fully explained by
+     * a same-CPE-vendor sibling the strict pass already admitted under a superset slug.
+     *
+     * <p>Root cause (item 308's own tester findings): a single-token query like "VirtualBox" against
+     * a candidate whose product slug is itself multi-token ({@code oracle:vm_virtualbox}, tokens
+     * {@code ["vm", "virtualbox"]}) fails {@link #explainsQuery}'s Direction 1 ({@link #alignPrefix}
+     * anchors on the leading token "vm", not "virtualbox"), Direction 1's {@link
+     * #alignPrefixAtAnyBoundary} fallback (requires {@code queryTokens.size() >= 2}), and Direction 2
+     * ({@link java.util.Collections#indexOfSubList} needs the candidate's own token count to fit
+     * inside the query's, impossible once the candidate has more tokens than a single-token query) —
+     * so it never reaches {@link #rankCpeCandidates} at all, meaning item 308's own same-vendor
+     * -duplicate ranking fix ({@link #isOutrankedByCurrentCatalogedSameVendorDuplicate}) never gets a
+     * chance to run for it. {@code explainsQuery}/{@code alignPrefix}/{@code
+     * alignPrefixAtAnyBoundary}/{@code indexOfSubList} themselves are left untouched — this rescues
+     * the candidate into the pool {@code rankCpeCandidates} sees, rather than loosening any of those.
+     *
+     * <p>Anchored on the strict pass's own result, never a bare product-slug guess: a rejected
+     * candidate is rescued only if some strict-admitted candidate's own normalized product slug
+     * exactly equals {@code normalizedQuery} (the same "NVD really does catalogue this exact product
+     * under this exact slug" signal {@link #exactProductSlugMatch} uses elsewhere) AND (a) the
+     * rejected candidate shares that anchor's own CPE vendor, and (b) the anchor's own slug is
+     * contained in the rejected candidate's own (wider) slug — reusing {@link
+     * #isSlugContainedInOtherSlug} exactly as item 308's own {@link
+     * #isOutrankedByCurrentCatalogedSameVendorDuplicate} already does, just evaluated here at
+     * admission time instead of at ranking time. Both conditions are required together, same as that
+     * method: a same-vendor candidate with an unrelated slug must not be rescued merely because some
+     * exact-slug anchor happens to exist in the pool, and a superset-slug candidate under a different
+     * CPE vendor must not be rescued either.
+     *
+     * <p>Filters {@code candidates} (the original, still-trigram-ordered pool) by {@code strictMatch
+     * || rescued} rather than concatenating the strict and rescued lists — {@link #rankCpeCandidates}
+     * relies on the incoming list's own trigram order to break ties within each ranking key, so
+     * appending rescued candidates after strict ones would silently give every rescued candidate a
+     * worse trigram-order tie-break than every strict one, regardless of its real similarity score.
+     */
+    private List<CpeDictionaryEntry> rescuePoolRelativeSameVendorSupersetCandidates(
+            String normalizedQuery, List<CpeDictionaryEntry> candidates, List<CpeDictionaryEntry> strict) {
+        List<CpeDictionaryEntry> anchors = strict.stream()
+                .filter(entry -> exactProductSlugMatch(normalizedQuery, entry))
+                .toList();
+        if (anchors.isEmpty()) {
+            return strict;
+        }
+        java.util.Set<CpeDictionaryEntry> strictSet =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        strictSet.addAll(strict);
+        return candidates.stream()
+                .filter(entry -> strictSet.contains(entry) || isRescuableSameVendorSupersetOfAnAnchor(entry, anchors))
+                .toList();
+    }
+
+    /** Backlog item 345: whether {@code candidate} (already rejected by the strict pass) qualifies
+     *  for {@link #rescuePoolRelativeSameVendorSupersetCandidates}'s rescue against at least one of
+     *  {@code anchors} — see that method's own javadoc for the two conditions checked together. */
+    private boolean isRescuableSameVendorSupersetOfAnAnchor(CpeDictionaryEntry candidate, List<CpeDictionaryEntry> anchors) {
+        String candidateVendor = normalizeForContainment(cpeVendorOf(candidate));
+        String candidateSlug = normalizeForContainment(candidate.getProduct());
+        for (CpeDictionaryEntry anchor : anchors) {
+            String anchorVendor = normalizeForContainment(cpeVendorOf(anchor));
+            if (anchorVendor.isBlank() || !anchorVendor.equals(candidateVendor)) {
+                continue;
+            }
+            if (isSlugContainedInOtherSlug(normalizeForContainment(anchor.getProduct()), candidateSlug)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Backlog item 89 P2: outcome of {@link #plausibleContainmentOnly}. {@code usedRelaxedPass} is
