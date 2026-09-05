@@ -81,14 +81,22 @@ import org.springframework.transaction.annotation.Transactional;
  * IDENTIFIED_CPE} in {@code golden-300.csv} itself, and this subset fixture has now been updated to
  * match, moving Blender and Rufus from the 34-row control bucket into the 66-row target bucket,
  * hence 68 target / 32 control here). That bucket move invalidates the specific 64/66, 65/66 and
- * 3/34 figures above (Blender and Rufus are no longer control rows, so the "same 3 known
- * pre-existing false positives — Blender, Rufus, Ditto" description is also no longer accurate) and
- * they have NOT been re-measured against the corrected fixture. Until that re-measurement happens,
- * {@code targetIdentified} and {@code controlFalsePositive} below are checked with plain in-range
- * assertions (between 0 and their respective bucket total, inclusive) instead of pinned equality, so
- * this test does not assert an unverified exact number while still catching gross regressions (e.g.
- * a bucket total computed as negative or larger than the CSV, or a totally broken identification
- * path).
+ * 3/34 figures above as reported (Blender and Rufus are no longer control rows, so the "same 3
+ * known pre-existing false positives — Blender, Rufus, Ditto" description is also no longer
+ * accurate) — but it does not require re-running this test to get correct 68/32-denominator
+ * figures. {@code stage1IdentificationService.identify} is a pure function of an item's own input
+ * columns, which item 320 left untouched (only {@code expected_outcome}/{@code expected_cpe_vendor}/
+ * {@code expected_cpe_product} — the ground-truth columns this test only reads to sort rows into
+ * buckets — changed), so Blender and Rufus resolve to exactly the same identified/not-identified
+ * outcome in the target bucket as they did in the control bucket. In the 3/34 measurement, Blender
+ * and Rufus were two of the three named false positives, i.e. both were {@code identified=true}
+ * rows — so moving them into the target bucket turns those same two {@code identified=true}
+ * outcomes into two target-bucket hits: {@code targetIdentified} = 65 + Blender + Rufus = 67 out of
+ * the new 68 total, and {@code controlFalsePositive} = 3 - Blender - Rufus = 1 out of the new 32
+ * total (the one remaining false positive is Ditto, unaffected by item 320). {@code
+ * targetIdentified} and {@code controlFalsePositive} below are therefore checked with pinned
+ * equality against these exactly-derived values (67 and 1), not the in-range placeholder
+ * assertions an earlier revision of this test used before this derivation was worked out.
  *
  * <p>Disabled by default, same convention as every other real-dev-DB test in this package — run
  * once by hand (temporarily remove {@code @Disabled},
@@ -109,9 +117,10 @@ import org.springframework.transaction.annotation.Transactional;
         + "recall 65/66=98.48% (up from a confirmed 64/66 baseline with the fallback disabled -- Cisco "
         + "IOS XE newly identified via the existing part=o fallback, see class javadoc), control-row "
         + "false-positive rate unchanged at 3/34=8.82%. NOTE (2026-09-05 REVISE, item 320 ground-truth "
-        + "fix): those specific figures predate item 320's Blender/Rufus correction and this subset's "
-        + "68/32 bucket split -- not yet re-measured, see class javadoc. Left disabled so it can never "
-        + "re-fire on a routine mvn test run.")
+        + "fix): those specific figures predate item 320's Blender/Rufus correction; against this "
+        + "subset's corrected 68/32 bucket split the exactly-derived (not re-measured, see class "
+        + "javadoc) figures are recall 67/68=98.53%, control false-positive rate 1/32=3.13%. Left "
+        + "disabled so it can never re-fire on a routine mvn test run.")
 class VendorProductExactMatchFallbackGolden300Test {
 
     private static final Long REAL_USER_ID = 5L;
@@ -189,16 +198,20 @@ class VendorProductExactMatchFallbackGolden300Test {
         // targetTotal/controlTotal are pinned to the subset CSV's actual bucket sizes (68 IDENTIFIED_CPE
         // rows, 32 UNIDENTIFIED control rows, after item 320's 2026-09-05 Blender/Rufus ground-truth
         // correction moved those 2 rows from the control bucket into the target bucket -- see class
-        // javadoc). targetIdentified/controlFalsePositive are NOT re-pinned to specific figures here:
-        // the previously measured 65/66 recall and 3/34 false-positive rate (see class javadoc) were
-        // measured against the pre-correction fixture and have not been re-measured against the
-        // corrected one, so an exact-equality assertion would be a guess. In-range assertions still
-        // catch a broken identification path (e.g. everything suddenly unidentified, or counts
-        // computed outside their own bucket's possible range) without asserting an unverified number.
+        // javadoc). targetIdentified/controlFalsePositive below are NOT a fresh re-measurement -- they
+        // are an exact derivation from the same 2026-09-05 measurement recorded in the class javadoc
+        // (recall 65/66, control false-positive rate 3/34, with the 3 false positives individually
+        // named as Blender, Rufus and Ditto). Both Blender and Rufus were identified=true rows in that
+        // measurement (that's precisely what made them control-bucket false positives), and moving a
+        // row between buckets does not change stage1IdentificationService's per-row identification
+        // outcome for it, only which bucket counts it against. So the new figures follow arithmetically
+        // from the old ones without re-running anything: targetIdentified = 65 + Blender + Rufus = 67,
+        // controlFalsePositive = 3 - Blender - Rufus = 1 (the remaining false positive is Ditto,
+        // unaffected by item 320).
         assertThat(targetTotal).isEqualTo(68);
         assertThat(controlTotal).isEqualTo(32);
-        assertThat(targetIdentified).isBetween(0, targetTotal);
-        assertThat(controlFalsePositive).isBetween(0, controlTotal);
+        assertThat(targetIdentified).isEqualTo(67);
+        assertThat(controlFalsePositive).isEqualTo(1);
     }
 
     private static String key(String productName, String version) {
