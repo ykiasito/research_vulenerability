@@ -87,12 +87,15 @@ class AdminControllerTest {
     private NvdCveSyncService nvdCveSyncService;
     @Mock
     private NvdCveSyncStateRepository nvdCveSyncStateRepository;
+    @Mock
+    private CpeDictionarySyncStateRepository cpeDictionarySyncStateRepository;
 
     private AdminController newController() {
         return new AdminController(nvdCpeSyncService, userApiKeyService, userRepository, cveOrgSyncService,
                 siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository, ghsaSyncService,
                 ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService, osvSyncStateRepository,
-                osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService, nvdCveSyncStateRepository);
+                osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService, nvdCveSyncStateRepository,
+                cpeDictionarySyncStateRepository);
     }
 
     @Test
@@ -196,7 +199,7 @@ class AdminControllerTest {
                 cveOrgSyncService, siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository,
                 ghsaSyncService, ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService,
                 osvSyncStateRepository, osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService,
-                nvdCveSyncStateRepository);
+                nvdCveSyncStateRepository, cpeDictionarySyncStateRepository);
         Model model = new ExtendedModelMap();
 
         String view = controller.cpeFullSync(model);
@@ -420,6 +423,21 @@ class AdminControllerTest {
         String view = controller.nvdCveForm(model);
 
         assertThat(view).isEqualTo("admin/nvd-cve");
+        assertThat(model.getAttribute("syncState")).isSameAs(state);
+    }
+
+    /** Closed-mode backlog item 332: {@code GET /admin/cpe-dictionary} follows the same
+     *  syncState-exposure pattern as {@link #nvdCveFormExposesTheSyncStateToTheModel}. */
+    @Test
+    void formExposesTheCpeDictionarySyncStateToTheModel() {
+        com.vulncheck.app.entity.CpeDictionarySyncState state = new com.vulncheck.app.entity.CpeDictionarySyncState();
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.form(model);
+
+        assertThat(view).isEqualTo("admin/cpe-dictionary");
         assertThat(model.getAttribute("syncState")).isSameAs(state);
     }
 }

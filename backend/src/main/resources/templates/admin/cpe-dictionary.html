@@ -12,6 +12,15 @@
 
 <p th:if="${result}" th:text="${result}" style="color: green;"></p>
 
+<h2>同期状態</h2>
+<div th:if="${syncState}">
+    <p>初回同期完了: <span th:text="${syncState.initialSyncCompleted}"></span></p>
+    <p>直近の同期日時: <span th:text="${syncState.lastSyncedAt} ?: '未実施'"></span></p>
+</div>
+<div th:unless="${syncState}">
+    <p>同期状態が見つかりません。</p>
+</div>
+
 <h2>キーワード同期</h2>
 <form th:action="@{/admin/cpe-dictionary/sync}" method="post">
     <div>
