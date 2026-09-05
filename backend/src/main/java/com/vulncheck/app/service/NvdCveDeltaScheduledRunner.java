@@ -23,16 +23,16 @@ import org.springframework.stereotype.Component;
  * RegistryMirrorScheduledSync}.
  *
  * <p><b>Baseline-completed guard is checked here, before ever touching {@link
- * NvdCveSyncService#tryBeginRun}</b> — unlike {@link NvdCveBackfillScheduledRunner}, which lets a
- * post-completion tick fall through into the shared run guard because {@link
- * NvdCveSyncService#runBackfillTickAndRelease} itself returns near-instantly once the baseline is
- * done. Delta sync is the mirror image: it is meaningless (and {@link
+ * NvdCveSyncService#tryBeginRun}</b> — same shape as {@link NvdCveBackfillScheduledRunner}, just
+ * the mirror-image condition: delta sync is meaningless (and {@link
  * NvdCveSyncService#runDeltaTickAndRelease} already no-ops) *before* the baseline completes, which
  * for a fresh mirror can be the common case for several days straight (§4-2-4 estimates ~4-5 daily
- * backfill runs). Checking {@code nvd_cve_sync_state.baseline_completed} directly here means this
- * scheduler never acquires the guard it shares with {@link NvdCveBackfillScheduledRunner} during
- * that whole window, so an in-progress backfill tick can never lose a {@link
- * NvdCveSyncService#tryBeginRun} race against a delta tick that would just no-op anyway.
+ * backfill runs), whereas {@link NvdCveBackfillScheduledRunner} checks the same flag to stop
+ * *after* the baseline is done. Checking {@code nvd_cve_sync_state.baseline_completed} directly
+ * here means this scheduler never acquires the guard it shares with {@link
+ * NvdCveBackfillScheduledRunner} during that whole window, so an in-progress backfill tick can
+ * never lose a {@link NvdCveSyncService#tryBeginRun} race against a delta tick that would just
+ * no-op anyway.
  *
  * <p>Same worker-thread/guard-release shape as {@link NvdCveBackfillScheduledRunner}: the actual
  * sync runs on its own daemon thread, not the shared {@code @Scheduled} pool thread, and {@link
