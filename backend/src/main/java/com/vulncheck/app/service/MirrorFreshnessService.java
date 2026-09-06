@@ -62,15 +62,20 @@ import org.springframework.stereotype.Service;
  * surface was already admin-only.
  *
  * <p><b>{@link #staleMirrorWarnings()}'s result is cached for {@link #CACHE_TTL_MILLIS}</b> (senior
- * review on PR #274, round 2): {@code jobs/detail.html} auto-refreshes every 5 seconds
- * while a job is running (see its {@code http-equiv="refresh"}), and {@link
- * RegistryPackageMirrorRepository#maxLastSyncedAt} runs an unindexed {@code MAX(last_synced_at)}
- * over the whole {@code registry_package_mirror} table on every call — adding an index is exactly
- * the kind of schema change the closed-mode architecture gate forbids on this branch (see this
- * class's own CVE.org note above), so a cache is the only closed-mode-legal fix. 5 minutes is far
- * shorter than every mirror's own staleness threshold (2 or 9 days below), so it can never change
- * which side of "stale" a mirror falls on — it only bounds how long a just-fixed sync can take to
- * stop showing the banner.
+ * review on PR #274, round 2): {@code jobs/detail.html} auto-refreshes every 5 seconds while a job
+ * is running (see its {@code http-equiv="refresh"}), and each refresh's {@code
+ * staleMirrorWarnings()} call fans out to six {@code findById} round trips (one per mirror's own
+ * sync-state repository) plus {@link RegistryPackageMirrorRepository#maxLastSyncedAt}'s {@code
+ * MAX(last_synced_at)} query — without this cache, that whole fan-out would re-run on every single
+ * 5-second refresh for as long as a job keeps running, not just once. The cache bounds that to once
+ * per {@link #CACHE_TTL_MILLIS} per process instead. ({@code registry_package_mirror.last_synced_at}
+ * itself is indexed today — {@code idx_registry_package_mirror_last_synced_at}, V44, closed-mode
+ * backlog item 395 — added in the same 2026-09-07 master→closed-mode sync that brought in the
+ * CVE.org change the paragraph below describes; this cache's own justification never depended on
+ * that query being unindexed, only on how often the whole fan-out would otherwise run.) 5 minutes is
+ * far shorter than every mirror's own staleness threshold (2 or 9 days below), so it can never
+ * change which side of "stale" a mirror falls on — it only bounds how long a just-fixed sync can
+ * take to stop showing the banner.
  *
  * <p><b>CVE.org (closed-mode backlog item 379)</b> reached this branch through the normal
  * master→closed-mode sync (§9-3, 2026-09-07): {@code CveOrgSyncService} now advances {@code
