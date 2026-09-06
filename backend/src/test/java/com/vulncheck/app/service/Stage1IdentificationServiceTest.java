@@ -312,6 +312,50 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void installUrlDeclaredCpeSurvivesRegistryDistrustReCheck() {
+        // Backlog item 389 (root cause of item 377's ESLint closed-mode regression): a chosenCpe that
+        // only passed the target_sw gate via its OWN install_url declaration (never a registry
+        // ecosystem mapping) must not be wrongly re-rejected here just because an unrelated,
+        // unconfirmed-version registry match on the same item is separately judged untrustworthy
+        // below. The pre-389 bug passed installUrl=null into both of this re-check's TargetSwContext
+        // constructions, which discarded the install_url signal too instead of only the distrusted
+        // registry ecosystem's own context — silently sending a real VS Code Marketplace extension
+        // (e.g. dbaeumer.vscode-eslint, whose npm "eslint" registry match is unconfirmed-version and
+        // unrelated to the VS Code extension's own identity) to UNIDENTIFIED.
+        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("npm", "eslint", "pkg:npm/eslint@2.1.7", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        CpeDictionaryEntry vscodeEslintExtension = cpeEntry(
+                "cpe:2.3:a:microsoft:eslint:2.0:*:*:*:*:visual_studio_code:*:*", "eslint");
+        vscodeEslintExtension.setTitle("ESLint");
+        vscodeEslintExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeEslintExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("ESLint");
+        item.setInstallUrl("https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint");
+
+        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        // The distrusted npm registry match must not be attached — only the install_url-gated CPE
+        // survives on its own.
+        assertThat(result.get().getEcosystem()).isNull();
+        assertThat(result.get().getPackageName()).isNull();
+        assertThat(result.get().getCpe())
+                .isEqualTo("cpe:2.3:a:microsoft:eslint:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
     void unconfirmedVersionRegistryMatchIsStillUsedWhenNoCpeCorroborationExists() {
         // Same weak signal as above, but with no CPE candidate at all — still the only signal
         // available, so it's used as a best-effort fallback (unchanged from prior behavior).
