@@ -489,10 +489,21 @@ public class Stage1IdentificationService {
             // itself is being discarded as untrustworthy, that ecosystem context goes with it, so the
             // CPE must be re-checked against a bare no-registry-context gate before it's allowed to
             // survive on its own.
-            // installUrl deliberately omitted (null) here too — this re-check exists purely to
-            // strip the now-distrusted registry match's own ecosystem context (Round-5 fix's own
-            // scope), not to touch any other declared-platform source.
-            if (chosenCpe != null && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), "", null))) {
+            // Backlog item 389 (originally item 377's ESLint root-cause): passes the item's real
+            // installUrl through here, NOT null — TargetSwContext#from already keeps the
+            // install_url-derived signal (installUrlDeclaredTargetSw) structurally independent from
+            // the registry-ecosystem-derived one (mappedTargetSw, only ever populated when
+            // registryEcosystem is non-empty). Passing registryEcosystem=Optional.empty() is what
+            // actually strips the now-distrusted registry match's own ecosystem context — that alone
+            // already achieves this re-check's stated scope. Nulling installUrl too (the pre-389
+            // bug) went further than that scope and silently discarded an unrelated, still-valid
+            // declared-platform source: an item whose chosenCpe only ever passed the gate because of
+            // its own install_url (e.g. a VS Code marketplace extension) had that CPE wrongly
+            // re-rejected here whenever it also happened to carry an unconfirmed-version registry
+            // match to distrust (see Stage1IdentificationServiceTest's item-389 regression case for
+            // the ESLint marketplace-extension scenario this fixes).
+            if (chosenCpe != null
+                    && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), "", item.getInstallUrl()))) {
                 log.info("Dropping CPE {} for item {} — it only passed the target_sw gate via the "
                         + "now-distrusted registry match's ecosystem context, so it cannot stand on its own",
                         chosenCpe.getCpeString(), item.getId());
@@ -509,7 +520,7 @@ public class Stage1IdentificationService {
                 // #degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived} already uses elsewhere)
                 // catches the case where a genuinely correct candidate (e.g. openssl:openssl) was
                 // sitting right there the whole time, instead of silently going UNIDENTIFIED.
-                chosenCpe = selectFallbackCpeCandidateAfterRegistryDistrust(discardedCpe, cpeCandidates);
+                chosenCpe = selectFallbackCpeCandidateAfterRegistryDistrust(discardedCpe, cpeCandidates, item.getInstallUrl());
                 if (chosenCpe != null) {
                     log.info("Falling back to remaining CPE candidate {} for item {} after discarding {} — "
                             + "it independently passes the bare target_sw gate",
@@ -713,12 +724,18 @@ public class Stage1IdentificationService {
      *
      * @return the best surviving candidate, or {@code null} if none of the others pass the bare gate
      *      either — the caller then correctly falls through to the existing UNIDENTIFIED outcome.
+     *
+     * <p>Backlog item 389: takes the item's own {@code installUrl} as a parameter rather than
+     * hardcoding it away — {@code registryEcosystem=Optional.empty()} below is what actually gives
+     * this method its "bare (no-ecosystem-context) gate" scope (item 176's own scope), and that is
+     * fully independent of whether an install_url declared-platform signal (item 303) also happens
+     * to be present. Nulling installUrl too (the pre-389 bug) silently discarded that unrelated
+     * signal as well, wrongly rejecting a fallback candidate that only needed its own install_url
+     * to pass.
      */
     private CpeDictionaryEntry selectFallbackCpeCandidateAfterRegistryDistrust(
-            CpeDictionaryEntry discardedCpe, List<CpeDictionaryEntry> cpeCandidates) {
-        // installUrl deliberately omitted (null) — same "bare (no-ecosystem-context) gate" scope as
-        // this method's own javadoc, item 176's fix, unrelated to item 303's install_url signal.
-        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "", null);
+            CpeDictionaryEntry discardedCpe, List<CpeDictionaryEntry> cpeCandidates, String installUrl) {
+        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "", installUrl);
         for (CpeDictionaryEntry candidate : cpeCandidates) {
             if (candidate == discardedCpe) {
                 continue;
