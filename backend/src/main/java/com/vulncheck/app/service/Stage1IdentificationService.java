@@ -291,7 +291,13 @@ public class Stage1IdentificationService {
      * retrofit2}, {@code httpcomponents}, {@code springframework}) is neither the TLD nor lexically
      * related to the CPE vendor, which the original single-token bypass below didn't cover. Item 412
      * widens the bypass to the entire leading run (see the Direction 2 loop in {@link #explainsQuery}
-     * for the updated logic and reasoning) so all 9 of the 14 rows are rescued as of that fix.
+     * for the updated logic and reasoning) to remove the structural rejection cause for these 4 rows.
+     * <b>Not independently re-verified against a live re-run</b> — this fix's own verification is
+     * limited to mocked-candidate-pool unit tests and the mocked golden benchmark (a single mocked
+     * candidate each, no ranking against the rest of the real dictionary), the same measurement gap
+     * that made the original "9 of 14" claim wrong in the first place. Whether all 9 of the 14 rows
+     * actually resolve correctly against the real candidate pool (where an unrelated candidate could
+     * still outrank the intended one) remains unmeasured; tracked as backlog item 415.
      *
      * <p>Deliberately just the small set of generic TLDs plus the country-code TLDs conventionally
      * used the same way as a Maven groupId's leading segment, not a general "any short token is
@@ -2770,16 +2776,29 @@ public class Stage1IdentificationService {
         // bypass narrowly scoped to an actual groupId-shaped leading run (TLD followed by however
         // many intermediate namespace segments) rather than firing for any dot-and-colon-shaped
         // string whose tail happens to relate to the match.
-        boolean queryLooksLikeMavenCoordinate = start > 0
-                && queryLooksLikeReverseDnsCoordinate(normalizedQuery)
+        //
+        // Backlog item 412 REVISE round 1 (senior review, 2026-09-07): renamed from
+        // queryLooksLikeMavenCoordinate to bypassLeadingRunAsMavenCoordinate — this boolean already
+        // folds in !itemVendorContradicts, so it's the bypass decision itself, not just a shape
+        // judgment about the query string. Conditions are ordered cheapest-first (all are
+        // side-effect-free predicates, so reordering doesn't change behavior): a plain int
+        // comparison, a hash-set lookup, itemVendorContradicts (trivially false for the common
+        // blank-item-vendor case per its own javadoc), then the two string-walking checks
+        // (queryLooksLikeReverseDnsCoordinate's regex match, matchedArtifactTailRelatesToCandidate's
+        // token-by-token walk). The loop below now skips entirely when this is true, rather than
+        // re-checking it on every iteration — vendorExplains has nothing left to add once the bypass
+        // has already vouched for the whole leading run.
+        boolean bypassLeadingRunAsMavenCoordinate = start > 0
                 && REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(0))
-                && matchedArtifactTailRelatesToCandidate(normalizedQuery, candidateTokens)
-                && !itemVendorContradicts(normalizedItemVendor, cpeVendor);
-        for (int i = 0; i < start; i++) {
-            if (vendorExplains(cpeVendor, queryTokens.get(i)) || queryLooksLikeMavenCoordinate) {
-                continue;
+                && !itemVendorContradicts(normalizedItemVendor, cpeVendor)
+                && queryLooksLikeReverseDnsCoordinate(normalizedQuery)
+                && matchedArtifactTailRelatesToCandidate(normalizedQuery, candidateTokens);
+        if (!bypassLeadingRunAsMavenCoordinate) {
+            for (int i = 0; i < start; i++) {
+                if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
+                    return false;
+                }
             }
-            return false;
         }
         // REVISE item 5: a single-token candidate that matched with nothing ahead of it (start == 0)
         // has no leading anchor at all vouching for the tie — the trailing leftovers must be
@@ -2856,8 +2875,9 @@ public class Stage1IdentificationService {
      * guava}/{@code slf4j-api}/{@code okhttp}/{@code netty-all}/{@code logback-classic} were actually
      * recovered by the version of item 367 that shipped — {@code jackson-databind} was not (its
      * groupId's intermediate segments "jackson"/"core" defeated the single-token-only bypass that
-     * existed at the time). Item 412 fixes that gap; see {@link #explainsQuery}'s Direction 2 loop for
-     * the corrected bypass and its own updated accounting of how many rows are now actually rescued.
+     * existed at the time). Item 412 removes that structural rejection cause; see {@link
+     * #explainsQuery}'s Direction 2 loop for the corrected bypass and its own javadoc on why the
+     * actual recovered-row count remains unmeasured against a live re-run.
      *
      * <p>Checks the part of {@code normalizedQuery} after its first colon (the artifactId/tail) against {@code
      * candidateTokens} (the very tokens {@link #explainsQuery} just matched) — not the same test as
