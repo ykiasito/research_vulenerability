@@ -89,9 +89,9 @@ public class OsvSyncService {
     /** Finite, not {@code 0}/unbounded (backlog items 378/381) — {@link URLConnection#setReadTimeout}
      *  is a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long
      *  a genuinely-streaming multi-hundred-MB zip/CSV download can take; it only kills a connection
-     *  that goes fully idle for this long, matching {@code CveOrgSyncService}'s own read timeout
-     *  (see {@code CveOrgSyncService.DOWNLOAD_READ_TIMEOUT_MILLIS}) for consistency across the three
-     *  sibling sync services. */
+     *  that goes fully idle for this long. 30s is the intended common value across the three
+     *  sibling sync services; {@code CveOrgSyncService#download} still uses an unbounded read
+     *  timeout as of this change and is aligned by item 378's companion fix. */
     private static final int DOWNLOAD_READ_TIMEOUT_MILLIS = 30_000;
 
     /** Plan §8-3(b): loose length/charset validation (OSV ids have no single fixed shape across
