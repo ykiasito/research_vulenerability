@@ -3365,6 +3365,32 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void reverseDnsLeadingTokenBypassNeverFiresWhenTheItemVendorContradictsTheCandidateCpeVendor() {
+        // Backlog item 367 REVISE round 3 (senior review, 2026-09-07): a 2-segment groupId like
+        // "net.acmecorp:buildtool" only ever has ONE leading token ahead of the Direction 2 match
+        // ("net"), so the REVERSE_DNS_PACKAGE_PREFIXES bypass is the ONLY gate that token goes
+        // through — itemVendorContradicts's own separate check (further below, start == 0 only)
+        // never gets a chance to fire for it. Without requiring !itemVendorContradicts(...) inside
+        // the bypass itself, this candidate would wrongly be admitted purely because "net" sits on
+        // the allowlist, even though the item's own vendor field ("Acme Corp") actively contradicts
+        // the candidate's actual CPE vendor ("microsoft", entirely unrelated to "acmecorp") — the
+        // same shape of vendor-contradiction item 319 already guards against elsewhere in this
+        // method. The tail ("buildtool") still genuinely relates to the matched candidate's own
+        // product, same as the positive test above, so tail-relatedness alone is not what should be
+        // rejecting this candidate — only the vendor contradiction should.
+        CpeDictionaryEntry microsoftBuildtool =
+                cpeEntry("cpe:2.3:a:microsoft:buildtool:2.0:*:*:*:*:*:*:*", "buildtool");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(microsoftBuildtool));
+
+        ResearchJobItem item = item("net.acmecorp:buildtool");
+        item.setVendor("Acme Corp");
+
+        assertThat(service(List.of()).identify(item, USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
     void queryLooksLikeReverseDnsCoordinateOnlyMatchesAGenuineMultiSegmentGroupIdArtifactShape() {
         // Backlog item 367 REVISE: direct unit coverage of the structural gate itself (same
         // convention as normalizeForContainmentStripsCpeBackslashEscapes... below, which also calls a

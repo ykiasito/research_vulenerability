@@ -281,14 +281,20 @@ public class Stage1IdentificationService {
      * candidate was rejected regardless of how well everything after it lined up — 9 of the 14
      * candidate-pool-reachable-but-rejected Maven golden-300 rows shared exactly this root cause.
      *
-     * <p>Deliberately just the small set of prefixes actually observed in real-world Maven groupIds
-     * (generic TLDs {@code com}/{@code org}/{@code net}/{@code io}/{@code edu}/{@code gov} plus the
-     * handful of country-code TLDs conventionally used the same way, e.g. {@code ch.qos.logback},
-     * {@code de.*}), not a general "any short token is probably a TLD" heuristic — kept narrow on
-     * purpose since this list is an unconditional bypass of {@link #vendorExplains} for these exact
-     * tokens. Only ever consulted for tokens strictly ahead of a Direction 2 match (the existing loop
-     * bound already restricts this to leading positions) — never applied to the trailing-token check
-     * a few lines below, which polices a different, non-groupId-shaped part of the query.
+     * <p>Deliberately just the small set of generic TLDs plus the country-code TLDs conventionally
+     * used the same way as a Maven groupId's leading segment, not a general "any short token is
+     * probably a TLD" heuristic — kept narrow on purpose since this list is an unconditional bypass
+     * of {@link #vendorExplains} for these exact tokens. Of these, only {@code com}/{@code org}/
+     * {@code io}/{@code ch} are actually observed leading this repo's own corpus (golden-300 /
+     * real-1000) as of this writing — the rest (e.g. {@code net.sf.*}, a real if uncommon Maven
+     * groupId shape) are included on design grounds, not measurement: a false-negative here (a real
+     * Maven coordinate rejected because its TLD-like prefix is missing from this list) is a strictly
+     * worse outcome than the false-positive risk this list already guards against via {@link
+     * #queryLooksLikeReverseDnsCoordinate}/{@link #matchedArtifactTailRelatesToCandidate} below, so
+     * this deliberately isn't narrowed down to just the 4 corpus-observed prefixes. Only ever
+     * consulted for tokens strictly ahead of a Direction 2 match (the existing loop bound already
+     * restricts this to leading positions) — never applied to the trailing-token check a few lines
+     * below, which polices a different, non-groupId-shaped part of the query.
      *
      * <p><b>Peer review REVISE (2026-09-06):</b> the first version of this fix consulted this list
      * unconditionally — for ANY query containing one of these bare words as a leading token,
@@ -2698,6 +2704,18 @@ public class Stage1IdentificationService {
         // "io.netty:netty-all"), so the tail-relatedness check is what tells them apart — a real Maven
         // artifactId is conventionally derived from (or equal to) the matched product identity itself,
         // an arbitrary colon-suffixed qualifier like "x64" is not.
+        //
+        // Peer review REVISE round 3 (2026-09-07): the bypass above must also require
+        // !itemVendorContradicts(...) — without it, a 2-segment groupId (e.g. "org.mockito:mockito
+        // -core") only ever has ONE leading token ahead of the match, so this bypass is the ONLY
+        // gate that leading token ever goes through, and itemVendorContradicts's own vendor-mismatch
+        // check (below, start == 0 only) would never fire for it. Skipping it here would let a
+        // candidate whose CPE vendor the item's own vendor field actively contradicts (e.g. item
+        // vendor "Acme Corp" against an unrelated "microsoft:acme" candidate) into the pool purely
+        // because "org"/"com" sits on the allowlist. itemVendorContradicts already returns false for
+        // a blank item vendor (see its own javadoc), and every Maven-coordinate row in this
+        // project's own golden-300/real-1000 fixtures has a blank vendor column, so this addition
+        // costs none of this fix's own recovered rows.
         int start = java.util.Collections.indexOfSubList(queryTokens, candidateTokens);
         if (start < 0) {
             return false;
@@ -2709,7 +2727,9 @@ public class Stage1IdentificationService {
             if (vendorExplains(cpeVendor, queryTokens.get(i))) {
                 continue;
             }
-            if (queryLooksLikeMavenCoordinate && REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(i))) {
+            if (queryLooksLikeMavenCoordinate
+                    && REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(i))
+                    && !itemVendorContradicts(normalizedItemVendor, cpeVendor)) {
                 continue;
             }
             return false;
@@ -2717,9 +2737,15 @@ public class Stage1IdentificationService {
         // REVISE item 5: a single-token candidate that matched with nothing ahead of it (start == 0)
         // has no leading anchor at all vouching for the tie — the trailing leftovers must be
         // vendor-explained too in that case, the same way the leading ones already are above. A
-        // multi-token candidate, or one with a nonempty (and therefore already vendor-explained)
-        // leading run, is left exactly as before — see this method's own javadoc for the AVG
-        // AntiVirus Free / Windows Terminal contrast this distinction is calibrated against.
+        // multi-token candidate is left exactly as before. A single-token candidate with a nonempty
+        // leading run is also left exactly as before IF that leading run was accepted via ordinary
+        // vendorExplains — but as of item 367, a nonempty leading run no longer implies
+        // vendor-explained: it may instead have been admitted via the REVERSE_DNS_PACKAGE_PREFIXES
+        // bypass above, whose own tail-relatedness check (matchedArtifactTailRelatesToCandidate)
+        // already vouches for at least one trailing token relating back to the match — not
+        // necessarily every trailing token, unlike the vendorExplains case this trailing check
+        // handles below. See this method's own javadoc for the AVG AntiVirus Free / Windows Terminal
+        // contrast this distinction is calibrated against.
         //
         // Backlog item 89 P2: this specific rule is what plausibleContainmentOnly's relaxed second
         // pass exists to lift (requireTrailingVendorExplanation=false) — see this method's own
@@ -2775,9 +2801,13 @@ public class Stage1IdentificationService {
      * okhttp3}, {@code logback-classic}/{@code logback}) — an arbitrary qualifier like {@code x64} or
      * {@code stable} bears no such relationship to whatever the candidate matched. Checks the part of
      * {@code normalizedQuery} after its first colon (the artifactId/tail) against {@code
-     * candidateTokens} (the very tokens {@link #explainsQuery} just matched) using the same
-     * equal-or-&gt;=4-char-substring test {@link #vendorExplains} already uses elsewhere in this class,
-     * rather than inventing a new similarity rule.
+     * candidateTokens} (the very tokens {@link #explainsQuery} just matched) — not the same test as
+     * {@link #vendorExplains} (which is one-directional: a whole-token match, or a &gt;=4-character
+     * token contained in the *vendor's own* joined tokens), but the same equal-or-&gt;=4-character
+     * -substring idea extended to a bidirectional check between each artifact-tail token and each
+     * candidate token (either one containing the other, whichever side is long enough to qualify),
+     * since here — unlike {@code vendorExplains}'s fixed vendor-vs-token roles — there's no reason to
+     * prefer one direction over the other between two ordinary product-identity tokens.
      */
     private boolean matchedArtifactTailRelatesToCandidate(String normalizedQuery, List<String> candidateTokens) {
         int colonIndex = normalizedQuery.indexOf(':');
