@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -226,6 +227,29 @@ public class RegistryMirrorSyncService {
      */
     public void releaseFullSyncGuard() {
         fullSyncRunning.set(false);
+    }
+
+    /**
+     * @param syncInProgress mirrors {@link #fullSyncRunning}'s current value at call time.
+     * @param lastSyncedAt the most recent {@code registry_package_mirror.last_synced_at} across
+     *                      every ecosystem/package (see {@link
+     *                      RegistryPackageMirrorRepository#maxLastSyncedAt}), or empty if the mirror
+     *                      has never synced a single row.
+     */
+    public record SyncStatus(boolean syncInProgress, Optional<Instant> lastSyncedAt) {
+    }
+
+    /**
+     * Closed-mode backlog item 382: this mirror (unlike {@code GhsaSyncState}/{@code
+     * CveOrgSyncState}) has no single-row sync-state tracker of its own — every {@code
+     * registry_package_mirror} row is a per-(ecosystem, package) mirror entry, not a whole-run
+     * record — so this is assembled on demand from {@link #fullSyncRunning} and {@link
+     * RegistryPackageMirrorRepository#maxLastSyncedAt} for {@code AdminController}'s
+     * registry-mirror sync-status display and {@link com.vulncheck.app.service.MirrorFreshnessService}'s
+     * mirror-freshness check, rather than adding a new persisted table purely for display.
+     */
+    public SyncStatus currentStatus() {
+        return new SyncStatus(fullSyncRunning.get(), registryPackageMirrorRepository.maxLastSyncedAt());
     }
 
     /**

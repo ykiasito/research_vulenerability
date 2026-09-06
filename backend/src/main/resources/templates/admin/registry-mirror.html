@@ -16,6 +16,17 @@
 
 <p th:if="${result}" th:text="${result}" style="color: green;"></p>
 
+<h2>同期状態</h2>
+<p th:if="${registryMirrorLastSyncedAt == null}" style="color: #b00;">
+    未同期です（一度も同期を実行していません）。
+</p>
+<div th:if="${registryMirrorLastSyncedAt != null}">
+    <p>
+        同期実行中: <span th:text="${registryMirrorSyncInProgress} ? 'はい' : 'いいえ'"></span><br/>
+        最終同期日時（全エコシステム中の最新値）: <span th:text="${registryMirrorLastSyncedAt}"></span>
+    </p>
+</div>
+
 <p style="color: #b00;">
     観測済みパッケージ名の件数に応じて時間がかかります。ボタンを押すとサーバー側のバックグラウンドスレッドで
     開始し、このページはすぐに応答を返します。進捗・完了はバックエンドのログで確認してください。

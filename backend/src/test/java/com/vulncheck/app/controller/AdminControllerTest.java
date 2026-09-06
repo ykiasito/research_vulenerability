@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -15,6 +16,7 @@ import static org.mockito.Mockito.when;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
 import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
+import com.vulncheck.app.repository.CveOrgSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
 import com.vulncheck.app.repository.NvdCveSyncStateRepository;
@@ -32,11 +34,13 @@ import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.osv.OsvSyncService;
 import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -64,6 +68,8 @@ class AdminControllerTest {
     @Mock
     private CveOrgSyncService cveOrgSyncService;
     @Mock
+    private CveOrgSyncStateRepository cveOrgSyncStateRepository;
+    @Mock
     private SiemensCsafSyncService siemensCsafSyncService;
     @Mock
     private RedHatCsafSyncService redHatCsafSyncService;
@@ -90,12 +96,26 @@ class AdminControllerTest {
     @Mock
     private CpeDictionarySyncStateRepository cpeDictionarySyncStateRepository;
 
+    /**
+     * Closed-mode backlog item 382: every {@code /admin/registry-mirror} controller method (not
+     * just the ones this class already has dedicated tests for) now unconditionally calls {@link
+     * RegistryMirrorSyncService#currentStatus()} to populate the sync-status display — stubbed here
+     * (leniently, since not every test below actually reaches a registry-mirror endpoint) so those
+     * calls return a real {@link RegistryMirrorSyncService.SyncStatus} instead of Mockito's default
+     * {@code null}, matching what the real service always returns.
+     */
+    @BeforeEach
+    void stubRegistryMirrorSyncStatus() {
+        lenient().when(registryMirrorSyncService.currentStatus())
+                .thenReturn(new RegistryMirrorSyncService.SyncStatus(false, Optional.of(Instant.now())));
+    }
+
     private AdminController newController() {
         return new AdminController(nvdCpeSyncService, userApiKeyService, userRepository, cveOrgSyncService,
-                siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository, ghsaSyncService,
-                ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService, osvSyncStateRepository,
-                osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService, nvdCveSyncStateRepository,
-                cpeDictionarySyncStateRepository);
+                cveOrgSyncStateRepository, siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository,
+                ghsaSyncService, ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService,
+                osvSyncStateRepository, osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService,
+                nvdCveSyncStateRepository, cpeDictionarySyncStateRepository);
     }
 
     @Test
@@ -196,10 +216,10 @@ class AdminControllerTest {
         assertThat(sharedService.tryBeginFullSync()).isTrue();
 
         AdminController controller = new AdminController(sharedService, userApiKeyService, userRepository,
-                cveOrgSyncService, siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository,
-                ghsaSyncService, ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService,
-                osvSyncStateRepository, osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService,
-                nvdCveSyncStateRepository, cpeDictionarySyncStateRepository);
+                cveOrgSyncService, cveOrgSyncStateRepository, siemensCsafSyncService, redHatCsafSyncService,
+                csafSyncStateRepository, ghsaSyncService, ghsaSyncStateRepository, ghsaSyncFailureRepository,
+                osvSyncService, osvSyncStateRepository, osvSyncFailureRepository, registryMirrorSyncService,
+                nvdCveSyncService, nvdCveSyncStateRepository, cpeDictionarySyncStateRepository);
         Model model = new ExtendedModelMap();
 
         String view = controller.cpeFullSync(model);
