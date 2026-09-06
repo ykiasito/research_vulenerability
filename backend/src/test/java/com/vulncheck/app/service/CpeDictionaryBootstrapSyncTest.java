@@ -29,7 +29,9 @@ import org.springframework.test.util.ReflectionTestUtils;
 class CpeDictionaryBootstrapSyncTest {
 
     private final NvdCpeSyncService nvdCpeSyncService = mock(NvdCpeSyncService.class);
-    private final CpeDictionaryBootstrapSync bootstrapSync = new CpeDictionaryBootstrapSync(nvdCpeSyncService);
+    private final UserApiKeyService userApiKeyService = mock(UserApiKeyService.class);
+    private final CpeDictionaryBootstrapSync bootstrapSync =
+            new CpeDictionaryBootstrapSync(nvdCpeSyncService, userApiKeyService);
     private final ApplicationArguments args = mock(ApplicationArguments.class);
 
     @Test
@@ -68,6 +70,45 @@ class CpeDictionaryBootstrapSyncTest {
                 .as("syncAllAndRelease should be invoked on the spawned worker thread")
                 .isTrue();
         verify(nvdCpeSyncService, times(1)).tryBeginFullSync();
+    }
+
+    @Test
+    void enabledAndGuardWonPassesTheAdminNvdApiKeyWhenOneIsRegistered() throws InterruptedException {
+        // Closed-mode backlog item 392: the startup full sync was previously hardcoded to
+        // Optional.empty() (always unkeyed), unlike its scheduled twin (CpeDictionaryScheduledResync).
+        ReflectionTestUtils.setField(bootstrapSync, "enabled", true);
+        when(nvdCpeSyncService.tryBeginFullSync()).thenReturn(true);
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.of("admin-nvd-key"));
+        CountDownLatch syncInvoked = new CountDownLatch(1);
+        when(nvdCpeSyncService.syncAllAndRelease(Optional.of("admin-nvd-key"))).thenAnswer(invocation -> {
+            syncInvoked.countDown();
+            return new NvdCpeSyncService.SyncOutcome(42, true);
+        });
+
+        bootstrapSync.run(args);
+
+        assertThat(syncInvoked.await(5, TimeUnit.SECONDS)).isTrue();
+        verify(nvdCpeSyncService).syncAllAndRelease(Optional.of("admin-nvd-key"));
+    }
+
+    @Test
+    void enabledAndGuardWonFallsBackToUnkeyedWhenAdminKeyResolutionThrows() throws InterruptedException {
+        // Same fail-soft rationale as CpeDictionaryScheduledResync#resolveAdminKey: a decrypt
+        // failure must never prevent syncAllAndRelease (and its guard-releasing finally) from
+        // being reached.
+        ReflectionTestUtils.setField(bootstrapSync, "enabled", true);
+        when(nvdCpeSyncService.tryBeginFullSync()).thenReturn(true);
+        when(userApiKeyService.getAdminNvdApiKey()).thenThrow(new RuntimeException("decrypt failed"));
+        CountDownLatch syncInvoked = new CountDownLatch(1);
+        when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenAnswer(invocation -> {
+            syncInvoked.countDown();
+            return new NvdCpeSyncService.SyncOutcome(42, true);
+        });
+
+        bootstrapSync.run(args);
+
+        assertThat(syncInvoked.await(5, TimeUnit.SECONDS)).isTrue();
+        verify(nvdCpeSyncService).syncAllAndRelease(Optional.empty());
     }
 
     @Test

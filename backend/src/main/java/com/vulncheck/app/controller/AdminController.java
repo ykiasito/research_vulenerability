@@ -109,7 +109,7 @@ public class AdminController {
      * returns immediately — the sync itself takes hours (see {@link
      * NvdCpeSyncService#syncAllAndRelease}). Mirrors {@link
      * com.vulncheck.app.service.CpeDictionaryBootstrapSync}'s startup-triggered sync (same
-     * unauthenticated {@code Optional.empty()} call, same daemon-thread-and-forget shape) so this
+     * admin-key resolution, same daemon-thread-and-forget shape) so this
      * and the {@code CPE_FULL_SYNC_ON_STARTUP} env var remain two independent ways to trigger the
      * same underlying operation. Both go through {@link NvdCpeSyncService#tryBeginFullSync}, which
      * holds the single "already running" guard shared by both trigger paths, so a second click (or
@@ -122,6 +122,12 @@ public class AdminController {
      * is always a deliberate, explicit request for a full sync and must run unconditionally
      * (subject only to the shared {@code tryBeginFullSync} guard above), or there would be no way
      * left to force a full re-sync on demand.
+     *
+     * <p>Resolves the admin's NVD API key via {@link UserApiKeyService#getAdminNvdApiKey()} before
+     * starting the worker (closed-mode backlog item 392) — this admin-triggered path was previously
+     * hardcoded to {@code Optional.empty()} (always unkeyed), unlike its scheduled twin ({@code
+     * CpeDictionaryScheduledResync}), leaving the heaviest closed-mode setup operation stuck at the
+     * unkeyed 5req/30s rate limit even when an admin key is registered.
      */
     @PostMapping("/admin/cpe-dictionary/sync-all")
     public String cpeFullSync(Model model) {
@@ -155,11 +161,13 @@ public class AdminController {
      * SecurityManager denial) to exercise {@link #cpeFullSync}'s guard-release catch block.
      */
     void startFullSyncWorker() {
+        Optional<String> adminKey = resolveAdminKey();
         Thread worker = new Thread(() -> {
-            log.warn("Full NVD CPE dictionary sync starting (admin-triggered) — this takes hours");
+            log.warn("Full NVD CPE dictionary sync starting (admin-triggered, admin NVD key present: {}) — this "
+                    + "takes hours", adminKey.isPresent());
             long startedAt = System.currentTimeMillis();
             try {
-                SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
+                SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(adminKey);
                 long minutes = (System.currentTimeMillis() - startedAt) / 60000;
                 if (outcome.completed()) {
                     log.warn("Full NVD CPE dictionary sync (admin-triggered) finished: {} entries upserted in {} minutes",
@@ -174,6 +182,25 @@ public class AdminController {
         }, "cpe-full-sync-admin");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    /**
+     * Shared by {@link #startFullSyncWorker}/{@link #startNvdCveBackfillWorker} (closed-mode
+     * backlog item 392) — resolving the admin key is wrapped in its own try/catch so a resolution
+     * failure (e.g. a decrypt error) can never prevent {@link NvdCpeSyncService#syncAllAndRelease}/
+     * {@link NvdCveSyncService#runBackfillTickAndRelease} from being reached; those methods' own
+     * {@code finally} blocks are the only place their respective sync guards get released, so
+     * skipping the call entirely would leak the guard until process restart (task-backlog items
+     * 136/141 lineage). Same fail-soft shape as {@code CpeDictionaryScheduledResync#resolveAdminKey}
+     * / {@code NvdCveBackfillScheduledRunner#runTick}'s equivalent resolution.
+     */
+    private Optional<String> resolveAdminKey() {
+        try {
+            return userApiKeyService.getAdminNvdApiKey();
+        } catch (Throwable t) {
+            log.warn("Could not resolve the admin's NVD key — running this admin-triggered sync unkeyed (slower)", t);
+            return Optional.empty();
+        }
     }
 
     @GetMapping("/admin/cve-org")
@@ -443,6 +470,11 @@ public class AdminController {
      * while one is already running doesn't start a competing run against the same NVD rate limit
      * and the same chunk table. Once the baseline finishes (may take several clicks/ticks — see
      * {@link NvdCveSyncService}'s class javadoc), this becomes a fast no-op.
+     *
+     * <p>Resolves the admin's NVD API key via {@link #resolveAdminKey()} before starting the worker
+     * (closed-mode backlog item 392) — this admin-triggered path was previously hardcoded to
+     * {@code Optional.empty()} (always unkeyed), unlike its scheduled twin ({@code
+     * NvdCveBackfillScheduledRunner}).
      */
     @PostMapping("/admin/nvd-cve/sync-now")
     public String nvdCveSyncNow(Model model) {
@@ -472,14 +504,16 @@ public class AdminController {
      * same rationale as {@link #startFullSyncWorker}.
      */
     void startNvdCveBackfillWorker() {
+        Optional<String> adminKey = resolveAdminKey();
         Thread worker = new Thread(() -> {
-            log.warn("NVD CVE backfill tick starting (admin-triggered)");
+            log.warn("NVD CVE backfill tick starting (admin-triggered, admin NVD key present: {})",
+                    adminKey.isPresent());
             long startedAt = System.currentTimeMillis();
             NvdCveSyncService.RunBudget budget = new NvdCveSyncService.RunBudget(
                     nvdCveBackfillMaxRequestsPerRun, Duration.ofMinutes(nvdCveBackfillMaxDurationMinutes));
             try {
                 NvdCveSyncService.SyncOutcome outcome = nvdCveSyncService.runBackfillTickAndRelease(
-                        Optional.empty(), budget);
+                        adminKey, budget);
                 long seconds = (System.currentTimeMillis() - startedAt) / 1000;
                 if (outcome.completed()) {
                     log.warn("NVD CVE backfill tick (admin-triggered) finished the baseline: {} records upserted "

@@ -147,6 +147,55 @@ class AdminControllerTest {
     }
 
     @Test
+    void cpeFullSyncPassesTheAdminNvdApiKeyWhenOneIsRegistered() throws InterruptedException {
+        // Closed-mode backlog item 392: this admin-triggered path was previously hardcoded to
+        // Optional.empty() (always unkeyed), unlike its scheduled twin (CpeDictionaryScheduledResync).
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(nvdCpeSyncService.tryBeginFullSync()).thenReturn(true);
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.of("admin-nvd-key"));
+        when(nvdCpeSyncService.syncAllAndRelease(Optional.of("admin-nvd-key"))).thenAnswer(invocation -> {
+            started.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return new SyncOutcome(42, true);
+        });
+
+        AdminController controller = newController();
+        String view = controller.cpeFullSync(new ExtendedModelMap());
+
+        assertThat(view).isEqualTo("admin/cpe-dictionary");
+        assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+        verify(nvdCpeSyncService).syncAllAndRelease(Optional.of("admin-nvd-key"));
+
+        release.countDown();
+    }
+
+    @Test
+    void cpeFullSyncFallsBackToUnkeyedWhenAdminKeyResolutionThrows() throws InterruptedException {
+        // Same fail-soft rationale as CpeDictionaryScheduledResync#resolveAdminKey: a decrypt
+        // failure must never prevent syncAllAndRelease (and its guard-releasing finally) from
+        // being reached.
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(nvdCpeSyncService.tryBeginFullSync()).thenReturn(true);
+        when(userApiKeyService.getAdminNvdApiKey()).thenThrow(new RuntimeException("decrypt failed"));
+        when(nvdCpeSyncService.syncAllAndRelease(Optional.empty())).thenAnswer(invocation -> {
+            started.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return new SyncOutcome(42, true);
+        });
+
+        AdminController controller = newController();
+        String view = controller.cpeFullSync(new ExtendedModelMap());
+
+        assertThat(view).isEqualTo("admin/cpe-dictionary");
+        assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+        verify(nvdCpeSyncService).syncAllAndRelease(Optional.empty());
+
+        release.countDown();
+    }
+
+    @Test
     void cpeFullSyncReleasesTheGuardWhenTheWorkerThreadFailsToStart() {
         // Regression test for task-backlog item 136: if starting the worker thread itself throws
         // (e.g. native-thread exhaustion) after tryBeginFullSync() already won the slot,
@@ -401,6 +450,31 @@ class AdminControllerTest {
                 .as("background thread should have invoked runBackfillTickAndRelease() by now")
                 .isTrue();
         verify(nvdCveSyncService).runBackfillTickAndRelease(eq(Optional.empty()), any());
+
+        release.countDown();
+    }
+
+    @Test
+    void nvdCveSyncNowPassesTheAdminNvdApiKeyWhenOneIsRegistered() throws InterruptedException {
+        // Closed-mode backlog item 392: this admin-triggered path was previously hardcoded to
+        // Optional.empty() (always unkeyed), unlike its scheduled twin (NvdCveBackfillScheduledRunner).
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(nvdCveSyncService.tryBeginRun()).thenReturn(true);
+        when(userApiKeyService.getAdminNvdApiKey()).thenReturn(Optional.of("admin-nvd-key"));
+        when(nvdCveSyncService.runBackfillTickAndRelease(eq(Optional.of("admin-nvd-key")), any()))
+                .thenAnswer(invocation -> {
+                    started.countDown();
+                    release.await(5, TimeUnit.SECONDS);
+                    return new NvdCveSyncService.SyncOutcome(120, false);
+                });
+
+        AdminController controller = newController();
+        String view = controller.nvdCveSyncNow(new ExtendedModelMap());
+
+        assertThat(view).isEqualTo("admin/nvd-cve");
+        assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+        verify(nvdCveSyncService).runBackfillTickAndRelease(eq(Optional.of("admin-nvd-key")), any());
 
         release.countDown();
     }
