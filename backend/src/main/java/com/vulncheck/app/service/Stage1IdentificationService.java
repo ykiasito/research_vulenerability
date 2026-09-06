@@ -313,7 +313,7 @@ public class Stage1IdentificationService {
         result = result.flatMap(product -> highConfidenceVerificationService.verifyIfEligible(item, product, userId));
 
         log.info("Stage1 identify item {} ('{}' v{}): registryMatch={}, cpeCandidates={}, result={}",
-                item.getId(), item.getProductName(), item.getVersion(),
+                item.getId(), LogSanitizer.sanitize(item.getProductName()), LogSanitizer.sanitize(item.getVersion()),
                 registryResolution.match().map(RegistryMatch::packageName).orElse(null),
                 cpeCandidateResult.candidates().size(),
                 result.map(this::describe).orElse("UNIDENTIFIED"));
@@ -462,7 +462,7 @@ public class Stage1IdentificationService {
                             + "no AI verification available, version is unconfirmed, and item vendor '{}' is "
                             + "present (REVISE item 3: measured 14/14 wrong with a non-blank vendor vs 5/5 "
                             + "correct with a blank one)", item.getId(), weakMatch.ecosystem(),
-                            weakMatch.packageName(), item.getVendor());
+                            weakMatch.packageName(), LogSanitizer.sanitize(item.getVendor()));
                     registryMatch = Optional.empty();
                     RescuedCpe rescued = rescueCpeAfterRegistryMatchRejected(
                             item, userId, vendorForCpeRescue, productNameForCpeRescue);
