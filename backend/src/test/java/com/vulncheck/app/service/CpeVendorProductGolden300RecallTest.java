@@ -49,12 +49,14 @@ import org.springframework.transaction.annotation.Transactional;
         // same as every other real-dev-DB test in this package.
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Run once by hand against the real dev DB (public accuracy write-up measurement, "
-        + "2026-09-06) -- CPE vendor:product exact match on this branch's current code is "
-        + "62/68 = 0.9118 (6 mismatches: Metasploit Framework unidentified; Notepad++/Zoom/Kibana "
-        + "resolve to an aliased vendor name; VirtualBox and Microsoft Visual Studio resolve to a "
-        + "close-but-wrong sibling product). See class javadoc. Left disabled so it can never "
-        + "re-fire on a routine mvn test run.")
+@Disabled("Post-item360-Step2-sync remeasurement (2026-09-06) against the real dev DB -- CPE "
+        + "vendor:product exact match on this branch's current code is now 64/68 = 0.9412 (up from "
+        + "the pre-sync baseline's 62/68 = 0.9118), matching master's own 64/68 for this same class: "
+        + "the sibling-product mismatches (VirtualBox and Microsoft Visual Studio) are now resolved "
+        + "correctly thanks to master's outlier-guard/sibling-derivation-suppression logic landing via "
+        + "the item360 Step2 sync merge. 4 mismatches remain, unchanged in kind from before: Metasploit "
+        + "Framework unidentified; Notepad++/Zoom/Kibana resolve to an aliased vendor name. See class "
+        + "javadoc. Left disabled so it can never re-fire on a routine mvn test run.")
 class CpeVendorProductGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
