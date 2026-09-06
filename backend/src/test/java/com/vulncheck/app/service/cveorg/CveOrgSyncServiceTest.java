@@ -452,4 +452,35 @@ class CveOrgSyncServiceTest {
                     return null;
                 });
     }
+
+    /** Backlog item 362 follow-up (senior review, 2026-09-06, third round): a non-2xx/non-3xx
+     *  terminal response (e.g. an expired signature returning 403) must also fail closed here,
+     *  with an already-sanitized message — {@code uri} is the final, signed download URL, and
+     *  letting the caller's own {@link URLConnection#getInputStream()} run on a 4xx/5xx throws the
+     *  JDK's own plain {@code IOException("Server returned HTTP response code: <code> for URL:
+     *  <uri>")}, which embeds the FULL, un-sanitized URL (including the signed query string) —
+     *  exactly the same leak class the redirect and transport-error cases were already fixed
+     *  against. Asserts on the FULL stack-trace text (not just {@code getMessage()}), matching
+     *  {@link #resolveRedirectTargetTransportFailureDoesNotLeakTheSignedQueryStringAnywhereInTheThrowable}'s
+     *  rigor. */
+    @Test
+    void openConnectionFailsClosedOnANonTwoXxResponseWithoutLeakingTheSignedQueryString() throws Exception {
+        CveOrgSyncService service = service(builder().build());
+        String secret = "SECRETSIGNATURE999";
+
+        withLocalServer(
+                exchange -> {
+                    exchange.sendResponseHeaders(403, -1);
+                    exchange.close();
+                },
+                baseUrl -> {
+                    URI signedUri = URI.create(baseUrl + "?sig=" + secret + "&jwt=alsoSecretButUnused");
+
+                    Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(() -> service.openConnection(signedUri));
+
+                    assertThat(thrown).isInstanceOf(IOException.class);
+                    assertThat(fullStackTraceText(thrown)).doesNotContain(secret);
+                    return null;
+                });
+    }
 }

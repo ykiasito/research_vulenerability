@@ -446,6 +446,18 @@ public class CveOrgSyncService {
      * and this connection attempt) or an inconsistency between the two requests; either way, this
      * must not silently follow it unchecked.
      *
+     * <p>Also rejects any other non-2xx response (backlog item 362 follow-up, senior review,
+     * 2026-09-06, third round) — {@code uri} here is the final, signed download URL (carrying
+     * {@code sig=}/{@code jwt=} query-string credentials), and letting the caller's own {@link
+     * URLConnection#getInputStream()} run on a 4xx/5xx (e.g. an expired signature returning 403)
+     * would throw the JDK's plain {@code java.io.IOException("Server returned HTTP response code:
+     * <code> for URL: <uri>")} — a message that embeds the FULL, un-sanitized URL. That raw
+     * exception would propagate straight out of {@link #download} into {@code
+     * syncBaseline}/{@code syncDelta}'s {@code log.error("...", e)}, leaking the credential the
+     * exact same way the redirect and transport-error cases already had to be fixed against.
+     * Throwing here first, with an already-sanitized message, means {@code getInputStream()} is
+     * never reached on a non-2xx response.
+     *
      * <p>Package-private so the unit test can assert the concrete timeout values and redirect
      * behavior directly, same convention as {@code RestClientConfig#noRedirectRequestFactory}'s own
      * test.
@@ -462,6 +474,12 @@ public class CveOrgSyncService {
                 throw new IOException("CVE.org sync: unexpected redirect (HTTP " + responseCode + ") opening "
                         + sanitizedForLogging(uri) + " — every hop should already have been validated by "
                         + "resolveRedirectTarget");
+            }
+            if (responseCode < 200 || responseCode >= 300) {
+                throw new IOException("CVE.org sync: unexpected HTTP " + responseCode + " opening "
+                        + sanitizedForLogging(uri) + " — refusing to read the response body, since "
+                        + "HttpURLConnection#getInputStream() would otherwise throw its own exception "
+                        + "embedding the full request URL (including this URL's signed query string)");
             }
         }
         return connection;
