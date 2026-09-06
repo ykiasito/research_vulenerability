@@ -47,9 +47,19 @@ Maven CentralはToS(利用規約)上の理由から、閉域モードでは意�
 
 ただし、レジストリ照合とCPE辞書照合は独立した別経路であり、識別処理は両方を無条件に(どちらかが失敗しても、もう一方の結果に影響を与えずに)常に実行する設計になっている。そのため、Javaで書かれた製品であっても、その製品自体がCPE辞書側に`vendor:product`形式のエントリとして存在していれば、レジストリ照合とは無関係にCPE辞書照合経由で識別に成功する場合がある。
 
-**実測**: golden-300のうちMaven座標(`groupId:artifactId`形式、例: `org.springframework:spring-core`)を持つ20件は、レジストリ照合・CPE辞書照合の両方を試みてなお全件が識別不能(0/20)。
+**実測(2026-09-06、backlog item 367の修正後)**: golden-300のうちMaven座標(`groupId:artifactId`形式、例: `org.springframework:spring-core`)を持つ20件のうち、CPE辞書照合経由で識別に成功したのは**6/20**(修正前は0/20)。
 
-この0/20という数値の原因は、少なくとも「この20件に対応する製品自体がCPE辞書に一切存在しない」ことではない——実際、`google:guava`・`fasterxml:jackson-databind`・`netty:netty`・`apache:log4j`のように、Javaエコシステムの著名なライブラリはCPE辞書に周知のエントリ(vendor:product表記)が存在することを実データベースで確認済み。しかし、識別処理のどの段階でこれらの候補が最終的に除外されているか(あいまい一致検索自体が候補を返さないのか、それとも検索は候補を返すが後段の絞り込みロジックで除外されているのか)は本資料の測定範囲では特定できていない。したがって「Mavenエコシステム全体・Java製品全般が原理的に識別不能である」とまでは言えない一方、その正確な原因については現時点で断定を避け、今後の追加調査に委ねる。レジストリ照合自体(パッケージ名でのマッチ)が原理的に100%失敗することは意図した設計であり、これ自体はバグではない。
+以前(修正前)の0/20という数値の原因を追跡した結果、20件は次の3グループに切り分けられることが判明した。
+
+- **6件は真に識別不能**: `lombok`・`mockito-core`・`HikariCP`・`micrometer-core`はCPE辞書側に該当エントリ自体が存在しない。`kafka-clients`・`log4j-core`はvendor:productとしては辞書に存在する(`apache:kafka`・`apache:log4j`)ものの、あいまい一致(トライグラム類似度)が候補プールに入る閾値に届かない。
+- **14件は候補プールには入るのに後段のロジックで棄却されていた、本当のギャップ**。このうち9件は同一の根本原因を共有していた: 識別処理の「containment」ロジック(`Stage1IdentificationService#explainsQuery`)が、候補にマッチした部分より前のクエリトークン全てが辞書側のvendor名で説明できることを要求しており、Mavenの`groupId`逆ドメイン記法の先頭セグメント(`com`・`org`・`io`・`ch`等)はほぼ確実にCPEベンダー名としては認識されないため、マッチが先頭トークンから始まらない限り構造的に棄却されていた。
+- **残り5件は個別の原因**(`spring-core`・`commons-lang3`・`gson`・`hibernate-core`・`junit`)で、今回の修正の対象外。
+
+上記9件のうち、今回の修正(先頭トークンが逆ドメイン記法によくあるプレフィックスである場合に限り、vendor説明を要求せず素通しする)で実際に救済されたのは**6件**: `com.google.guava:guava`・`com.fasterxml.jackson.core:jackson-databind`(ただし`fasterxml:jackson-databind`ではなく近縁の`fasterxml:jackson-core`というCPEに識別される——ランキング側の別課題であり今回の修正範囲外)・`org.slf4j:slf4j-api`・`com.squareup.okhttp3:okhttp`・`io.netty:netty-all`・`ch.qos.logback:logback-classic`。残り3件(`com.squareup.retrofit2:retrofit`・`org.apache.httpcomponents:httpclient`・`org.springframework.boot:spring-boot-starter-web`)は、逆ドメイン記法のプレフィックスとマッチ本体の間にもう一段、vendor名として説明できない未知トークン(`retrofit2`・`httpcomponents`・`boot`)を挟んでおり、今回の狭く絞った修正の対象外のまま識別不能で残っている。
+
+なお、この修正が非Maven製品の識別精度に影響していないことも確認済み——3節のCPE `vendor:product`完全一致率(64/68)は修正前後で変化なし。
+
+**2節の識別対象recall(247/268)についての注意**: この数値は本節の修正よりも前の測定値であり(冒頭の注記の通り、大規模同期後の再測定対象に含まれていない)、今回の6/20の改善を反映していない。再測定は別途判断事項とする。
 
 ## 5. マーケットプレイス拡張系(ブラウザ拡張・VS Code拡張・JetBrainsプラグイン等)の精度
 
