@@ -1346,7 +1346,6 @@ class Stage1IdentificationServiceTest {
         jetbrainsPlugin.setTargetSwValues(java.util.Set.of("jetbrains"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(jetbrainsPlugin));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem item = item("Foo Extension");
         item.setInstallUrl("https://marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
@@ -1367,7 +1366,6 @@ class Stage1IdentificationServiceTest {
         vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(vscodeExtension));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem item = item("Foo Extension");
         item.setInstallUrl("https://evil.com/marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
@@ -1390,7 +1388,6 @@ class Stage1IdentificationServiceTest {
         vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(vscodeExtension));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem item = item("Foo Extension");
         item.setInstallUrl("https://marketplace.visualstudio.com.evil.com/items?itemName=fooinc.foo-extension");
@@ -1455,7 +1452,6 @@ class Stage1IdentificationServiceTest {
         chromeExtension.setTargetSwValues(java.util.Set.of("chrome"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(chromeExtension));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem item = item("Foo Extension");
         item.setInstallUrl("https://chrome.google.com/intl/en/about/");
@@ -1514,7 +1510,6 @@ class Stage1IdentificationServiceTest {
         chromeExtension.setTargetSwValues(java.util.Set.of("chrome"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(chromeExtension));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem item = item("Foo Extension");
         item.setInstallUrl("https://chrome.google.com/webstoreEVIL/detail/foo-extension/abcdefghijklmnop");
@@ -1558,7 +1553,6 @@ class Stage1IdentificationServiceTest {
         vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(vscodeExtension));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem item = item("Foo Extension");
         item.setInstallUrl("evil.com/marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
@@ -2022,7 +2016,6 @@ class Stage1IdentificationServiceTest {
         oracleVmVirtualbox.setMaxCatalogedMajor(7);
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(oracleVmVirtualbox));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem item = item("VirtualBox");
         item.setVendor("Oracle");
@@ -2154,7 +2147,6 @@ class Stage1IdentificationServiceTest {
         CpeDictionaryEntry widgetGadget = cpeEntry("cpe:2.3:a:acme:widget_gadget:1.0.0:*:*:*:*:*:*:*", "widget_gadget");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(widgetTool, widgetGadget));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
         stubSaveReturnsArgument();
 
         Optional<IdentifiedProduct> result = service(List.of()).identify(item("Widget"), USER_ID);
@@ -2233,7 +2225,6 @@ class Stage1IdentificationServiceTest {
         visualStudioCode.setTitle("Microsoft Visual Studio Code 1.99.3");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
                 .thenReturn(List.of(visualStudioCode));
-        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
 
         ResearchJobItem item = item("Visual Studio Code Server");
         item.setVendor("Coder");
