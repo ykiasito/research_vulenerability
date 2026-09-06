@@ -970,6 +970,127 @@ class ClosedModeArchitectureGateTest {
     }
 
     // ------------------------------------------------------------------------------------------
+    // Closed-mode backlog item 360, Step 1 of 3: a safeguard ahead of merging master into
+    // closed-mode (156 commits behind at the time of writing). §3-2's invariant is that
+    // closed-mode's diff from master is deletions-only; the risk this specific step guards
+    // against is one of those 156 master commits silently *resurrecting* a path closed-mode
+    // already deleted for a closed-mode reason (e.g. re-adding llm-service/ or a live
+    // *VulnerabilitySource/RegistryClient class) as an unintended side effect of the merge, rather
+    // than the merge introducing a genuinely new master-only file (which is expected and fine).
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Fixed denylist of every path closed-mode had already deleted relative to master as of this
+     * step's implementation (2026-09-06), derived from {@code git diff --name-status d6b1ebd
+     * origin/closed-mode} (every line starting with {@code D}) — {@code d6b1ebd} is the merge-base
+     * between {@code origin/closed-mode} and {@code master} at that point, so this is exactly the
+     * set of closed-mode-only deletions the upcoming master merge (Step 2) must not undo.
+     *
+     * <p>Deliberately a static list, not a live {@code git diff} run at test time: {@code .git}
+     * isn't even reachable from the {@code mvn test} sandbox (only {@code backend/}, or at best
+     * the full repo checkout, is mounted — never the full history), and more importantly, a
+     * dynamic check would silently redefine its own meaning every time master gains new deletions
+     * of its own — this list must stay exactly what it was the day it was captured.
+     *
+     * <p><b>Maintenance</b>: this list is not expected to change as part of routine master-sync
+     * merges (§9-3) the way {@link #MASTER_MIGRATION_BASELINE} is — it is a one-time snapshot for
+     * item 360's specific master-merge safeguard. If a future, separately-decided closed-mode
+     * deletion needs the same protection, add it here deliberately in the same commit that makes
+     * that deletion, not as a routine sync update.
+     *
+     * <p>Peer-review follow-up (2026-09-06): the default {@code git diff --name-status}'s
+     * rename-detection hid one closed-mode-only removal — {@code
+     * NvdMirrorAbVerificationRunnerTest.java} was classified as a rename (R086) into {@code
+     * NvdAuthoritativeConfigurationMatcherTest.java} (commit {@code 001a1c9}) rather than a pure
+     * delete, so it never showed up as a {@code D} line. The correct, exhaustive derivation command
+     * is {@code git diff --name-status --no-renames d6b1ebd origin/closed-mode | grep '^D'} — always
+     * use {@code --no-renames} when regenerating this list, or a future similar rename could hide
+     * another entry the same way.
+     */
+    private static final List<String> DELETED_PATHS_DENYLIST = List.of(
+            "backend/src/main/java/com/vulncheck/app/service/llm/LlmServiceClient.java",
+            "backend/src/main/java/com/vulncheck/app/service/llm/LlmServiceModels.java",
+            "backend/src/main/java/com/vulncheck/app/service/vuln/NvdKeywordVulnerabilitySource.java",
+            "backend/src/main/java/com/vulncheck/app/service/vuln/NvdResponseCache.java",
+            "backend/src/main/java/com/vulncheck/app/service/vuln/OsvLiveQueryClient.java",
+            "backend/src/main/java/com/vulncheck/app/service/vuln/OsvRateLimiter.java",
+            "backend/src/test/java/com/vulncheck/app/service/NvdMirrorAbVerificationRunner.java",
+            "backend/src/test/java/com/vulncheck/app/service/NvdMirrorAbVerificationRunnerTest.java",
+            "backend/src/test/java/com/vulncheck/app/service/llm/LlmServiceClientTest.java",
+            "backend/src/test/java/com/vulncheck/app/service/osv/OsvMirrorLiveApiComparisonJobCreator.java",
+            "backend/src/test/java/com/vulncheck/app/service/registry/CratesIoMirrorParityGolden300Test.java",
+            "backend/src/test/java/com/vulncheck/app/service/registry/GoMirrorParityGolden300Test.java",
+            "backend/src/test/java/com/vulncheck/app/service/registry/HexMirrorParityGolden300Test.java",
+            "backend/src/test/java/com/vulncheck/app/service/registry/NpmMirrorParityGolden300Test.java",
+            "backend/src/test/java/com/vulncheck/app/service/registry/NuGetMirrorParityGolden300Test.java",
+            "backend/src/test/java/com/vulncheck/app/service/registry/PackagistMirrorParityGolden300Test.java",
+            "backend/src/test/java/com/vulncheck/app/service/registry/PubDevMirrorParityGolden300Test.java",
+            "backend/src/test/java/com/vulncheck/app/service/registry/PyPiMirrorParityGolden300Test.java",
+            "backend/src/test/java/com/vulncheck/app/service/registry/RubyGemsMirrorParityGolden300Test.java",
+            "backend/src/test/java/com/vulncheck/app/service/vuln/NvdKeywordVulnerabilitySourceTest.java",
+            "backend/src/test/java/com/vulncheck/app/service/vuln/OsvLiveQueryClientTest.java",
+            "backend/src/test/java/com/vulncheck/app/service/vuln/OsvRateLimiterTest.java",
+            "llm-service/Dockerfile",
+            "llm-service/README.md",
+            "llm-service/main.py",
+            "llm-service/requirements-dev.txt",
+            "llm-service/requirements.txt",
+            "llm-service/tests/test_verify_high_confidence_schema.py");
+
+    /**
+     * Asserts every path in {@link #DELETED_PATHS_DENYLIST} is still absent from disk. Split into
+     * two passes rather than one uniform loop, mirroring this class's existing repo-root-vs-module
+     * distinction (see class javadoc): {@code backend/src/**} paths are resolved relative to this
+     * module's own working directory (stripping the {@code backend/} prefix) and always run, with
+     * no repo-root dependency at all; {@code llm-service/} paths are outside this module entirely,
+     * so they're resolved via {@link #repoRootOrSkip} the same way {@link
+     * #llmServiceDirectoryIsAbsentFromRepository()} does, and abort (locally) or hard-fail (under
+     * CI, see {@link #REQUIRE_REPO_ROOT_PROPERTY}) only that second half when the repo root isn't
+     * reachable — the backend/-relative assertion below it still runs and can still fail on its
+     * own even in that reduced sandbox.
+     */
+    @Test
+    void deletedPathsRemainAbsentFromRepository() throws IOException {
+        List<String> resurrectedBackendPaths = new ArrayList<>();
+        List<String> llmServicePaths = new ArrayList<>();
+        for (String path : DELETED_PATHS_DENYLIST) {
+            if (path.startsWith("llm-service/")) {
+                llmServicePaths.add(path);
+                continue;
+            }
+            Path resolved = Path.of(path.substring("backend/".length()));
+            if (Files.exists(resolved)) {
+                resurrectedBackendPaths.add(path);
+            }
+        }
+
+        assertThat(resurrectedBackendPaths)
+                .as("these backend/ paths were deliberately deleted on closed-mode (see "
+                        + "DELETED_PATHS_DENYLIST) but exist again on disk — most likely reintroduced "
+                        + "by an unreviewed master merge (closed-mode backlog item 360, §9-3); they must "
+                        + "not silently come back")
+                .isEmpty();
+
+        if (!llmServicePaths.isEmpty()) {
+            Path repoRoot = repoRootOrSkip(
+                    "cannot verify llm-service/ deleted paths' absence from here");
+            List<String> resurrectedLlmServicePaths = new ArrayList<>();
+            for (String path : llmServicePaths) {
+                if (Files.exists(repoRoot.resolve(path))) {
+                    resurrectedLlmServicePaths.add(path);
+                }
+            }
+
+            assertThat(resurrectedLlmServicePaths)
+                    .as("these llm-service/ paths were deliberately deleted on closed-mode (B1, "
+                            + "item 177) but exist again on disk — most likely reintroduced by an "
+                            + "unreviewed master merge (closed-mode backlog item 360, §9-3); they must "
+                            + "not silently come back")
+                    .isEmpty();
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
     // helpers
     // ------------------------------------------------------------------------------------------
 
