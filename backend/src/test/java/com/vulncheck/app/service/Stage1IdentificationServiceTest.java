@@ -3366,28 +3366,52 @@ class Stage1IdentificationServiceTest {
 
     @Test
     void reverseDnsLeadingTokenBypassNeverFiresWhenTheItemVendorContradictsTheCandidateCpeVendor() {
-        // Backlog item 367 REVISE round 3 (senior review, 2026-09-07): a 2-segment groupId like
-        // "net.acmecorp:buildtool" only ever has ONE leading token ahead of the Direction 2 match
-        // ("net"), so the REVERSE_DNS_PACKAGE_PREFIXES bypass is the ONLY gate that token goes
-        // through — itemVendorContradicts's own separate check (further below, start == 0 only)
-        // never gets a chance to fire for it. Without requiring !itemVendorContradicts(...) inside
-        // the bypass itself, this candidate would wrongly be admitted purely because "net" sits on
-        // the allowlist, even though the item's own vendor field ("Acme Corp") actively contradicts
-        // the candidate's actual CPE vendor ("microsoft", entirely unrelated to "acmecorp") — the
-        // same shape of vendor-contradiction item 319 already guards against elsewhere in this
-        // method. The tail ("buildtool") still genuinely relates to the matched candidate's own
-        // product, same as the positive test above, so tail-relatedness alone is not what should be
-        // rejecting this candidate — only the vendor contradiction should.
-        CpeDictionaryEntry microsoftBuildtool =
-                cpeEntry("cpe:2.3:a:microsoft:buildtool:2.0:*:*:*:*:*:*:*", "buildtool");
+        // Backlog item 367 REVISE round 4 (senior review, 2026-09-07): the round-3 version of this
+        // test used "net.acmecorp:buildtool", which tokenizes to 3 leading-eligible tokens ("net",
+        // "acmecorp") ahead of a match starting at index 2 — "acmecorp" alone is enough to fail
+        // vendorExplains and reject the candidate regardless of the itemVendorContradicts guard,
+        // making that test pass even with the guard removed. This version instead uses a query whose
+        // Direction 2 match starts at token 1 (the artifactId shares a word stem with the groupId's
+        // own non-TLD segment, "acmecorp"), so the single leading token ("org") only ever goes
+        // through the REVERSE_DNS_PACKAGE_PREFIXES bypass — itemVendorContradicts's own separate
+        // check (further below, start == 0 only) never gets a chance to fire for it. Without
+        // requiring !itemVendorContradicts(...) inside the bypass itself, this candidate would
+        // wrongly be admitted purely because "org" sits on the allowlist, even though the item's own
+        // vendor field ("Acme Corp") actively contradicts the candidate's actual CPE vendor
+        // ("microsoft", entirely unrelated to "acmecorp"). No stubSaveReturnsArgument() here — the
+        // rejected candidate never reaches save(), so stubbing it would be an unnecessary stub.
+        CpeDictionaryEntry microsoftAcmecorp =
+                cpeEntry("cpe:2.3:a:microsoft:acmecorp:2.0:*:*:*:*:*:*:*", "acmecorp");
         when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
-                .thenReturn(List.of(microsoftBuildtool));
+                .thenReturn(List.of(microsoftAcmecorp));
 
-        ResearchJobItem item = item("net.acmecorp:buildtool");
+        ResearchJobItem item = item("org.acmecorp:acmecorp-core");
         item.setVendor("Acme Corp");
 
         assertThat(service(List.of()).identify(item, USER_ID)).isEmpty();
         verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void reverseDnsLeadingTokenBypassStillAdmitsTheSameCandidateWhenTheItemVendorIsBlank() {
+        // Backlog item 367 REVISE round 4 (senior review, 2026-09-07): the direct positive
+        // counterpart to the test directly above — same query, same single candidate, only
+        // difference is a blank item vendor (the actual shape of every Maven-coordinate row in this
+        // project's own golden-300/real-1000 fixtures). itemVendorContradicts returns false for a
+        // blank item vendor (see its own javadoc), so the bypass still fires and this is the only
+        // direct evidence that the round-3 itemVendorContradicts guard doesn't cost this fix's own
+        // recovered rows, rather than merely an inference from itemVendorContradicts's javadoc.
+        CpeDictionaryEntry microsoftAcmecorp =
+                cpeEntry("cpe:2.3:a:microsoft:acmecorp:2.0:*:*:*:*:*:*:*", "acmecorp");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(microsoftAcmecorp));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.acmecorp:acmecorp-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:microsoft:acmecorp:1.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
