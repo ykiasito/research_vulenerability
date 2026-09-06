@@ -11,7 +11,7 @@
 このドキュメントは、外部ネットワーク通信を一切行わない「閉域モード」ビルドで実際に測定した識別精度をまとめたものです。
 
 - **測定方法**: golden-300ベンチマーク(300件の固定データセット。内訳はパッケージレジストリ経由で識別できる200件、パッケージレジストリを持たない製品をCPE辞書照合で識別する68件、いずれの経路でも識別されないことが正解の対照行32件)を使用。対照行32件のうち17件は実在するが辞書・レジストリのいずれにも存在しない実在製品、残り15件は誤検知(本来識別されるべきでない入力を誤って識別してしまうこと)を検出するために意図的に作成された架空製品。つまり300件のうち285件が実在製品、15件が誤検知検出用の架空製品。
-- **実行形態**: パッケージレジストリ9種類のローカルミラーを投入済みの実データベースに対し、稼働中のバックエンドへHTTP経由でジョブを投げるのではなく、識別処理の中核である`Stage1IdentificationService`を`@SpringBootTest`から直接呼び出すin-process実行で測定した(根拠クラス: `ChocolateyRemovalGolden300RecallTest`・`CpeVendorProductGolden300RecallTest`・`MavenCentralRemovalGolden300RecallTest`・`MarketplaceExtensionFixtureRecallTest`、いずれも`backend/src/test/java/com/vulncheck/app/service/`配下、`@Disabled`付きの手動実行専用測定ツールで、通常の`mvn test`では実行されない)。識別対象recall 247/268という数値は、実際にジョブとして投入したフルパイプライン実行でも同一の結果になることを別途確認済み。
+- **実行形態**: パッケージレジストリ9種類のローカルミラーを投入済みの実データベースに対し、稼働中のバックエンドへHTTP経由でジョブを投げるのではなく、識別処理の中核である`Stage1IdentificationService`を`@SpringBootTest`から直接呼び出すin-process実行で測定した(根拠クラス: `ChocolateyRemovalGolden300RecallTest`・`CpeVendorProductGolden300RecallTest`・`MavenCentralRemovalGolden300RecallTest`・`MarketplaceExtensionFixtureRecallTest`(こちらはgolden-300ではなく、別のマーケットプレイス拡張系フィクスチャを測定するクラス。詳細は「5. マーケットプレイス拡張系」を参照)、いずれも`backend/src/test/java/com/vulncheck/app/service/`配下、`@Disabled`付きの手動実行専用測定ツールで、通常の`mvn test`では実行されない)。識別対象recall 247/268という数値は、実際にジョブとして投入したフルパイプライン実行でも同一の結果になることを別途確認済み。
 - 閉域モードにはAI(Claude API)を呼び出す経路が物理的に存在しない(コード自体が削除されている)ため、この測定は常に静的パイプラインのみで完結し、**AIコストは常に$0**。
 - 以下の数値はいずれも、実際にビルド・実行して得られた実測値であり、投影値やシミュレーション値ではない。
 
@@ -34,7 +34,7 @@
 
 パッケージレジストリを持たない製品(OS・デスクトップアプリケーション・ネットワーク機器等)68件について、識別結果のCPE識別子(vendor:product)が正解データと完全に一致するかを検証した。「識別はできたが、期待したのとは違う製品として識別された」というケースも不一致として扱う、識別可否だけを見るよりも厳しい基準の指標。
 
-この数値は、masterからの大規模同期後に再測定したもの(2026-09-06時点、以前は62/68 (91.18%))。同期でmaster側の近縁製品(sibling-product)派生関係の抑制ロジックが取り込まれた結果、それまで不一致だった近縁製品混同のケース(2件)が解消された。なお、同じ68件のCPE識別対象行に対する同一指標(vendor:product完全一致率)はmaster側の別クラス(このブランチには存在しない、master専用のCPEランキングテスト)でも64/68として記録されており、そちらも下記と同一の4件を不一致として挙げている——ただし両者は同じ分子・分母をそれぞれ独立に測定しているだけで、閉域モードの識別ロジック自体がmasterの実装に追いついた・一致したという意味ではない点に注意。
+この数値は、masterからの大規模同期後に再測定したもの(2026-09-06時点、以前は62/68 (91.18%))。同期でmaster側の近縁製品(sibling-product)派生関係の抑制ロジックが取り込まれた結果、それまで不一致だった近縁製品混同のケース(2件)が解消された。なお、同じ68件・同一指標について、別の測定クラスが同期前のmaster側パイプラインに対する実行結果として64/68を記録しており、そちらも下記と同一の4件を不一致として挙げている——ただし両者は同じ分子・分母をそれぞれ独立に測定しているだけで、閉域モードの識別ロジック自体がmasterの実装に追いついた・一致したという意味ではない点に注意。
 
 残る不一致4件(傾向の分類は「6. 既知の残存ギャップ」も参照):
 
@@ -67,7 +67,7 @@ Maven CentralはToS(利用規約)上の理由から、閉域モードでは意�
 - Python: 誤ったCPE(`python:python`)に識別される(期待値は`microsoft:python_extension`)。マーケットプレイス拡張の判定ロジックとは無関係な、別の静的照合経路に起因。
 - ESLint・Live Share: いずれも識別不能(UNIDENTIFIED)。期待値はそれぞれ`microsoft:eslint`・`microsoft:visual_studio_live_share`。
 
-対照行の唯一の不一致は、実際にはCoderの無関係な製品`code-server`である"Visual Studio Code Server"行。以前はMicrosoft Visual Studio Codeの実在しないバージョンへ誤って識別していたが、現在は誤ったCPEへの識別ではなく、正しくUNIDENTIFIEDに変わっている。
+対照行の唯一の不一致は"Visual Studio Code Server"行(実際にはCoderの無関係な製品`coder:code-server`)。以前はMicrosoft Visual Studio Codeの実在しないバージョンへ誤って識別していたが、現在はUNIDENTIFIEDを返す。期待値の`coder:code-server`には一致しないため不一致のままだが、誤ったCPEへ識別する失敗の仕方ではなくなった。
 
 ## 6. 既知の残存ギャップ
 
