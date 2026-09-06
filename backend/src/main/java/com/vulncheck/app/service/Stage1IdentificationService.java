@@ -1874,7 +1874,7 @@ public class Stage1IdentificationService {
         String query = cpeQuery(vendor, productName);
         if (registryEcosystem.isPresent()) {
             log.info("Local CPE dictionary had no candidates for '{}' — skipping live NVD CPE lookup "
-                    + "since a registry match already covers this item", query);
+                    + "since a registry match already covers this item", LogSanitizer.sanitize(query));
             return new CpeCandidateResult(List.of(), false, false);
         }
 
