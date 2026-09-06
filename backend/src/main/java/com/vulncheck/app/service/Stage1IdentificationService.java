@@ -501,7 +501,12 @@ public class Stage1IdentificationService {
             // its own install_url (e.g. a VS Code marketplace extension) had that CPE wrongly
             // re-rejected here whenever it also happened to carry an unconfirmed-version registry
             // match to distrust (see Stage1IdentificationServiceTest's item-389 regression case for
-            // the ESLint marketplace-extension scenario this fixes).
+            // the ESLint marketplace-extension scenario this fixes). Practical effect (senior-reviewer
+            // verification, round 2): for an item that does declare an install_url, this if's own
+            // gate check below never fails in the first place, so this whole Round-5 re-check
+            // (discard chosenCpe, then try selectFallbackCpeCandidateAfterRegistryDistrust) is
+            // effectively a no-op for that item — chosenCpe simply survives untouched, which is what
+            // actually fixes the ESLint scenario above.
             if (chosenCpe != null
                     && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), "", item.getInstallUrl()))) {
                 log.info("Dropping CPE {} for item {} — it only passed the target_sw gate via the "
@@ -726,12 +731,20 @@ public class Stage1IdentificationService {
      *      either — the caller then correctly falls through to the existing UNIDENTIFIED outcome.
      *
      * <p>Backlog item 389: takes the item's own {@code installUrl} as a parameter rather than
-     * hardcoding it away — {@code registryEcosystem=Optional.empty()} below is what actually gives
-     * this method its "bare (no-ecosystem-context) gate" scope (item 176's own scope), and that is
-     * fully independent of whether an install_url declared-platform signal (item 303) also happens
-     * to be present. Nulling installUrl too (the pre-389 bug) silently discarded that unrelated
-     * signal as well, wrongly rejecting a fallback candidate that only needed its own install_url
-     * to pass.
+     * hardcoding it away, purely to stay consistent with the caller's own re-check just above (the
+     * {@code if (chosenCpe != null && !passesTargetSwGate(...))} guard in {@link #resolveCandidates}
+     * that decides whether this method is even invoked) — not because this parameterization changes
+     * this method's own outcome today. Measured (senior-reviewer verification, round 2): it doesn't.
+     * {@link TargetSwContext#from} has {@code declaredTargetSw()} prefer the install_url-derived
+     * signal over the (here always-empty) registry-ecosystem one, so whenever an item actually
+     * declares an install_url, that same preference already applies to the caller's own bare-gate
+     * re-check — which is exactly the check that decides whether this method gets called at all — so
+     * that {@code if} guard does not fire for an install_url-declared item, and this method is never
+     * reached for one. On every call that does reach here, {@code installUrl} is therefore
+     * effectively blank/absent, i.e. behaviorally equivalent to the pre-389 hardcoded {@code null}.
+     * This parameter is kept anyway as drift protection: if the caller's own gate condition above
+     * ever changes such that this equivalence no longer holds, this method's own gate would silently
+     * fall out of sync with it without this.
      */
     private CpeDictionaryEntry selectFallbackCpeCandidateAfterRegistryDistrust(
             CpeDictionaryEntry discardedCpe, List<CpeDictionaryEntry> cpeCandidates, String installUrl) {
