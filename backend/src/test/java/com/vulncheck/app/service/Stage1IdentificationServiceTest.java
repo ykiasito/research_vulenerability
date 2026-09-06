@@ -3270,6 +3270,117 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void mavenCoordinateShapedQueryRecoversAReverseDnsLeadingTokenCandidate() {
+        // Backlog item 367 (real-devDB Maven investigation, 2026-09-06): a genuine Maven
+        // groupId:artifactId coordinate leads with a reverse-DNS segment ("com") that is essentially
+        // never itself a recognized CPE vendor slug — the real vendor identity ("google") sits one
+        // segment further in. Mocked here (rather than relying solely on the real-dev-DB golden-300
+        // measurement) so this exact admission path has its own fast, deterministic regression test,
+        // matching this file's established convention for every other explainsQuery tweak.
+        CpeDictionaryEntry googleGuava = cpeEntry("cpe:2.3:a:google:guava:32.0.0:*:*:*:*:*:*:*", "guava");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(googleGuava));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("com.google.guava:guava"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:google:guava:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void reverseDnsLeadingTokenBypassNeverFiresForANonMavenShapedQuery() {
+        // Backlog item 367 REVISE (peer review, 2026-09-06): the first version of this fix consulted
+        // REVERSE_DNS_PACKAGE_PREFIXES unconditionally for any bare leading token, regardless of
+        // whether the query actually looked like a Maven coordinate — a real false-positive risk for
+        // a query like ".NET Framework" (tokenizes to ["net", "framework"]), where a large enough CPE
+        // dictionary plausibly has some unrelated vendor's own "framework" entry. Two same-slug
+        // ("framework") candidates here, differing only in CPE vendor: "net:framework" is legitimately
+        // vendor-explained (vendorExplains("net", "net") is a genuine whole-token match, nothing to do
+        // with this fix) and must still be admitted; "acmecorp:framework" is NOT vendor-explained and,
+        // without the queryLooksLikeReverseDnsCoordinate gate, would have wrongly been let through
+        // purely because "net" sits on the allowlist. Asserting cpeCandidateCount (rather than just
+        // the chosen CPE, which "net:framework" would win either way on ranking) is what actually
+        // proves the wrong-vendor candidate was excluded from admission, not merely outranked.
+        CpeDictionaryEntry netFramework = cpeEntry("cpe:2.3:a:net:framework:3.0:*:*:*:*:*:*:*", "framework");
+        CpeDictionaryEntry acmeFramework = cpeEntry("cpe:2.3:a:acmecorp:framework:3.0:*:*:*:*:*:*:*", "framework");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(netFramework, acmeFramework));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item(".NET Framework"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:net:framework:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void reverseDnsLeadingTokenBypassRejectsADotShapedQueryWhoseArtifactTailIsUnrelatedToTheMatch() {
+        // Backlog item 367 REVISE round 2 (peer review, 2026-09-06): the round-1 fix's
+        // queryLooksLikeReverseDnsCoordinate shape check alone isn't enough — the reviewer's own
+        // verified counterexample, "net.framework:x64", tokenizes to ["net", "framework", "x64"] and
+        // has the EXACT SAME two-dot-segment-then-colon shape as the genuine "io.netty:netty-all", so
+        // shape alone can't tell them apart. What does: a real Maven artifactId is conventionally
+        // derived from (or equal to) the product identity the candidate matched on ("netty-all"
+        // relates to "netty"); an arbitrary colon-suffixed qualifier like "x64" does not relate to
+        // "framework" at all. Same minimal-pair shape as the round-1 test above (two same-slug
+        // "framework" candidates, only one is vendor-explained the ordinary way), but this time both
+        // the leading token ("net") AND the query's dot-then-colon shape are identical between the
+        // legitimate and adversarial cases — only the artifact tail's relatedness to the match differs.
+        CpeDictionaryEntry netFramework = cpeEntry("cpe:2.3:a:net:framework:3.0:*:*:*:*:*:*:*", "framework");
+        CpeDictionaryEntry acmeFramework = cpeEntry("cpe:2.3:a:acmecorp:framework:3.0:*:*:*:*:*:*:*", "framework");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(netFramework, acmeFramework));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("net.framework:x64"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:net:framework:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void reverseDnsLeadingTokenBypassStillAdmitsADotShapedQueryWhoseArtifactTailRelatesToTheMatch() {
+        // Backlog item 367 REVISE round 2: the positive contrast to the test directly above — same
+        // leading bypassed token ("net"), same dot-then-colon shape, but this time the artifact tail
+        // ("foocorp-utils") genuinely relates to the matched candidate's own product ("foocorp"), the
+        // way a real Maven artifactId routinely does. Confirms the round-2 tightening (requiring that
+        // relatedness) doesn't also reject a query that legitimately needs the leading-token bypass —
+        // "foocorpvendor" does not vendor-explain "net" any more than "acmecorp" did above, so this
+        // candidate is only admitted via the gated bypass, not via ordinary vendorExplains.
+        CpeDictionaryEntry foocorpProduct =
+                cpeEntry("cpe:2.3:a:foocorpvendor:foocorp:2.0:*:*:*:*:*:*:*", "foocorp");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(foocorpProduct));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("net.foocorp:foocorp-utils"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:foocorpvendor:foocorp:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void queryLooksLikeReverseDnsCoordinateOnlyMatchesAGenuineMultiSegmentGroupIdArtifactShape() {
+        // Backlog item 367 REVISE: direct unit coverage of the structural gate itself (same
+        // convention as normalizeForContainmentStripsCpeBackslashEscapes... below, which also calls a
+        // package-private helper directly) — a real Maven coordinate matches, a bare short word, a
+        // colon-free product name, and a single-segment "groupId" (no dot at all, e.g. "junit:junit")
+        // all correctly do not.
+        Stage1IdentificationService service = service(List.of());
+
+        assertThat(service.queryLooksLikeReverseDnsCoordinate("com.google.guava:guava")).isTrue();
+        assertThat(service.queryLooksLikeReverseDnsCoordinate("io.netty:netty-all")).isTrue();
+        assertThat(service.queryLooksLikeReverseDnsCoordinate(".net framework")).isFalse();
+        assertThat(service.queryLooksLikeReverseDnsCoordinate("framework")).isFalse();
+        assertThat(service.queryLooksLikeReverseDnsCoordinate("junit:junit")).isFalse();
+    }
+
+    @Test
     void normalizeForContainmentStripsCpeBackslashEscapesSoAnEscapedDictionaryEntryStillMatchesTheUnescapedQuery() {
         // CPE 2.3 strings backslash-escape reserved characters (e.g. "notepad\+\+" for the product
         // segment of Notepad++'s own dictionary entry) — normalizeForContainment must strip those so
