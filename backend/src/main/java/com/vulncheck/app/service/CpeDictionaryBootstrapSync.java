@@ -29,8 +29,12 @@ import org.springframework.stereotype.Component;
  * path can use, matching the scheduled twin's ({@code CpeDictionaryScheduledResync}) resolution. This
  * path was previously hardcoded to {@code Optional.empty()} (always unkeyed) on the assumption that a
  * key only shortens the per-request rate-limit wait from 6.5s to 0.7s against a sync dominated by
- * ~30s-per-page transfer time; the measured impact is larger than that (~18 minutes added to the
- * ~103-minute keyed baseline), so this now uses the admin key when one is registered.
+ * ~30s-per-page transfer time. That per-request difference is real but was previously judged
+ * negligible; at RESULTS_PER_PAGE=10000 the full sync issues ~182 requests, so unkeyed adds
+ * ~182 x 5.8s ~= 18 minutes on top of the ~103-minute keyed baseline (arithmetic, not a
+ * measured unkeyed run -- task-backlog item 161). That is a large enough share of closed-mode
+ * first-time setup to be worth the credential wiring, so this now uses the admin key when one
+ * is registered.
  *
  * <p>Shares {@link NvdCpeSyncService}'s single {@code fullSyncRunning} guard (via {@link
  * NvdCpeSyncService#tryBeginFullSync}) with the admin-triggered full sync ({@code
