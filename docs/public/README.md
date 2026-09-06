@@ -6,6 +6,7 @@ CSV駆動の脆弱性調査Webアプリの技術仕様書。実装済みの内�
 - [pipeline.md](./pipeline.md) — 調査パイプラインの4段構成(Stage1製品識別〜Stage4 AI最終手段)の詳細設計、各Tier/Stageのコスト特性。
 - [database-schema.md](./database-schema.md) — PostgreSQLスキーマ、Flywayマイグレーション履歴、主要テーブルの役割。
 - [CLOSED_MODE_DATA_HANDLING.md](./CLOSED_MODE_DATA_HANDLING.md) — 閉域モード(closed-mode)ビルドにおけるデータ非送信の設計と、第三者による検証方法。
+- [MEASURED_ACCURACY.md](./MEASURED_ACCURACY.md) — 閉域モード(closed-mode)ビルドで実測した識別精度(golden-300ベンチマーク)。
 
 各ドキュメントは作成・改訂された時点のスナップショットとして書かれており、後続の改訂で内容が更新されている場合はドキュメント内に追記・訂正の形で残している（数字を差し替えて経緯を消すのではなく、訂正の経緯自体を記録として残す方針）。
 
