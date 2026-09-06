@@ -144,23 +144,32 @@ public class RestClientConfig {
     }
 
     /**
-     * For CVE.org mirror sync ({@code CveOrgSyncService}) — used only for the one small GitHub
-     * Releases API call ({@code GET .../releases/latest}) that resolves the current baseline/delta
-     * asset URLs. Deliberately NOT the shared {@code externalApiRestClient} (item 165, 2026-09-01):
-     * that bean is meant to stay a request-path-only egress (10 registries, live NVD, live OSV), and
-     * mixing this sync-time call into it would make it one of the things a future closed-mode branch
-     * would have to carefully carve back out. Same shape as {@link #ghsaSyncRestClient}/{@link
-     * #osvSyncRestClient} (no-auto-redirect, same SSRF-hardening rationale) even though this
-     * particular call has no known redirect in practice, for consistency across the sync clients.
-     * The baseline/delta zip bodies themselves are NOT fetched through this client — {@code
-     * CveOrgSyncService#download} streams them through a plain {@link java.net.URLConnection},
-     * validated + redirect-revalidated against its own host allowlist (same SSRF-hardening as this
-     * bean provides for the releases-API call above), with a finite 30s read timeout rather than
-     * the unbounded one {@link #ghsaSyncRestClient}/{@link #osvSyncRestClient}'s equivalent
-     * large-download callers still use — a deliberate divergence (not a copy-paste gap): {@code
-     * CveOrgSyncService#openConnection}'s read timeout is a per-read/idle timeout, not a
-     * whole-download budget, so it doesn't cap a genuinely-streaming multi-GB transfer, only a
-     * connection that goes fully idle for that long.
+     * For CVE.org mirror sync ({@code CveOrgSyncService}) — used for the one small GitHub Releases
+     * API call ({@code GET .../releases/latest}, no known redirect in practice) that resolves the
+     * current baseline/delta asset URLs, and also for {@code
+     * CveOrgSyncService#resolveRedirectTarget}'s per-hop redirect-resolution requests (small,
+     * header-only — status code and {@code Location} header, never the response body), bounded at
+     * {@code MAX_REDIRECTS = 3} hops (same convention as {@code GhsaSyncService.MAX_REDIRECTS}).
+     * Deliberately NOT the shared {@code externalApiRestClient} (item 165, 2026-09-01): that bean
+     * is meant to stay a request-path-only egress (10 registries, live NVD, live OSV), and mixing
+     * this sync-time call into it would make it one of the things a future closed-mode branch would
+     * have to carefully carve back out. Same shape as {@link #ghsaSyncRestClient}/{@link
+     * #osvSyncRestClient} (no-auto-redirect, same SSRF-hardening rationale) — each hop's target
+     * host is validated against {@code CveOrgSyncService.ALLOWED_HOSTS} ({@code github.com}, the
+     * confirmed-live (2026-09-06, against {@code CVEProject/cvelistV5}) redirect target {@code
+     * release-assets.githubusercontent.com}, plus {@code objects.githubusercontent.com}/{@code
+     * github-releases.githubusercontent.com} kept as historical/failover asset hosts — see that
+     * allowlist's own javadoc for the full empirical chain and why it must not be inferred from a
+     * sibling's differently-shaped redirect). The baseline/delta zip bodies themselves are NOT
+     * fetched through this client — {@code CveOrgSyncService#download} streams them, once every hop
+     * up to the terminal one is resolved and validated, through a plain {@link
+     * java.net.URLConnection} ({@code CveOrgSyncService#openConnection}: auto-redirect-following
+     * disabled, fails closed on any further 3xx it wasn't already told to expect), with a finite
+     * 30s read timeout rather than the unbounded one {@link #ghsaSyncRestClient}/{@link
+     * #osvSyncRestClient}'s equivalent large-download callers still use — a deliberate divergence
+     * (not a copy-paste gap): that read timeout is a per-read/idle timeout, not a whole-download
+     * budget, so it doesn't cap a genuinely-streaming multi-GB transfer, only a connection that goes
+     * fully idle for that long.
      */
     @Bean
     public RestClient cveOrgSyncRestClient() {
