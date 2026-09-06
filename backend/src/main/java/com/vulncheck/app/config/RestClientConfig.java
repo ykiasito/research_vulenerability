@@ -144,32 +144,39 @@ public class RestClientConfig {
     }
 
     /**
-     * For CVE.org mirror sync ({@code CveOrgSyncService}) — used for the one small GitHub Releases
-     * API call ({@code GET .../releases/latest}, no known redirect in practice) that resolves the
-     * current baseline/delta asset URLs, and also for {@code
-     * CveOrgSyncService#resolveRedirectTarget}'s per-hop redirect-resolution requests (small,
-     * header-only — status code and {@code Location} header, never the response body), bounded at
-     * {@code MAX_REDIRECTS = 3} hops (same convention as {@code GhsaSyncService.MAX_REDIRECTS}).
-     * Deliberately NOT the shared {@code externalApiRestClient} (item 165, 2026-09-01): that bean
-     * is meant to stay a request-path-only egress (10 registries, live NVD, live OSV), and mixing
-     * this sync-time call into it would make it one of the things a future closed-mode branch would
-     * have to carefully carve back out. Same shape as {@link #ghsaSyncRestClient}/{@link
-     * #osvSyncRestClient} (no-auto-redirect, same SSRF-hardening rationale) — each hop's target
-     * host is validated against {@code CveOrgSyncService.ALLOWED_HOSTS} ({@code github.com}, the
-     * confirmed-live (2026-09-06, against {@code CVEProject/cvelistV5}) redirect target {@code
+     * For CVE.org mirror sync ({@code CveOrgSyncService}) — used ONLY for the one small GitHub
+     * Releases API call ({@code GET .../releases/latest}, no known redirect in practice) that
+     * resolves the current baseline/delta asset URLs' metadata. Deliberately NOT the shared {@code
+     * externalApiRestClient} (item 165, 2026-09-01): that bean is meant to stay a
+     * request-path-only egress (10 registries, live NVD, live OSV), and mixing this sync-time call
+     * into it would make it one of the things a future closed-mode branch would have to carefully
+     * carve back out. Same shape as {@link #ghsaSyncRestClient}/{@link #osvSyncRestClient}
+     * (no-auto-redirect) for consistency across the sync clients, even though this particular call
+     * has no known redirect in practice.
+     *
+     * <p><b>Not used for the actual baseline/delta zip download or its redirect chain</b> (senior
+     * review, 2026-09-06, fourth round — corrects this javadoc's own previous claim, which is
+     * exactly the "javadoc doesn't match code" defect class round 1 already had once). An earlier
+     * version of {@code CveOrgSyncService} resolved each redirect hop through a separate {@code
+     * RestClient.exchange()} call on THIS bean before opening a second, brand-new raw connection to
+     * actually fetch the bytes — which meant the terminal hop's multi-hundred-MB-to-multi-GB
+     * response body was downloaded and discarded once (Spring's {@code
+     * SimpleClientHttpResponse.close()} drains a response to EOF even when nothing read it) and
+     * then downloaded again for real, doubling egress. {@code CveOrgSyncService#download} now opens
+     * exactly one raw {@link java.net.URLConnection} per hop (validated against {@code
+     * CveOrgSyncService.DEFAULT_ALLOWED_HOSTS} — {@code github.com}, the confirmed-live (2026-09-06,
+     * against {@code CVEProject/cvelistV5}) redirect target {@code
      * release-assets.githubusercontent.com}, plus {@code objects.githubusercontent.com}/{@code
      * github-releases.githubusercontent.com} kept as historical/failover asset hosts — see that
-     * allowlist's own javadoc for the full empirical chain and why it must not be inferred from a
-     * sibling's differently-shaped redirect). The baseline/delta zip bodies themselves are NOT
-     * fetched through this client — {@code CveOrgSyncService#download} streams them, once every hop
-     * up to the terminal one is resolved and validated, through a plain {@link
-     * java.net.URLConnection} ({@code CveOrgSyncService#openConnection}: auto-redirect-following
-     * disabled, fails closed on any further 3xx it wasn't already told to expect), with a finite
-     * 30s read timeout rather than the unbounded one {@link #ghsaSyncRestClient}/{@link
-     * #osvSyncRestClient}'s equivalent large-download callers still use — a deliberate divergence
-     * (not a copy-paste gap): that read timeout is a per-read/idle timeout, not a whole-download
-     * budget, so it doesn't cap a genuinely-streaming multi-GB transfer, only a connection that goes
-     * fully idle for that long.
+     * allowlist's own javadoc for the full empirical chain), reading each hop's own response code
+     * and {@code Location} header directly rather than through this (or any) {@code RestClient}
+     * bean at all — bounded at {@code MAX_REDIRECTS = 3} hops (same convention as {@code
+     * GhsaSyncService.MAX_REDIRECTS}), with {@code CveOrgSyncService#openConnection} disabling
+     * auto-redirect-following and a finite 30s read timeout rather than the unbounded one {@link
+     * #ghsaSyncRestClient}/{@link #osvSyncRestClient}'s equivalent large-download callers still use
+     * — a deliberate divergence (not a copy-paste gap): that read timeout is a per-read/idle
+     * timeout, not a whole-download budget, so it doesn't cap a genuinely-streaming multi-GB
+     * transfer, only a connection that goes fully idle for that long.
      */
     @Bean
     public RestClient cveOrgSyncRestClient() {
