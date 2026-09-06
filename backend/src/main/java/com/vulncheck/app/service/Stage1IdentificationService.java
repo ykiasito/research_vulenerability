@@ -91,6 +91,34 @@ public class Stage1IdentificationService {
      */
     private static final int MAX_NAME_VARIANT_QUERIES_PER_ITEM = 3;
     /**
+     * Backlog item 388: a Maven {@code groupId:artifactId} coordinate (e.g. {@code
+     * "org.apache.logging.log4j:log4j-core"}) fed verbatim into the pg_trgm similarity search buries
+     * the artifactId's real identity under the groupId's own dotted-package-name scaffolding —
+     * measured live: {@code "org.apache.logging.log4j:log4j-core"} scores only 0.222 product
+     * -similarity against the dictionary's real {@code apache:log4j} entry, under the {@link
+     * #CPE_PRODUCT_SIMILARITY_THRESHOLD} 0.3 bar, so the entry never even enters {@link
+     * #localCpeLookup}'s candidate pool in the first place (same story for {@code
+     * "org.apache.kafka:kafka-clients"} against {@code apache:kafka}, 0.24). Recognized purely by
+     * shape ({@link #MAVEN_COORDINATE_SHAPE}: a dotted groupId, a colon, then an artifactId) — this
+     * class has no ecosystem signal available yet at this point in {@link #localCpeLookup} (it runs
+     * concurrently with the registry fan-out, before {@code registryEcosystem} is known — see that
+     * method's own javadoc), so shape detection is the only signal available.
+     */
+    private static final java.util.regex.Pattern MAVEN_COORDINATE_SHAPE =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+:[A-Za-z0-9_.+-]+$");
+    /**
+     * Backlog item 388: trailing artifactId segments common enough across the Java ecosystem to
+     * carry no product-identifying meaning of their own — stripped from the end of a hyphen-split
+     * artifactId (e.g. {@code "log4j-core"} -&gt; {@code "log4j"}, {@code "kafka-clients"} -&gt;
+     * {@code "kafka"}) before it's tried as an extra search variant in {@link
+     * #mavenArtifactTokenVariants}. Deliberately a short, conservative list rather than an attempt at
+     * completeness — a suffix missed here just means that one variant doesn't fire, never a wrong
+     * match, since {@link #mavenArtifactTokenVariants} also tries each individual hyphen segment on
+     * its own as a further variant.
+     */
+    private static final java.util.Set<String> MAVEN_ARTIFACT_GENERIC_SUFFIXES =
+            java.util.Set.of("core", "api", "client", "clients", "impl", "common", "commons");
+    /**
      * Item 302: how many of the item's own leading tokenized words (vendor side and product-name
      * side, each capped independently) feed the exact {@code (vendor, product)} pair fallback in
      * {@link #localCpeLookup} ({@link
@@ -907,14 +935,93 @@ public class Stage1IdentificationService {
      *
      *  <p>Backlog item 89 P2: returns {@link LocalCpeMatches} rather than a bare list so {@link
      *  #resolveCpeCandidates} can learn whether {@link #plausibleContainmentOnly}'s relaxed second
-     *  pass is what actually produced {@code candidates} here — see that method's own javadoc. */
+     *  pass is what actually produced {@code candidates} here — see that method's own javadoc.
+     *
+     *  <p>Backlog item 388: when the literal {@code productName} query itself finds nothing at all,
+     *  retries with each of {@link #mavenArtifactTokenVariants}'s normalized Maven-artifactId tokens
+     *  (only ever generated for a {@code groupId:artifactId}-shaped {@code productName} — see that
+     *  method's own javadoc) — an <em>additional</em> variant on top of the literal query, never a
+     *  replacement for it, so a {@code productName} that already matches literally is completely
+     *  unaffected. Stops at the first variant that finds something, same "cheapest fallback first,
+     *  stop once satisfied" shape {@link #findByNameVariants} already uses. Ranking uses whichever
+     *  query text actually produced the match ({@code rankingQuery}), not the original {@code
+     *  productName}, so the exact-slug-match ranking key in {@link #rankCpeCandidates} still fires
+     *  correctly for a variant-derived hit. Treated with the same low-trust {@code usedRelaxedPass}
+     *  flag as {@link #findByNameVariants}'s own mechanically-derived guesses — an artifactId-token
+     *  match is exactly as unverified a normalization as those, never auto-trusted as a literal hit
+     *  would be (see {@link #resolveSingleCpeCandidate}'s forced AI check downstream). */
     private LocalCpeMatches localCpeLookup(String vendor, String productName, String itemVersion) {
         List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
                 productName, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
         ContainmentResult containment = plausibleContainmentOnly(vendor, productName, pool);
+        List<CpeDictionaryEntry> matched = containment.candidates();
+        boolean usedRelaxedPass = containment.usedRelaxedPass();
+        String rankingQuery = productName;
+        if (matched.isEmpty()) {
+            for (String variant : mavenArtifactTokenVariants(productName)) {
+                List<CpeDictionaryEntry> variantPool = cpeDictionaryRepository.findFuzzyMatches(
+                        variant, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
+                ContainmentResult variantContainment = plausibleContainmentOnly(vendor, variant, variantPool);
+                if (!variantContainment.candidates().isEmpty()) {
+                    matched = variantContainment.candidates();
+                    usedRelaxedPass = true;
+                    rankingQuery = variant;
+                    break;
+                }
+            }
+        }
         List<CpeDictionaryEntry> ranked = rankCpeCandidates(
-                vendor, productName, containment.candidates(), Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
-        return new LocalCpeMatches(ranked, containment.usedRelaxedPass());
+                vendor, rankingQuery, matched, Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
+        return new LocalCpeMatches(ranked, usedRelaxedPass);
+    }
+
+    /**
+     * Backlog item 388: normalized search-variant tokens derived from {@code productName}'s
+     * artifactId, tried only when the literal Maven-coordinate string itself finds nothing (see
+     * {@link #localCpeLookup}'s own javadoc). Returns an empty list for anything that doesn't match
+     * {@link #MAVEN_COORDINATE_SHAPE} — this never fires for an ordinary (non-Maven-coordinate)
+     * product name.
+     *
+     * <p>Two kinds of variant, in this order:
+     * <ol>
+     *   <li>The artifactId with a trailing {@link #MAVEN_ARTIFACT_GENERIC_SUFFIXES} segment (or
+     *       chain of them) stripped, e.g. {@code "log4j-core"} -&gt; {@code "log4j"}, {@code
+     *       "kafka-clients"} -&gt; {@code "kafka"}.</li>
+     *   <li>Each individual hyphen-separated segment of the artifactId on its own — catches a
+     *       meaningful segment whose sibling segment isn't a suffix this class happens to know about,
+     *       without needing an exhaustive suffix list.</li>
+     * </ol>
+     *
+     * <p>Deduplicated and never includes the artifactId unchanged (that exact string already ran as
+     * part of the literal {@code productName} query in {@link #localCpeLookup} before this is ever
+     * called).
+     */
+    private List<String> mavenArtifactTokenVariants(String productName) {
+        if (productName == null || !MAVEN_COORDINATE_SHAPE.matcher(productName.trim()).matches()) {
+            return List.of();
+        }
+        String artifactId = productName.substring(productName.lastIndexOf(':') + 1).trim();
+        if (artifactId.isBlank()) {
+            return List.of();
+        }
+        String[] segments = artifactId.split("-");
+        java.util.LinkedHashSet<String> variants = new java.util.LinkedHashSet<>();
+        int end = segments.length;
+        while (end > 1 && MAVEN_ARTIFACT_GENERIC_SUFFIXES.contains(segments[end - 1].toLowerCase(java.util.Locale.ROOT))) {
+            end--;
+        }
+        if (end < segments.length) {
+            variants.add(String.join("-", Arrays.copyOfRange(segments, 0, end)));
+        }
+        if (segments.length > 1) {
+            for (String segment : segments) {
+                if (!segment.isBlank()) {
+                    variants.add(segment);
+                }
+            }
+        }
+        variants.remove(artifactId);
+        return List.copyOf(variants);
     }
 
     /**
