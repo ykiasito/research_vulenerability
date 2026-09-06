@@ -127,6 +127,13 @@ public class GhsaSyncService {
 
     private static final long MAX_JSON_DOCUMENT_BYTES = 5L * 1024 * 1024;
     private static final int MAX_REDIRECTS = 3;
+    /** Finite, not {@code 0}/unbounded (backlog items 378/381) — {@link URLConnection#setReadTimeout}
+     *  is a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long
+     *  a genuinely-streaming multi-hundred-MB tarball download can take; it only kills a connection
+     *  that goes fully idle for this long, matching {@code CveOrgSyncService}'s own read timeout
+     *  (see {@code CveOrgSyncService.DOWNLOAD_READ_TIMEOUT_MILLIS}) for consistency across the three
+     *  sibling sync services. */
+    private static final int DOWNLOAD_READ_TIMEOUT_MILLIS = 30_000;
 
     /** Real GHSA-ID shape — {@code GHSA-xxxx-xxxx-xxxx}, lowercase alphanumeric, four chars per
      *  segment. Used to reject a path-derived id (senior review item 3: {@link
@@ -146,10 +153,11 @@ public class GhsaSyncService {
     private final int expectedBaselineCount;
     /** Opens the tarball body stream given the URL {@link #resolveRedirectTarget} resolved — a seam
      *  purely for tests (real production traffic always goes through {@link #openStream}, a plain
-     *  streaming {@link URLConnection} — see that method's own javadoc for why {@code
-     *  ghsaSyncRestClient} can't be used for this multi-hundred-MB body). {@code
-     *  MockRestServiceServer} can't intercept a raw {@link URLConnection}, so the baseline-sync test
-     *  supplies an in-memory tarball through this instead of hitting a real host. */
+     *  streaming {@link URLConnection} with a finite read timeout — see {@link
+     *  #DOWNLOAD_READ_TIMEOUT_MILLIS}'s javadoc for why {@code ghsaSyncRestClient} isn't used for
+     *  this multi-hundred-MB body instead). {@code MockRestServiceServer} can't intercept a raw
+     *  {@link URLConnection}, so the baseline-sync test supplies an in-memory tarball through this
+     *  instead of hitting a real host. */
     private final java.util.function.Function<String, InputStream> tarballStreamOpener;
 
     /** In-process "sync already running" guard — same rationale/scope as {@code
@@ -757,11 +765,15 @@ public class GhsaSyncService {
             throw new IOException("Rejected non-allowlisted URL: " + url);
         }
         // Plain URLConnection, not ghsaSyncRestClient — same rationale as CveOrgSyncService#download:
-        // a multi-hundred-MB streaming download needs an effectively unbounded read timeout, which
-        // this app's bounded-JSON-response clients deliberately don't provide.
+        // this app's bounded-JSON-response clients aren't suited to a multi-hundred-MB streaming
+        // body. The read timeout below is finite (backlog items 378/381 — see
+        // DOWNLOAD_READ_TIMEOUT_MILLIS's javadoc for why that doesn't cap a streaming download's
+        // total size/duration); it used to be 0/unbounded, which risked hanging this sync's sole
+        // worker thread forever on a connection that stalls without cleanly closing, a realistic
+        // failure mode on a closed network.
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(10_000);
-        connection.setReadTimeout(0);
+        connection.setReadTimeout(DOWNLOAD_READ_TIMEOUT_MILLIS);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (ghsa sync)");
         return connection.getInputStream();
     }
