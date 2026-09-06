@@ -44,7 +44,21 @@ Right after a fresh install, the CPE dictionary and all vulnerability data mirro
 
 **CVE.org** (`/admin/cve-org`) is deliberately left out of the numbered steps above: its full baseline sync is roughly 380,000 records — over 1GB downloaded, over 3GB once expanded in the database — and is meant to be a one-time run on a host sized for it (button: **全件初期投入を実行（本番のみ）**, "run full initial load (production only)"). Decide based on your host's disk/bandwidth budget whether to run it now or later. Until you do, CVE.org stays empty and contributes nothing to job results, just like the sources above before their own baseline step.
 
-Only after steps 1-6 above (and your CVE.org decision) have completed at least once should you trust job results — and that's also the point to close off network access for real operation, not open it up further.
+Only after steps 1-6 above (and your CVE.org decision) have completed at least once should you trust job results **for the ecosystems this app can actually check** — see the "What This App Cannot Check" caveat immediately below, since that limitation holds regardless of how much data you've loaded. This is also the point to close off network access for real operation, not open it up further.
+
+### What This App Cannot Check, No Matter How Much Data You Load
+
+Some software simply has no automated lookup path on this branch, however completely you've done the steps above. The in-app guide at `/guide/integrations` lists these explicitly (§3, "自動照合できない配布チャネル"); as of this writing, they are:
+
+- Maven Central (Java, `group:artifact:version` coordinates)
+- Docker Hub (container images)
+- apt/rpm and other Linux distribution package managers
+- VS Code Marketplace (extensions)
+- Chrome Web Store (extensions)
+- Homebrew (macOS/Linux packages)
+- Mobile app stores (App Store, Google Play, etc.)
+
+**Maven Central specifically**: unlike the 9 registries covered in step 6 above, it has no mirror on this branch and no live-lookup fallback either (`MavenCentralRegistryClient#lookup` is a permanent `Optional.empty()`, by design — see its class javadoc). This isn't something seeding or syncing can fix; every Maven-coordinate row will always come back as no findings, forever, on this branch. Products from any of the channels above must be checked by other means (e.g. reading the vendor's own advisories directly) — do not read a clean result for these rows as "no known vulnerabilities."
 
 ## Important Notes
 
