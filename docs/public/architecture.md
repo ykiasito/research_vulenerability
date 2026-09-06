@@ -56,7 +56,7 @@ CSVアップロード（`POST /jobs`）は以下の順で動く。
 
 閉域モードでは、CSVアップロード後のStage1（製品識別）・Stage2（脆弱性調査）・Stage4（最終リサーチ）は、いずれも**ローカルDBのミラーテーブルにのみ**問い合わせます。旧バージョンにあった以下の外部ライブ呼び出しは物理的に削除されています。
 
-- Stage1のレジストリ照合（npm/PyPI/crates.io/RubyGems/Packagist/NuGet/Hex/pub.dev/Go proxy）: 各`*RegistryClient`はローカルDBのミラーテーブルのみに問い合わせる実装で、ライブHTTP照会（`lookupLive`相当）のコード自体が削除済み。`RestClient`等のフィールドも保持しません。**Maven Centralだけは例外**で、閉域モード用ミラー自体を一度も持ったことがなく、`MavenCentralRegistryClient#lookup`は常に`Optional.empty()`を返す恒久的no-opです（外部通信は発生しませんが、Maven座標／Javaパッケージそのものが閉域モードでは一切識別されません）。
+- Stage1のレジストリ照合（npm/PyPI/crates.io/RubyGems/Packagist/NuGet/Hex/pub.dev/Go proxy）: 各`*RegistryClient`はローカルDBのミラーテーブルのみに問い合わせる実装で、ライブHTTP照会（`lookupLive`相当）のコード自体が削除済み。`RestClient`等のフィールドも保持しません。**Maven Centralだけは例外**で、閉域モード用ミラー自体を一度も持ったことがなく、`MavenCentralRegistryClient#lookup`は常に`Optional.empty()`を返す恒久的no-opです（外部通信は発生しませんが、`RegistryRoutingPolicy`が`groupId:artifactId`形式をMaven Centralのみにルーティングするため、Maven座標のレジストリ照合は常に空振りになります。ただし製品識別そのものが止まるわけではなく、`Stage1IdentificationService#identify`はレジストリ照合とは独立にローカルCPE辞書照合を常に実行するため、CPE辞書に該当エントリがあるJava製品は引き続き識別されます）。
 - Stage1のCPE照合: 旧バージョンにあった「ローカル辞書が空振りの場合にNVD CPE APIへライブ照会する」フォールバックは削除済みで、`pg_trgm`によるローカルCPE辞書のあいまい検索のみで完結します。
 - Stage2の脆弱性調査（NVD CVE／OSV／GHSA／cve.org／CSAF）: いずれも対応する`*VulnerabilitySource`実装がローカルDBのリポジトリ／`JdbcTemplate`のみを保持し、ライブAPI呼び出し経路は削除済みです。
 - Stage1のTier2/3（あいまい候補のAI判定・Web検索名称解決）とStage4（最終リサーチ）: `Stage1AiArbitration`・`Stage4WebSearchResearchService`はいずれもAI呼び出し経路が物理的に削除されており、常に「AI利用不可」のフォールバック（未確定候補は破棄、またはUNIDENTIFIEDのまま）を返します。Claude API（Anthropic Messages API）を呼び出す経路自体がコードベースに存在しません。
@@ -72,13 +72,19 @@ CSVアップロード（`POST /jobs`）は以下の順で動く。
 | npm / PyPI / crates.io / RubyGems / Packagist / NuGet / Hex / pub.dev / Go proxy（9エコシステム、Maven Centralは含まない——前述の通りMaven Centralには閉域モード用ミラー自体が存在しない） | 各`*MirrorSyncService`によるレジストリミラー同期（既定無効） | 不要 |
 | NVD CPE API v2.0 | `NvdCpeSyncService`によるCPE辞書ミラー同期。管理画面（`/admin/cpe-dictionary`）からの手動キーワード同期にも使われる | 任意（ユーザー登録のNVDキー、無料） |
 | NVD CVE API v2.0 | `NvdCveSyncService`によるNVD CVEミラー同期 | 任意（同上） |
-| OSV.dev | `OsvSyncService`によるOSVミラー同期 | 不要 |
-| cve.org（CVE Services API／GitHub Releases API） | `CveOrgSyncService`によるCVE.orgミラー同期 | 不要 |
+| OSV公開データダンプ（`osv-vulnerabilities.storage.googleapis.com`） | `OsvSyncService`によるOSVミラー同期 | 不要 |
+| GitHub Releases API（`api.github.com` — `CVEProject/cvelistV5`のリリース資産をダウンロード） | `CveOrgSyncService`によるCVE.orgミラー同期（CVE Services API自体は呼ばれない） | 不要 |
 | CSAF（Red Hat / Siemens） | `RedHatCsafSyncService` / `SiemensCsafSyncService`によるCSAFミラー同期 | 不要 |
-| GitHub REST（advisories／GHSA） | `GhsaSyncService`によるGHSAミラー同期 | 不要 |
+| GitHub API（`api.github.com` — `github/advisory-database`のtarball/commits/advisories）および`raw.githubusercontent.com` | `GhsaSyncService`によるGHSAミラー同期 | 不要 |
 
 **GHSAはStage2の脆弱性照会対象に含まれますが、参照先はローカルミラーのみです**: `GhsaVulnerabilitySource`はStage2実行時にGitHubへライブ問い合わせすることはなく、`GhsaSyncService`が事前にミラーしたローカルテーブルのみを照会します。ミラー同期自体はbaseline投入後、管理者操作とは独立して日次で自動実行されます。詳細は[pipeline.md](./pipeline.md)のStage2節と`GhsaVulnerabilitySource`のクラスjavadoc参照。
 
-NVD系の同期処理はプロセス全体で共有する `NvdRateLimiter` でレート制限している（APIキー無し: 最小間隔6.5秒 / キー登録済み: 最小間隔0.7秒）。間隔はキーの有無に依存し、その鍵の出所は同期経路によって異なる——例えば、管理画面からの手動キーワード同期（`/admin/cpe-dictionary/sync`）は操作中の管理者自身の登録キー、CPE辞書のフル同期（`/admin/cpe-dictionary/sync-all`）は常に無キー、NVD CVEバックフィルのスケジュール実行（`NvdCveBackfillScheduledRunner`）は`ADMIN_EMAIL`に設定されたユーザーの登録キーを使う。
+NVD系の同期処理はプロセス全体で共有する `NvdRateLimiter` でレート制限している（APIキー無し: 最小間隔6.5秒 / キー登録済み: 最小間隔0.7秒）。間隔はキーの有無に依存し、その鍵の出所は同期経路によって異なる。
+
+- 管理画面からの手動キーワード同期（`/admin/cpe-dictionary/sync`）: 操作中の管理者自身の登録キー
+- CPE辞書のフル同期のうち、管理画面ボタン（`/admin/cpe-dictionary/sync-all`）経由・起動時トリガー（`CPE_FULL_SYNC_ON_STARTUP`）経由の実行: 常に無キー
+- CPE辞書の週次スケジュール実行（`CpeDictionaryScheduledResync`）: `ADMIN_EMAIL`に設定されたユーザーの登録キー（`getAdminNvdApiKey()`経由）
+- NVD CVEバックフィルのスケジュール実行（`NvdCveBackfillScheduledRunner`）: 同じく`ADMIN_EMAIL`ユーザーの登録キー
+- NVD CVEバックフィルの管理画面ボタン実行（`/admin/nvd-cve/sync-now`）: 常に無キー
 
 Claude API（Anthropic Messages API）を呼び出す経路は、同期処理も含めコードベース全体に存在しません。
