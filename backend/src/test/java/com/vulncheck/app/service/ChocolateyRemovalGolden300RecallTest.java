@@ -136,8 +136,9 @@ import org.springframework.transaction.annotation.Transactional;
         + "exact match for job216's full-pipeline measurement (docs/spec/closed-mode-plan.md §6-2). "
         + "control-row false-positive rate 1/32=3.13% (just Ditto). 0% of the gap vs. the stale "
         + "2026-08-31 numbers below is attributable to the Chocolatey removal this test is named "
-        + "for -- see class javadoc for the full breakdown. Left disabled so it can never re-fire "
-        + "on a routine mvn test run.")
+        + "for -- see class javadoc for the full breakdown. Re-confirmed 2026-09-06 (public "
+        + "accuracy write-up measurement) with the identical 247/268=92.16%/1/32=3.13% numbers. "
+        + "Left disabled so it can never re-fire on a routine mvn test run.")
 class ChocolateyRemovalGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;

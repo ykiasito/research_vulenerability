@@ -75,8 +75,9 @@ import org.springframework.transaction.annotation.Transactional;
         + "rows still come back UNIDENTIFIED, zero rescued via the local CPE dictionary (no live "
         + "NVD fallback exists on this branch to consider either, see class javadoc) -- confirms "
         + "docs/spec/closed-mode-plan.md's own scenario C assumption is exact, not just a plausible "
-        + "projection. See class javadoc. Left disabled so it can never re-fire on a routine mvn "
-        + "test run.")
+        + "projection. See class javadoc. Re-confirmed 2026-09-06 (public accuracy write-up "
+        + "measurement) with the identical 0/20 result. Left disabled so it can never re-fire on a "
+        + "routine mvn test run.")
 class MavenCentralRemovalGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
