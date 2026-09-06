@@ -34,22 +34,32 @@ import org.springframework.stereotype.Service;
  * that page (see {@code JobController}) and this class's own tests exercise, so "stale" means the
  * same thing everywhere instead of being redefined ad hoc per page.
  *
- * <p><b>What counts as stale, per mirror</b> — deliberately three independent conditions, not just
- * "hasn't synced in a while":
+ * <p><b>What counts as stale, per mirror</b> — deliberately more than just "hasn't synced in a
+ * while":
  *
  * <ol>
  *   <li>baseline never completed at all (nothing to serve yet);
- *   <li>the mirror's own sync state records a {@code last_sync_error} from its most recent
- *       attempt — this is what lets this same check also surface closed-mode backlog item 379 (a
- *       {@code CveOrgSyncService} baseline/delta sync that keeps failing every scheduled run):
- *       {@link com.vulncheck.app.service.cveorg.CveOrgSyncService} now advances {@code
- *       last_synced_at} on every attempt, success or failure (matching {@code GhsaSyncService}/
- *       {@code OsvSyncService}'s existing convention), so a mirror that fails every day forever
- *       would otherwise always look "recently synced" under condition 3 alone, silently hiding the
- *       exact failure item 379 was filed about — {@code last_sync_error} being non-null is what
- *       actually distinguishes "ran and failed" from "ran and succeeded";
+ *   <li>for GHSA/OSV (which already carry a {@code last_sync_error} column in closed mode), the
+ *       mirror's own sync state records an error from its most recent attempt — non-null there
+ *       distinguishes "ran and failed" from "ran and succeeded", since both {@code GhsaSyncService}
+ *       and {@code OsvSyncService} advance {@code last_synced_at} on every attempt, success or
+ *       failure, so an age-only check alone would otherwise treat a mirror that fails every
+ *       scheduled run as "recently synced" forever;
  *   <li>the last successful sync is older than this mirror's own freshness threshold.
  * </ol>
+ *
+ * <p><b>CVE.org (closed-mode backlog item 379) is deliberately age-only for now</b> — {@code
+ * CveOrgSyncService} does not yet advance {@code cve_org_sync_state} on a failed attempt at all
+ * (unlike GHSA/OSV above), so a continuously-failing CVE.org sync simply leaves {@code
+ * last_synced_at} frozen at whatever its last real success was, which the age check below already
+ * catches on its own without needing a {@code last_sync_error} column. Item 379's actual fix (a
+ * schema change plus the corresponding {@code CveOrgSyncService} logic) is being implemented
+ * against {@code master}/{@code test} rather than this closed-mode branch directly — the
+ * closed-mode architecture gate (see {@code docs/spec/closed-mode-plan.md} §3-2) only allows this
+ * branch's diff from {@code master} to be deletions, and {@code CveOrgSyncService}/{@code
+ * CveOrgSyncState} are shared, unmodified-here files. Once that fix reaches this branch through the
+ * normal master→closed-mode sync (§9-3), {@link #checkCveOrg} should be extended to match {@link
+ * #checkGhsa}/{@link #checkOsv}'s error check.
  *
  * <p>Age thresholds are derived from each mirror's own scheduled cadence (see the {@code
  * @Scheduled} cron on {@code CveOrgScheduledSync}/{@code GhsaScheduledSync}/{@code
@@ -91,14 +101,12 @@ public class MirrorFreshnessService {
         return warnings;
     }
 
+    /** Age-only for now — see this class's own javadoc for why (closed-mode backlog item 379 has
+     *  not landed on this branch yet). */
     private void checkCveOrg(List<String> warnings) {
         CveOrgSyncState state = cveOrgSyncStateRepository.findById((short) 1).orElse(null);
         if (state == null || !state.isBaselineLoaded()) {
             warnings.add("CVE.org: baselineが未読み込みです。");
-            return;
-        }
-        if (state.getLastSyncError() != null) {
-            warnings.add("CVE.org: 直近の同期が失敗しています（" + state.getLastSyncError() + "）。");
             return;
         }
         addIfStale(warnings, "CVE.org", toInstant(state.getLastSyncedAt()), DAILY_MIRROR_STALE_AFTER);

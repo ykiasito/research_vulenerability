@@ -28,11 +28,12 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 /**
- * Closed-mode backlog item 382 (and item 379, which this class's {@code checkCveOrg} path also
- * covers — see {@link MirrorFreshnessService}'s own class javadoc). Each mirror is exercised with
- * its own healthy baseline plus every distinct way it can go stale, since {@link
- * MirrorFreshnessService#staleMirrorWarnings()} is the sole gate deciding whether {@code
- * jobs/detail.html} shows a freshness banner at all.
+ * Closed-mode backlog item 382. Each mirror is exercised with its own healthy baseline plus every
+ * distinct way it can go stale, since {@link MirrorFreshnessService#staleMirrorWarnings()} is the
+ * sole gate deciding whether {@code jobs/detail.html} shows a freshness banner at all. CVE.org's
+ * {@code checkCveOrg} path is deliberately age-only (no {@code last_sync_error} check) — see
+ * {@link MirrorFreshnessService}'s own class javadoc for why (closed-mode backlog item 379 hasn't
+ * landed on this branch yet).
  */
 @ExtendWith(MockitoExtension.class)
 class MirrorFreshnessServiceTest {
@@ -93,30 +94,12 @@ class MirrorFreshnessServiceTest {
         assertThat(warnings).anyMatch(w -> w.contains("CVE.org") && w.contains("baseline"));
     }
 
-    /** Closed-mode backlog item 379: a continuously-failing sync must be flagged even though {@code
-     *  CveOrgSyncService} now advances {@code last_synced_at} on every attempt (so an age-only check
-     *  alone would miss it). */
+    /** Closed-mode backlog item 379 has not landed on this branch yet (see this class's own
+     *  javadoc) — {@code CveOrgSyncState} has no {@code last_sync_error} field here, so a recent
+     *  {@code last_synced_at} is never treated as stale regardless of any prior failure; only the
+     *  age check below applies to CVE.org for now. */
     @Test
-    void cveOrgWithARecentButFailedSyncIsStale() {
-        CveOrgSyncState state = new CveOrgSyncState();
-        state.setBaselineLoaded(true);
-        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5));
-        state.setLastSyncError("delta sync failed after upserting 0 records (IOException)");
-        when(cveOrgSyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
-        stubHealthyGhsa(OffsetDateTime.now(ZoneOffset.UTC));
-        stubHealthyOsv(OffsetDateTime.now(ZoneOffset.UTC));
-        stubHealthyNvdCve(OffsetDateTime.now(ZoneOffset.UTC));
-        stubHealthyCsaf(OffsetDateTime.now(ZoneOffset.UTC));
-        when(registryPackageMirrorRepository.maxLastSyncedAt())
-                .thenReturn(Optional.of(Instant.now()));
-
-        List<String> warnings = service.staleMirrorWarnings();
-
-        assertThat(warnings).anyMatch(w -> w.contains("CVE.org") && w.contains("失敗"));
-    }
-
-    @Test
-    void cveOrgWithAnOldButErrorFreeSyncIsStale() {
+    void cveOrgWithAnOldSyncIsStale() {
         CveOrgSyncState state = new CveOrgSyncState();
         state.setBaselineLoaded(true);
         state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC).minusDays(5));
