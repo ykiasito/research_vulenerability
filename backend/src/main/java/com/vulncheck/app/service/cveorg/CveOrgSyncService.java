@@ -9,6 +9,7 @@ import com.vulncheck.app.repository.CveOrgSyncStateRepository;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URLConnection;
 import java.time.OffsetDateTime;
@@ -51,10 +52,33 @@ public class CveOrgSyncService {
     private static final String DELTA_ASSET_INFIX = "_delta_CVEs_at_";
 
     /** Hosts {@link #download}'s {@code url} (parsed from GitHub's {@code browser_download_url},
-     *  not a hardcoded constant) is allowed to connect to — {@code github.com}'s own
-     *  releases-download endpoint plus its signed asset CDN, which it typically redirects to once
-     *  (backlog items 359/361). */
-    private static final Set<String> ALLOWED_HOSTS = Set.of("github.com", "objects.githubusercontent.com");
+     *  not a hardcoded constant) is allowed to connect to (backlog items 359/361). Verified live
+     *  2026-09-06 against the real {@code CVEProject/cvelistV5} release assets: {@code
+     *  github.com/CVEProject/cvelistV5/releases/download/.../*.zip} redirects exactly once (a
+     *  single 302) to {@code release-assets.githubusercontent.com/github-production-release-asset/
+     *  ...&sig=...&jwt=...} before the terminal 2xx — cross-checked against {@code GET
+     *  https://api.github.com/meta}'s {@code domains.actions} list. {@code
+     *  objects.githubusercontent.com}/{@code github-releases.githubusercontent.com} are kept as
+     *  historical/failover asset hosts, not the currently-observed one. Deliberately NOT a
+     *  wildcard like {@code *.githubusercontent.com} — that would also admit unrelated hosts such
+     *  as {@code camo.}/{@code raw.}/{@code user-images.githubusercontent.com}. Deliberately NOT
+     *  {@code objects-origin.githubusercontent.com} either — that's the upload-side host, never
+     *  seen on a download response.
+     *
+     *  <p><b>Do not infer this host set from a sibling's confirmed redirect chain</b> — GitHub's
+     *  redirect target is not uniform across content types. {@code GhsaSyncService}'s tarball
+     *  download (a different GitHub API, {@code /repos/.../tarball/...}) lands on {@code
+     *  codeload.github.com}, a genuinely different path; treating that as evidence for this
+     *  release-asset download's host was the mistaken inference in this class's original SSRF fix
+     *  (before this host set was corrected against the actual live chain). */
+    private static final Set<String> ALLOWED_HOSTS = Set.of(
+            "github.com",
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+            "github-releases.githubusercontent.com");
+    /** Mirrors {@code GhsaSyncService.MAX_REDIRECTS}'s convention — bounds {@link #download}'s
+     *  redirect-following loop so a misbehaving/compromised host can't cause an infinite loop. */
+    private static final int MAX_REDIRECTS = 3;
     private static final int DOWNLOAD_CONNECT_TIMEOUT_MILLIS = 10_000;
     /** Finite, not {@code 0}/unbounded (backlog item 362) — {@link URLConnection#setReadTimeout} is
      *  a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long
@@ -285,18 +309,29 @@ public class CveOrgSyncService {
      *  {@code cveOrgSyncRestClient} bean directly — that client's 30s read timeout is fine for the
      *  quick releases-API call but far too short for a download that can run for minutes
      *  (baseline: well over 1GB). {@code url} is GitHub-supplied (parsed from {@code
-     *  browser_download_url}), so it's validated and any redirect re-validated before ever
+     *  browser_download_url}), so it's validated and every redirect hop re-validated before ever
      *  connecting (backlog items 359/361/362) — see {@link #validatedUri}/{@link
      *  #resolveRedirectTarget}/{@link #openConnection}, mirroring {@code
      *  GhsaSyncService#resolveRedirectTarget}/{@code #openStream}'s SSRF-hardening for its
-     *  equivalent tarball-body download. */
-    private InputStream download(String url) throws IOException {
-        URI validated = validatedUri(url);
-        if (validated == null) {
-            throw new IOException("Rejected non-allowlisted download URL: " + url);
+     *  equivalent tarball-body download. Loops (bounded by {@link #MAX_REDIRECTS}, same convention
+     *  as {@code GhsaSyncService.MAX_REDIRECTS}) rather than following a single hop, since {@link
+     *  #openConnection} itself now fails closed on any further redirect it wasn't told to expect.
+     *
+     *  <p>Package-private (not {@code private}) so the unit test can call it directly and assert
+     *  on the {@link #MAX_REDIRECTS} bound without needing a live network call. */
+    InputStream download(String url) throws IOException {
+        URI current = validatedUri(url);
+        if (current == null) {
+            throw new IOException("Rejected non-allowlisted download URL: " + sanitizedForLogging(url));
         }
-        URI resolved = resolveRedirectTarget(validated);
-        return openConnection(resolved).getInputStream();
+        for (int hop = 0; hop < MAX_REDIRECTS; hop++) {
+            URI next = resolveRedirectTarget(current);
+            if (next.equals(current)) {
+                return openConnection(current).getInputStream();
+            }
+            current = next;
+        }
+        throw new IOException("CVE.org sync: too many redirects resolving download URL (max " + MAX_REDIRECTS + ")");
     }
 
     /**
@@ -316,10 +351,14 @@ public class CveOrgSyncService {
         try {
             uri = URI.create(url);
         } catch (IllegalArgumentException e) {
+            // Deliberately a fixed message, not the raw (unparseable, so not even confirmed to be a
+            // URL at all) input — see sanitizedForLogging's javadoc on why this class redacts more
+            // aggressively than the sibling sync services.
+            log.warn("CVE.org sync: rejecting an unparseable download URL");
             return null;
         }
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || !ALLOWED_HOSTS.contains(uri.getHost())) {
-            log.warn("CVE.org sync: rejecting fetch of {} — not https or not an allowlisted host", url);
+            log.warn("CVE.org sync: rejecting fetch of {} — not https or not an allowlisted host", sanitizedForLogging(uri));
             return null;
         }
         return uri;
@@ -329,11 +368,15 @@ public class CveOrgSyncService {
      * Re-resolves {@code uri}'s single 3xx redirect hop (if any) through {@link
      * #cveOrgSyncRestClient} — the same no-auto-redirect bean used for the releases-API call — so
      * the redirect target's host can be validated against {@link #ALLOWED_HOSTS} before ever being
-     * followed (backlog item 361). GitHub's {@code github.com/.../releases/download/...} endpoint
-     * typically redirects once to its signed asset CDN ({@code objects.githubusercontent.com}),
-     * mirroring {@code GhsaSyncService#resolveRedirectTarget}'s tarball-endpoint case. On a
-     * non-redirect response the original (already-validated) {@code uri} is returned as-is — a real
-     * connection problem surfaces at {@link #openConnection}'s own attempt, not here.
+     * followed (backlog item 361). {@link #download} calls this in a bounded loop (see {@link
+     * #MAX_REDIRECTS}) rather than assuming a single hop, since a target itself may 3xx again.
+     * GitHub's {@code github.com/.../releases/download/...} endpoint is verified (2026-09-06,
+     * live, against {@code CVEProject/cvelistV5}) to redirect exactly once in practice to its
+     * signed asset CDN — see {@link #ALLOWED_HOSTS}'s javadoc for the full chain and an explicit
+     * warning against inferring this host set from {@code GhsaSyncService}'s differently-shaped
+     * tarball-endpoint redirect. On a non-redirect response the original (already-validated) {@code
+     * uri} is returned as-is — a real connection problem surfaces at {@link #openConnection}'s own
+     * attempt, not here.
      *
      * <p>Package-private (not {@code private}) so the unit test can call it directly against a
      * {@code MockRestServiceServer}-backed client.
@@ -347,20 +390,23 @@ public class CveOrgSyncService {
                 String location = response.getHeaders().getFirst(HttpHeaders.LOCATION);
                 if (location == null) {
                     throw new IllegalStateException(
-                            "CVE.org sync: redirect response had no Location header for " + uri);
+                            "CVE.org sync: redirect response had no Location header for " + sanitizedForLogging(uri));
                 }
                 URI target = uri.resolve(location);
                 URI validatedTarget = validatedUri(target.toString());
                 if (validatedTarget == null) {
+                    // target (not sanitizedForLogging(target)) is deliberately never embedded here —
+                    // this service's redirect target carries request-signing credentials (sig=/jwt=
+                    // query parameters), unlike OsvSyncService/GhsaSyncService's redirect targets.
                     throw new IllegalStateException(
-                            "CVE.org sync: rejected non-allowlisted redirect target " + target);
+                            "CVE.org sync: rejected non-allowlisted redirect target " + sanitizedForLogging(target));
                 }
                 return validatedTarget;
             });
         } catch (IllegalStateException e) {
             throw new IOException(e.getMessage(), e);
         } catch (Exception e) {
-            throw new IOException("CVE.org sync: transport error resolving redirect for " + uri, e);
+            throw new IOException("CVE.org sync: transport error resolving redirect for " + sanitizedForLogging(uri), e);
         }
     }
 
@@ -368,17 +414,56 @@ public class CveOrgSyncService {
      * Builds the raw {@link URLConnection} for the (already validated + redirect-resolved)
      * download URL, with a finite connect/read timeout (backlog item 362) instead of the previous
      * unbounded ({@code setReadTimeout(0)}) one — see {@link #DOWNLOAD_READ_TIMEOUT_MILLIS}'s
-     * javadoc for why a finite value doesn't cap a genuinely-streaming multi-GB download.
+     * javadoc for why a finite value doesn't cap a genuinely-streaming multi-GB download. Also
+     * disables {@link HttpURLConnection}'s own automatic redirect-following and, for an
+     * {@code HttpURLConnection}, fails closed with an {@link IOException} if the response is a 3xx
+     * — every hop this service intends to follow already went through {@link
+     * #resolveRedirectTarget}'s allowlist check in {@link #download}'s loop, so an extra redirect
+     * surfacing here means either a race (the target started redirecting again between resolution
+     * and this connection attempt) or an inconsistency between the two requests; either way, this
+     * must not silently follow it unchecked.
      *
-     * <p>Package-private so the unit test can assert the concrete timeout values directly, same
-     * convention as {@code RestClientConfig#noRedirectRequestFactory}'s own test.
+     * <p>Package-private so the unit test can assert the concrete timeout values and redirect
+     * behavior directly, same convention as {@code RestClientConfig#noRedirectRequestFactory}'s own
+     * test.
      */
     URLConnection openConnection(URI uri) throws IOException {
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(DOWNLOAD_CONNECT_TIMEOUT_MILLIS);
         connection.setReadTimeout(DOWNLOAD_READ_TIMEOUT_MILLIS);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (cve.org sync)");
+        if (connection instanceof HttpURLConnection httpConnection) {
+            httpConnection.setInstanceFollowRedirects(false);
+            int responseCode = httpConnection.getResponseCode();
+            if (responseCode >= 300 && responseCode < 400) {
+                throw new IOException("CVE.org sync: unexpected redirect (HTTP " + responseCode + ") opening "
+                        + sanitizedForLogging(uri) + " — every hop should already have been validated by "
+                        + "resolveRedirectTarget");
+            }
+        }
         return connection;
+    }
+
+    /**
+     * Redacts everything except scheme+host+path for logging/exception messages — this service's
+     * redirect target carries request-signing credentials ({@code sig=}/{@code jwt=} query
+     * parameters, see {@link #ALLOWED_HOSTS}'s javadoc), which must never be logged or embedded in
+     * an exception message. This is stricter than {@code OsvSyncService}/{@code GhsaSyncService},
+     * whose redirect targets don't carry such credentials, so their equivalent log/exception
+     * messages can embed the full URL.
+     */
+    private static String sanitizedForLogging(URI uri) {
+        return uri.getScheme() + "://" + uri.getAuthority() + uri.getPath();
+    }
+
+    /** {@link #sanitizedForLogging(URI)} for a raw, not-yet-parsed URL string — falls back to a
+     *  fixed placeholder if {@code url} isn't even a parseable URI. */
+    private static String sanitizedForLogging(String url) {
+        try {
+            return sanitizedForLogging(URI.create(url));
+        } catch (IllegalArgumentException e) {
+            return "(unparseable URL)";
+        }
     }
 
     private record GitHubRelease(String tag, String baselineZipUrl, String deltaZipUrl) {
