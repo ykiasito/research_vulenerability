@@ -267,6 +267,72 @@ public class Stage1IdentificationService {
      */
     private static final String JENKINS_TARGET_SW = "jenkins";
 
+    /**
+     * Backlog item 367 (real-devDB 20-row Maven investigation, 2026-09-06): reverse-DNS package-name
+     * prefixes that {@link #explainsQuery}'s Direction 2 leading-token loop treats as automatically
+     * explained, without requiring {@link #vendorExplains} to confirm them against the candidate's
+     * own CPE vendor. A Maven {@code groupId:artifactId} coordinate almost always leads with a
+     * reverse-DNS segment ({@code com.google.guava:guava}, {@code org.slf4j:slf4j-api}, {@code
+     * io.netty:netty-all}, {@code ch.qos.logback:logback-classic}) and that leading segment is
+     * essentially never itself a recognized CPE vendor slug — the actual vendor identity lives one or
+     * two segments further in ({@code google}, {@code slf4j}, {@code netty}, {@code qos}), which
+     * {@link #vendorExplains} already confirms just fine once it's reached. Before this fix, the
+     * *first* segment alone (the bare TLD-like prefix) failed {@code vendorExplains} and the whole
+     * candidate was rejected regardless of how well everything after it lined up — 9 of the 14
+     * candidate-pool-reachable-but-rejected Maven golden-300 rows shared exactly this root cause.
+     *
+     * <p>Deliberately just the small set of generic TLDs plus the country-code TLDs conventionally
+     * used the same way as a Maven groupId's leading segment, not a general "any short token is
+     * probably a TLD" heuristic — kept narrow on purpose since this list is an unconditional bypass
+     * of {@link #vendorExplains} for these exact tokens. Of these, only {@code com}/{@code org}/
+     * {@code io}/{@code ch} are actually observed leading this repo's own corpus (golden-300 /
+     * real-1000) as of this writing — the rest (e.g. {@code net.sf.*}, a real if uncommon Maven
+     * groupId shape) are included on design grounds, not measurement: a false-negative here (a real
+     * Maven coordinate rejected because its TLD-like prefix is missing from this list) is a strictly
+     * worse outcome than the false-positive risk this list already guards against via {@link
+     * #queryLooksLikeReverseDnsCoordinate}/{@link #matchedArtifactTailRelatesToCandidate} below, so
+     * this deliberately isn't narrowed down to just the 4 corpus-observed prefixes. Only ever
+     * consulted for tokens strictly ahead of a Direction 2 match (the existing loop bound already
+     * restricts this to leading positions) — never applied to the trailing-token check a few lines
+     * below, which polices a different, non-groupId-shaped part of the query.
+     *
+     * <p><b>Peer review REVISE (2026-09-06):</b> the first version of this fix consulted this list
+     * unconditionally — for ANY query containing one of these bare words as a leading token,
+     * regardless of whether the query actually looked like a Maven coordinate at all. That is a real
+     * false-positive risk: a software-inventory line like {@code ".NET Framework"} tokenizes to
+     * {@code ["net", "framework"]}, and a 1.8M-row CPE dictionary full of generic single-word product
+     * slugs ({@code framework}/{@code core}/{@code server}/{@code agent}/{@code manager}, ...) makes
+     * it entirely plausible that some unrelated vendor's {@code framework} entry would wrongly gain
+     * "net" as a free pass, when the old {@code vendorExplains} check (whole-token match, or a >=4
+     * -character substring fallback that "net" — 3 characters — never even qualifies for) would
+     * otherwise correctly reject it. See {@link #queryLooksLikeReverseDnsCoordinate} — this allowlist
+     * is now only ever consulted when that separate, structural check on the *query string itself*
+     * (not just a bare token) confirms the query actually has the {@code segment.segment:artifact}
+     * shape a Maven coordinate always has, which an ordinary product name essentially never does.
+     */
+    private static final java.util.Set<String> REVERSE_DNS_PACKAGE_PREFIXES = java.util.Set.of(
+            "com", "org", "net", "io", "edu", "gov", "mil", "int", "biz", "info", "name",
+            "ch", "de", "uk", "jp", "cn", "eu", "us");
+
+    /**
+     * Backlog item 367 (peer review REVISE, 2026-09-06): matches only a query shaped like a genuine
+     * Maven {@code groupId:artifactId} coordinate — at least two dot-separated segments, then a
+     * colon, then the artifact part (e.g. {@code com.google.guava:guava}, {@code
+     * io.netty:netty-all}). {@link #normalizeForContainment} never strips {@code .}/{@code :}
+     * (only {@code _}/backslashes/case), so this still sees them exactly as the raw CSV {@code
+     * product_name} column wrote them. An ordinary product name essentially never has this exact
+     * shape — a literal colon in a product name is already rare, and one preceded by a multi-segment
+     * dot chain rarer still — which is what makes this a reliable, narrowly-scoped gate for {@link
+     * #REVERSE_DNS_PACKAGE_PREFIXES}'s own bypass, rather than relying on ecosystem-detection (a
+     * registry match). {@link #explainsQuery} operates entirely within the CPE dictionary matching
+     * path, which is independent of the registry match path (see this class's own top-level javadoc
+     * on how the two are merged only after each runs on its own) — there is no registry-resolved
+     * ecosystem signal available to gate on at this point in the code at all, regardless of whether
+     * the registry lookup itself succeeds live.
+     */
+    private static final java.util.regex.Pattern REVERSE_DNS_COORDINATE_SHAPE =
+            java.util.regex.Pattern.compile("^[a-z0-9]+(?:\\.[a-z0-9]+)+:.+$");
+
     private final CpeDictionaryRepository cpeDictionaryRepository;
     private final CpeNameVariantCache cpeNameVariantCache;
     private final IdentifiedProductRepository identifiedProductRepository;
@@ -2624,22 +2690,69 @@ public class Stage1IdentificationService {
         // as a contiguous run of whole tokens somewhere within the query. Accepted only if every
         // query token *ahead of* that run is explained by the candidate's own CPE vendor — see this
         // method's own class-level javadoc above for the full Docker/GitHub Desktop reasoning.
+        //
+        // Backlog item 367: a leading token is also accepted, without needing vendorExplains at all,
+        // if it's a recognized reverse-DNS package-name prefix (see REVERSE_DNS_PACKAGE_PREFIXES's own
+        // javadoc) AND the query itself actually has a genuine Maven-coordinate shape AND its
+        // colon-suffixed tail actually relates back to the matched candidate itself (see
+        // queryLooksLikeReverseDnsCoordinate/matchedArtifactTailRelatesToCandidate's own javadoc —
+        // peer review REVISE round 2, 2026-09-06) — a Maven groupId's leading TLD-like segment is
+        // real structure, not noise, but it's essentially never itself a CPE vendor slug, so requiring
+        // vendorExplains on it alone structurally rejected every Maven coordinate whose match didn't
+        // happen to start at token 0. Gating on the query's own shape alone is not enough (round 2:
+        // "net.framework:x64" has the identical two-dot-segment-then-colon shape as the genuine
+        // "io.netty:netty-all"), so the tail-relatedness check is what tells them apart — a real Maven
+        // artifactId is conventionally derived from (or equal to) the matched product identity itself,
+        // an arbitrary colon-suffixed qualifier like "x64" is not.
+        //
+        // Peer review REVISE round 3 (2026-09-07): the bypass above must also require
+        // !itemVendorContradicts(...) — without it, whenever the Direction 2 match itself starts at
+        // token 1 (the artifactId shares a word stem with the groupId's own non-TLD segment, e.g.
+        // "org.acmecorp:acmecorp-core" matching candidate product "acmecorp"), this bypass is the
+        // ONLY gate the single leading token ("org") ever goes through, and itemVendorContradicts's
+        // own vendor-mismatch check (below, start == 0 only) never gets a chance to fire for it.
+        // Skipping it here would let a candidate whose CPE vendor the item's own vendor field
+        // actively contradicts (e.g. item vendor "Acme Corp" against an unrelated
+        // "microsoft:acmecorp" candidate) into the pool purely because "org"/"com" sits on the
+        // allowlist. itemVendorContradicts already returns false for a blank item vendor (see its
+        // own javadoc), and every Maven-coordinate row in this project's own golden-300/real-1000
+        // fixtures has a blank vendor column, so this addition costs none of this fix's own
+        // recovered rows.
         int start = java.util.Collections.indexOfSubList(queryTokens, candidateTokens);
         if (start < 0) {
             return false;
         }
         String cpeVendor = normalizeForContainment(cpeVendorOf(entry));
+        // Peer review REVISE round 4 (2026-09-07): short-circuited on start > 0 first — start == 0
+        // (no leading tokens at all) is the common case across the candidate pool scan, and neither
+        // queryLooksLikeReverseDnsCoordinate's regex nor matchedArtifactTailRelatesToCandidate's
+        // token walk is ever consulted by the loop below when there's no leading token to bypass.
+        boolean queryLooksLikeMavenCoordinate = start > 0
+                && queryLooksLikeReverseDnsCoordinate(normalizedQuery)
+                && matchedArtifactTailRelatesToCandidate(normalizedQuery, candidateTokens);
         for (int i = 0; i < start; i++) {
-            if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
-                return false;
+            if (vendorExplains(cpeVendor, queryTokens.get(i))) {
+                continue;
             }
+            if (queryLooksLikeMavenCoordinate
+                    && REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(i))
+                    && !itemVendorContradicts(normalizedItemVendor, cpeVendor)) {
+                continue;
+            }
+            return false;
         }
         // REVISE item 5: a single-token candidate that matched with nothing ahead of it (start == 0)
         // has no leading anchor at all vouching for the tie — the trailing leftovers must be
         // vendor-explained too in that case, the same way the leading ones already are above. A
-        // multi-token candidate, or one with a nonempty (and therefore already vendor-explained)
-        // leading run, is left exactly as before — see this method's own javadoc for the AVG
-        // AntiVirus Free / Windows Terminal contrast this distinction is calibrated against.
+        // multi-token candidate is left exactly as before. A single-token candidate with a nonempty
+        // leading run is also left exactly as before IF that leading run was accepted via ordinary
+        // vendorExplains — but as of item 367, a nonempty leading run no longer implies
+        // vendor-explained: it may instead have been admitted via the REVERSE_DNS_PACKAGE_PREFIXES
+        // bypass above, whose own tail-relatedness check (matchedArtifactTailRelatesToCandidate)
+        // already vouches for at least one trailing token relating back to the match — not
+        // necessarily every trailing token, unlike the vendorExplains case this trailing check
+        // handles below. See this method's own javadoc for the AVG AntiVirus Free / Windows Terminal
+        // contrast this distinction is calibrated against.
         //
         // Backlog item 89 P2: this specific rule is what plausibleContainmentOnly's relaxed second
         // pass exists to lift (requireTrailingVendorExplanation=false) — see this method's own
@@ -2669,6 +2782,60 @@ public class Stage1IdentificationService {
             }
         }
         return true;
+    }
+
+    /** Backlog item 367 (peer review REVISE, 2026-09-06): see {@link #REVERSE_DNS_COORDINATE_SHAPE}'s
+     *  own javadoc for why this structural check on the whole query string — not just a bare leading
+     *  token — is what gates {@link #REVERSE_DNS_PACKAGE_PREFIXES}'s Direction 2 leading-token bypass
+     *  in {@link #explainsQuery}. Package-private (not private) solely so {@code
+     *  Stage1IdentificationServiceTest} can exercise it directly, same convention as {@link
+     *  #normalizeForContainment}. */
+    boolean queryLooksLikeReverseDnsCoordinate(String normalizedQuery) {
+        return REVERSE_DNS_COORDINATE_SHAPE.matcher(normalizedQuery).matches();
+    }
+
+    /**
+     * Backlog item 367 (peer review REVISE round 2, 2026-09-06): {@link
+     * #queryLooksLikeReverseDnsCoordinate}'s shape check alone is not enough — the reviewer's own
+     * counterexample, {@code net.framework:x64}, has the exact same "two dot-segments then a colon"
+     * shape as the genuine {@code io.netty:netty-all}, so shape alone can't tell a real Maven
+     * coordinate from an adversarially-constructed lookalike (a reverse-DNS-dotted identifier, e.g. a
+     * Flatpak/Snap app ID like {@code org.videolan.VLC}, with an arbitrary colon-suffixed qualifier
+     * tacked on). What genuinely distinguishes them: a real Maven {@code artifactId} is conventionally
+     * derived from, or equal to, the very product identity the candidate itself matched on (95% of
+     * this fix's own recovered rows: {@code guava:guava}, {@code slf4j-api}/{@code slf4j}, {@code
+     * netty-all}/{@code netty}, {@code jackson-databind}/{@code jackson}, {@code okhttp}/{@code
+     * okhttp3}, {@code logback-classic}/{@code logback}) — an arbitrary qualifier like {@code x64} or
+     * {@code stable} bears no such relationship to whatever the candidate matched. Checks the part of
+     * {@code normalizedQuery} after its first colon (the artifactId/tail) against {@code
+     * candidateTokens} (the very tokens {@link #explainsQuery} just matched) — not the same test as
+     * {@link #vendorExplains} (which is one-directional: a whole-token match, or a &gt;=4-character
+     * token contained in the *vendor's own* joined tokens), but the same equal-or-&gt;=4-character
+     * -substring idea extended to a bidirectional check between each artifact-tail token and each
+     * candidate token (either one containing the other, whichever side is long enough to qualify),
+     * since here — unlike {@code vendorExplains}'s fixed vendor-vs-token roles — there's no reason to
+     * prefer one direction over the other between two ordinary product-identity tokens.
+     */
+    private boolean matchedArtifactTailRelatesToCandidate(String normalizedQuery, List<String> candidateTokens) {
+        int colonIndex = normalizedQuery.indexOf(':');
+        if (colonIndex < 0 || colonIndex == normalizedQuery.length() - 1) {
+            return false;
+        }
+        List<String> artifactTailTokens = tokenize(normalizedQuery.substring(colonIndex + 1));
+        for (String artifactToken : artifactTailTokens) {
+            for (String candidateToken : candidateTokens) {
+                if (artifactToken.equals(candidateToken)) {
+                    return true;
+                }
+                if (artifactToken.length() >= 4 && candidateToken.contains(artifactToken)) {
+                    return true;
+                }
+                if (candidateToken.length() >= 4 && artifactToken.contains(candidateToken)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
