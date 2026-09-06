@@ -144,7 +144,8 @@ public class CveOrgSyncService {
         }
 
         markSynced(release.tag(), true);
-        log.info("CVE.org baseline sync complete: {} records upserted (release {})", upserted, release.tag());
+        log.info("CVE.org baseline sync complete: {} records upserted (release {})", upserted,
+                LogSanitizer.sanitize(release.tag()));
         return upserted;
     }
 
@@ -179,7 +180,8 @@ public class CveOrgSyncService {
         }
 
         markSynced(release.tag(), false);
-        log.info("CVE.org delta sync complete: {} records upserted (release {})", upserted, release.tag());
+        log.info("CVE.org delta sync complete: {} records upserted (release {})", upserted,
+                LogSanitizer.sanitize(release.tag()));
         return upserted;
     }
 

@@ -3,12 +3,17 @@ package com.vulncheck.app.service.cveorg;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.sun.net.httpserver.HttpServer;
 import com.vulncheck.app.entity.CveOrgSyncState;
 import com.vulncheck.app.repository.CveOrgAffectedProductRepository;
@@ -24,6 +29,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -34,6 +40,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -542,5 +549,75 @@ class CveOrgSyncServiceTest {
             assertThat(captor.getValue().isBaselineLoaded()).isTrue();
             assertThat(captor.getValue().getLastReleaseTag()).isEqualTo("cve_2026-09-07_0000Z");
         });
+    }
+
+    /** Senior review REVISE (item 416, 2026-09-07, second round): the "sync starting" log lines
+     *  (109/160) were sanitized in the first REVISE round, but the matching "sync complete" log
+     *  lines (147/182) were missed — same {@code release.tag()} value, same threat model (this
+     *  class's own javadoc already treats a compromised/spoofed release response as untrusted), just
+     *  the exit side of the same method left unsanitized while the entry side was fixed. Captures the
+     *  actual formatted log line {@link CveOrgSyncService} emits (not just the sanitizer's output in
+     *  isolation) to prove the CR/LF a malicious {@code tag_name} carries never reaches it, while
+     *  {@code cve_org_sync_state.last_release_tag} (a DB column, not a log line) still stores the
+     *  value verbatim — sanitization here is a log-injection defense, not a data-integrity one. */
+    @Test
+    void syncBaselineCompleteLogSanitizesAReleaseTagContainingCrlf() throws Exception {
+        String maliciousTag = "cve_2026-09-07_0000Z\r\nFAKE LOG LINE";
+
+        ByteArrayOutputStream zipBytes = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(zipBytes)) {
+            // Deliberately empty, same as syncBaselineClearsAPreviouslyRecordedErrorOnSuccess -- this
+            // test only cares about the completion log line, not record upserts.
+        }
+        byte[] emptyZip = zipBytes.toByteArray();
+
+        withLocalServer(Map.of("/asset", respondWithBody(emptyZip)), port -> {
+            RestClient.Builder builder = RestClient.builder();
+            MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+            // \\r\\n (a literal backslash-r-backslash-n in the JSON text) is the valid-JSON escape
+            // sequence for an actual CR/LF -- Jackson parses this into a tag_name String genuinely
+            // containing \r\n, exactly like a compromised/spoofed release response could send.
+            String releaseJson = "{\"tag_name\":\"cve_2026-09-07_0000Z\\r\\nFAKE LOG LINE\",\"assets\":[{"
+                    + "\"name\":\"2026-09-07T00_00_00Z_all_CVEs_at_midnight.zip.zip\","
+                    + "\"browser_download_url\":\"http://localhost:" + port + "/asset\"}]}";
+            server.expect(method(HttpMethod.GET))
+                    .andExpect(requestTo(LATEST_RELEASE_API))
+                    .andRespond(withSuccess(releaseJson, MediaType.APPLICATION_JSON));
+
+            CveOrgSyncService service = serviceWithLocalhostAllowed(builder.build());
+
+            List<ILoggingEvent> events = captureLogEvents(service::syncBaseline);
+
+            List<ILoggingEvent> completionEvents = events.stream()
+                    .filter(event -> event.getFormattedMessage().contains("sync complete"))
+                    .toList();
+            assertThat(completionEvents).hasSize(1);
+            assertThat(completionEvents.get(0).getFormattedMessage()).doesNotContain("\r").doesNotContain("\n");
+
+            // The DB column stores the tag verbatim -- only the log line is sanitized.
+            ArgumentCaptor<CveOrgSyncState> captor = ArgumentCaptor.forClass(CveOrgSyncState.class);
+            verify(cveOrgSyncStateRepository, atLeastOnce()).save(captor.capture());
+            assertThat(captor.getValue().getLastReleaseTag()).isEqualTo(maliciousTag);
+        });
+    }
+
+    /** Captures every log event {@link CveOrgSyncService}'s own logger emits while {@code action}
+     *  runs, temporarily lowering the logger to DEBUG (same convention as {@code
+     *  UserApiKeyServiceTest#captureLogEvents}) and restoring both the original level and appender
+     *  list afterward regardless of outcome. */
+    private List<ILoggingEvent> captureLogEvents(Runnable action) {
+        Logger logger = (Logger) LoggerFactory.getLogger(CveOrgSyncService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        Level originalLevel = logger.getLevel();
+        logger.setLevel(Level.DEBUG);
+        try {
+            action.run();
+        } finally {
+            logger.detachAppender(appender);
+            logger.setLevel(originalLevel);
+        }
+        return appender.list;
     }
 }
