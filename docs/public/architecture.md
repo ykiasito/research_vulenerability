@@ -69,13 +69,15 @@ CSVアップロード（`POST /jobs`）は以下の順で動く。
 
 | API | 用途 | 認証 |
 |---|---|---|
-| npm / PyPI / crates.io / RubyGems / Packagist / NuGet / Hex / pub.dev / Go proxy（9エコシステム、Maven Centralは含まない——前述の通りMaven Centralには閉域モード用ミラー自体が存在しない） | 各`*MirrorSyncService`によるレジストリミラー同期（既定無効） | 不要 |
-| NVD CPE API v2.0 | `NvdCpeSyncService`によるCPE辞書ミラー同期。管理画面（`/admin/cpe-dictionary`）からの手動キーワード同期にも使われる | 任意（ユーザー登録のNVDキー、無料） |
-| NVD CVE API v2.0 | `NvdCveSyncService`によるNVD CVEミラー同期 | 任意（同上） |
+| npm / PyPI / crates.io / RubyGems / Packagist / NuGet / Hex / pub.dev / Go proxy（9エコシステム、Maven Centralは含まない——前述の通りMaven Centralには閉域モード用ミラー自体が存在しない） | 各`*MirrorSyncService`によるレジストリミラー同期（既定無効）。エコシステムごとの実際のホスト名は本表では列挙しない | 不要 |
+| NVD CPE API v2.0（`services.nvd.nist.gov`） | `NvdCpeSyncService`によるCPE辞書ミラー同期。管理画面（`/admin/cpe-dictionary`）からの手動キーワード同期にも使われる | 任意（ユーザー登録のNVDキー、無料） |
+| NVD CVE API v2.0（`services.nvd.nist.gov`） | `NvdCveSyncService`によるNVD CVEミラー同期 | 任意（同上） |
 | OSV公開データダンプ（`osv-vulnerabilities.storage.googleapis.com`） | `OsvSyncService`によるOSVミラー同期 | 不要 |
-| GitHub Releases API（`api.github.com` — `CVEProject/cvelistV5`のリリース資産をダウンロード） | `CveOrgSyncService`によるCVE.orgミラー同期（CVE Services API自体は呼ばれない） | 不要 |
-| CSAF（Red Hat / Siemens） | `RedHatCsafSyncService` / `SiemensCsafSyncService`によるCSAFミラー同期 | 不要 |
-| GitHub API（`api.github.com` — `github/advisory-database`のtarball/commits/advisories）および`raw.githubusercontent.com` | `GhsaSyncService`によるGHSAミラー同期 | 不要 |
+| GitHub Releases API（`api.github.com` — `releases/latest`のメタデータ取得のみ。実際の資産本体はそのレスポンスの`browser_download_url`〔`github.com`のリリースダウンロードURL、リダイレクト先の資産配信ホストから取得〕経由） | `CveOrgSyncService`によるCVE.orgミラー同期（CVE Services API自体は呼ばれない） | 不要 |
+| CSAF（Red Hat: `security.access.redhat.com` / Siemens: `cert-portal.siemens.com`） | `RedHatCsafSyncService` / `SiemensCsafSyncService`によるCSAFミラー同期 | 不要 |
+| GitHub API（`api.github.com` — リダイレクト解決・`commits/main`・`/advisories`のみ。tarball本体〔123MB〕は`codeload.github.com`から取得）および`raw.githubusercontent.com`（delta時の個別ドキュメント取得） | `GhsaSyncService`によるGHSAミラー同期 | 不要 |
+
+上記のホスト名は各同期クラスの実装から確認できる範囲を記載したものであり、**本表はファイアウォールのegress許可リストの完全な代替ではありません**（特にレジストリミラー9エコシステムは個別ホストを列挙していないため、実際にアクセスを許可するホストは各`*MirrorSyncService`/`*RegistryClient`の実装を直接確認してください）。
 
 **GHSAはStage2の脆弱性照会対象に含まれますが、参照先はローカルミラーのみです**: `GhsaVulnerabilitySource`はStage2実行時にGitHubへライブ問い合わせすることはなく、`GhsaSyncService`が事前にミラーしたローカルテーブルのみを照会します。ミラー同期自体はbaseline投入後、管理者操作とは独立して日次で自動実行されます。詳細は[pipeline.md](./pipeline.md)のStage2節と`GhsaVulnerabilitySource`のクラスjavadoc参照。
 
