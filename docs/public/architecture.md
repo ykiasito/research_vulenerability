@@ -31,13 +31,27 @@ Spring Security によるフォームベースセッション認証。パスワ�
 | POST | `/settings/secrets/{provider}/delete` | APIキー削除 |
 | GET | `/admin/cpe-dictionary` | CPE辞書の手動同期画面 |
 | POST | `/admin/cpe-dictionary/sync` | NVD CPE APIからキーワード同期を実行 |
+| POST | `/admin/cpe-dictionary/sync-all` | CPE辞書のフル同期を開始（バックグラウンド実行、数時間かかる） |
 | GET | `/admin/cve-org` | CVE.org同期画面 |
+| POST | `/admin/cve-org/sync-delta` | CVE.orgの差分同期を実行 |
+| POST | `/admin/cve-org/sync-baseline` | CVE.orgの全件同期を実行 |
 | GET | `/admin/csaf-siemens` | Siemens CSAFアドバイザリー同期画面 |
+| POST | `/admin/csaf-siemens/sync-delta` | Siemens CSAFアドバイザリーの差分同期を実行 |
+| POST | `/admin/csaf-siemens/sync-baseline` | Siemens CSAFアドバイザリーの全件同期を実行 |
 | GET | `/admin/csaf-redhat` | Red Hat CSAFアドバイザリー同期画面 |
+| POST | `/admin/csaf-redhat/sync-delta` | Red Hat CSAFアドバイザリーの差分同期を実行 |
+| POST | `/admin/csaf-redhat/sync-baseline` | Red Hat CSAFアドバイザリーの全件同期を実行 |
 | GET | `/admin/ghsa` | GHSAミラー同期画面 |
+| POST | `/admin/ghsa/sync-delta` | GHSAミラーの差分同期を実行 |
+| POST | `/admin/ghsa/sync-baseline` | GHSAミラーの全件同期を実行 |
 | GET | `/admin/osv` | OSVミラー同期画面 |
+| POST | `/admin/osv/sync-delta` | OSVミラーの差分同期を実行 |
+| POST | `/admin/osv/sync-baseline` | OSVミラーの全件同期を実行 |
 | GET | `/admin/registry-mirror` | レジストリミラー（9エコシステム）同期画面 |
+| POST | `/admin/registry-mirror/sync-all` | レジストリミラー（9エコシステム全体）の同期を開始（バックグラウンド実行） |
+| POST | `/admin/registry-mirror/seed-names` | 指定エコシステムのミラーシード名一覧に名前を追加（次回同期から反映） |
 | GET | `/admin/nvd-cve` | NVD CVEミラー同期画面 |
+| POST | `/admin/nvd-cve/sync-now` | NVD CVEバックフィルの1回分のtickを開始（バックグラウンド実行） |
 
 管理者ロールの詳細は上記「認証・セッション」節を参照（2026-08-30訂正、旧「管理者専用ロールは未実装」という記述は陳腐化していたため削除）。`/admin/cve-org`・`/admin/csaf-siemens`・`/admin/csaf-redhat`・`/admin/ghsa`・`/admin/osv`・`/admin/registry-mirror`・`/admin/nvd-cve`はいずれも同様に`ROLE_ADMIN`必須。
 
