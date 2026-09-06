@@ -153,11 +153,11 @@ public class GhsaSyncService {
     private final int expectedBaselineCount;
     /** Opens the tarball body stream given the URL {@link #resolveRedirectTarget} resolved — a seam
      *  purely for tests (real production traffic always goes through {@link #openStream}, a plain
-     *  streaming {@link URLConnection} with a finite read timeout — see {@link
-     *  #DOWNLOAD_READ_TIMEOUT_MILLIS}'s javadoc for why {@code ghsaSyncRestClient} isn't used for
-     *  this multi-hundred-MB body instead). {@code MockRestServiceServer} can't intercept a raw
-     *  {@link URLConnection}, so the baseline-sync test supplies an in-memory tarball through this
-     *  instead of hitting a real host. */
+     *  streaming {@link URLConnection} with a finite read timeout — {@code ghsaSyncRestClient}
+     *  isn't used for this multi-hundred-MB body because its bounded-JSON-response client isn't
+     *  suited to a streaming download this large, see {@link #openStream}'s own comment). {@code
+     *  MockRestServiceServer} can't intercept a raw {@link URLConnection}, so the baseline-sync
+     *  test supplies an in-memory tarball through this instead of hitting a real host. */
     private final java.util.function.Function<String, InputStream> tarballStreamOpener;
 
     /** In-process "sync already running" guard — same rationale/scope as {@code
