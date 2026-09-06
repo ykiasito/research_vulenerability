@@ -39,19 +39,28 @@ import org.springframework.transaction.annotation.Transactional;
  * 20 {@code expected_ecosystem=maven} rows in golden-300.csv come back {@code UNIDENTIFIED} — zero
  * CPE-dictionary rescue for any of them. There is no live NVD fallback to even consider here — see
  * {@link Stage1IdentificationService}'s own class javadoc (closed-mode backlog item 273/B4): that
- * path was physically deleted on this branch. The only CPE-matching paths that exist are local
- * {@code cpe_dictionary} reads — {@link Stage1IdentificationService#localCpeLookup}'s literal/
- * pg_trgm-similarity search, falling back to {@link Stage1IdentificationService#findByNameVariants}'s
- * contraction/expansion/vendor-prefix-strip search — and neither has anything to match against
- * these rows' {@code product_name} values, which are raw Maven coordinates ({@code
- * groupId:artifactId}, e.g. {@code org.springframework:spring-core}) rather than human-readable
- * product names; there is no coincidental-CPE-match path the way there sometimes is for ordinary
- * desktop-software names. This confirms §6-2 scenario C's assumption is exactly right for the
- * current dataset/code, not merely a plausible projection: closed mode has literally no path back
- * to identifying these 20 rows short of standing up an actual Maven Central mirror (ruled out
- * elsewhere in the plan doc on ToS/effort grounds) or teaching the CPE-dictionary path to parse a
- * Maven coordinate into a heuristic product-name guess (not implemented, speculative, out of scope
- * of this investigation).
+ * path was physically deleted on this branch. This confirms §6-2 scenario C's assumption is
+ * exactly right for the current dataset/code, not merely a plausible projection: whatever the
+ * exact mechanism (see the correction paragraph below), these 20 rows end up {@code UNIDENTIFIED}
+ * either way.
+ *
+ * <p><b>Correction (2026-09-06, senior review caught this):</b> an earlier version of this javadoc
+ * claimed "neither {@link Stage1IdentificationService#localCpeLookup}'s pg_trgm search nor {@link
+ * Stage1IdentificationService#findByNameVariants} has anything to match against these rows'
+ * {@code product_name} values ... there is no coincidental-CPE-match path". That claim does not
+ * hold at the search stage: the CPE dictionary does have well-known entries for several of these
+ * Maven coordinates' underlying libraries (confirmed directly against the real dev DB's {@code
+ * cpe_dictionary}: {@code google:guava}, {@code fasterxml:jackson-databind}, {@code netty:netty},
+ * {@code apache:log4j} — note {@code apache:log4j}, not a {@code log4j-core} slug, which does not
+ * exist in the dictionary). {@code similarity('com.google.guava:guava', 'guava') = 0.375} exceeds
+ * {@link Stage1IdentificationService}'s product-side pg_trgm threshold (0.3), and running the same
+ * trigram query {@link #localCpeLookup} itself uses confirms {@code google:guava} does enter the
+ * candidate pool for that row. So the 20/20 UNIDENTIFIED outcome is not explained by "the search
+ * never finds anything" — the rejection, for at least this row, happens at a later stage (most
+ * likely the containment/{@code explainsQuery} admission gate rejecting the coordinate's
+ * unexplained leading tokens, e.g. {@code com}/{@code google}, but this has not been confirmed row
+ * by row for all 20). Tracked for further investigation as backlog item 367; do not cite the
+ * removed claim above as settled fact until that lands.
  *
  * <p>This is an analysis tool, not a regression gate — no assertions, same convention as the
  * sibling {@link ChocolateyRemovalGolden300RecallTest}: it prints a per-row breakdown plus a
@@ -72,10 +81,12 @@ import org.springframework.transaction.annotation.Transactional;
 })
 @Disabled("Run once by hand against the real dev DB (2026-09-05, backlog item 296 gap analysis, "
         + "post golden-300.csv sync -- item300) -- all 20/20 golden-300 expected_ecosystem=maven "
-        + "rows still come back UNIDENTIFIED, zero rescued via the local CPE dictionary (no live "
-        + "NVD fallback exists on this branch to consider either, see class javadoc) -- confirms "
-        + "docs/spec/closed-mode-plan.md's own scenario C assumption is exact, not just a plausible "
-        + "projection. See class javadoc. Re-confirmed 2026-09-06 (public accuracy write-up "
+        + "rows still come back UNIDENTIFIED (no live NVD fallback exists on this branch to "
+        + "consider either) -- confirms docs/spec/closed-mode-plan.md's own scenario C assumption "
+        + "is exact, not just a plausible projection. See class javadoc's correction paragraph "
+        + "(2026-09-06) -- this is NOT because the CPE dictionary lacks matching entries or "
+        + "because pg_trgm search finds nothing; the exact rejection stage is still under "
+        + "investigation (item 367). Re-confirmed 2026-09-06 (public accuracy write-up "
         + "measurement) with the identical 0/20 result. Left disabled so it can never re-fire on a "
         + "routine mvn test run.")
 class MavenCentralRemovalGolden300RecallTest {
