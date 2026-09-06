@@ -13,6 +13,7 @@ import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.ColumnMapping;
 import com.vulncheck.app.service.CsvParseException;
 import com.vulncheck.app.service.CsvParsingService;
+import com.vulncheck.app.service.MirrorFreshnessService;
 import com.vulncheck.app.service.PendingCsvUploadStore;
 import com.vulncheck.app.service.ResearchJobProcessingService;
 import com.vulncheck.app.service.ResearchJobService;
@@ -65,6 +66,7 @@ public class JobController {
     private final UserRepository userRepository;
     private final CsvParsingService csvParsingService;
     private final PendingCsvUploadStore pendingCsvUploadStore;
+    private final MirrorFreshnessService mirrorFreshnessService;
 
     @GetMapping("/jobs")
     public String list(@AuthenticationPrincipal UserDetails userDetails, Model model) {
@@ -425,6 +427,11 @@ public class JobController {
         // computeVisiblePageNumbers's own javadoc. currentPage+1 converts to that method's 1-based
         // contract.
         model.addAttribute("visiblePageNumbers", computeVisiblePageNumbers(currentPage + 1, itemsPage.getTotalPages()));
+        // Closed-mode backlog item 382: a stale/never-baselined mirror silently degrades every
+        // result on this page (closed mode has no live-API fallback left to catch a gap) with no
+        // other on-page signal that anything is wrong -- see MirrorFreshnessService's own class
+        // javadoc for what "stale" means per mirror.
+        model.addAttribute("mirrorFreshnessWarnings", mirrorFreshnessService.staleMirrorWarnings());
         return "jobs/detail";
     }
 
