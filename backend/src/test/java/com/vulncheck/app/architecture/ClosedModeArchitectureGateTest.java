@@ -997,6 +997,15 @@ class ClosedModeArchitectureGateTest {
      * item 360's specific master-merge safeguard. If a future, separately-decided closed-mode
      * deletion needs the same protection, add it here deliberately in the same commit that makes
      * that deletion, not as a routine sync update.
+     *
+     * <p>Peer-review follow-up (2026-09-06): the default {@code git diff --name-status}'s
+     * rename-detection hid one closed-mode-only removal — {@code
+     * NvdMirrorAbVerificationRunnerTest.java} was classified as a rename (R086) into {@code
+     * NvdAuthoritativeConfigurationMatcherTest.java} (commit {@code 001a1c9}) rather than a pure
+     * delete, so it never showed up as a {@code D} line. The correct, exhaustive derivation command
+     * is {@code git diff --name-status --no-renames d6b1ebd origin/closed-mode | grep '^D'} — always
+     * use {@code --no-renames} when regenerating this list, or a future similar rename could hide
+     * another entry the same way.
      */
     private static final List<String> DELETED_PATHS_DENYLIST = List.of(
             "backend/src/main/java/com/vulncheck/app/service/llm/LlmServiceClient.java",
@@ -1006,6 +1015,7 @@ class ClosedModeArchitectureGateTest {
             "backend/src/main/java/com/vulncheck/app/service/vuln/OsvLiveQueryClient.java",
             "backend/src/main/java/com/vulncheck/app/service/vuln/OsvRateLimiter.java",
             "backend/src/test/java/com/vulncheck/app/service/NvdMirrorAbVerificationRunner.java",
+            "backend/src/test/java/com/vulncheck/app/service/NvdMirrorAbVerificationRunnerTest.java",
             "backend/src/test/java/com/vulncheck/app/service/llm/LlmServiceClientTest.java",
             "backend/src/test/java/com/vulncheck/app/service/osv/OsvMirrorLiveApiComparisonJobCreator.java",
             "backend/src/test/java/com/vulncheck/app/service/registry/CratesIoMirrorParityGolden300Test.java",
