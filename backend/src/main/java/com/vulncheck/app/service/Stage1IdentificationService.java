@@ -245,10 +245,42 @@ public class Stage1IdentificationService {
      * tokens. Only ever consulted for tokens strictly ahead of a Direction 2 match (the existing loop
      * bound already restricts this to leading positions) — never applied to the trailing-token check
      * a few lines below, which polices a different, non-groupId-shaped part of the query.
+     *
+     * <p><b>Peer review REVISE (2026-09-06):</b> the first version of this fix consulted this list
+     * unconditionally — for ANY query containing one of these bare words as a leading token,
+     * regardless of whether the query actually looked like a Maven coordinate at all. That is a real
+     * false-positive risk: a software-inventory line like {@code ".NET Framework"} tokenizes to
+     * {@code ["net", "framework"]}, and a 1.8M-row CPE dictionary full of generic single-word product
+     * slugs ({@code framework}/{@code core}/{@code server}/{@code agent}/{@code manager}, ...) makes
+     * it entirely plausible that some unrelated vendor's {@code framework} entry would wrongly gain
+     * "net" as a free pass, when the old {@code vendorExplains} check (whole-token match, or a >=4
+     * -character substring fallback that "net" — 3 characters — never even qualifies for) would
+     * otherwise correctly reject it. See {@link #queryLooksLikeReverseDnsCoordinate} — this allowlist
+     * is now only ever consulted when that separate, structural check on the *query string itself*
+     * (not just a bare token) confirms the query actually has the {@code segment.segment:artifact}
+     * shape a Maven coordinate always has, which an ordinary product name essentially never does.
      */
     private static final java.util.Set<String> REVERSE_DNS_PACKAGE_PREFIXES = java.util.Set.of(
             "com", "org", "net", "io", "edu", "gov", "mil", "int", "biz", "info", "name",
             "ch", "de", "uk", "jp", "cn", "eu", "us");
+
+    /**
+     * Backlog item 367 (peer review REVISE, 2026-09-06): matches only a query shaped like a genuine
+     * Maven {@code groupId:artifactId} coordinate — at least two dot-separated segments, then a
+     * colon, then the artifact part (e.g. {@code com.google.guava:guava}, {@code
+     * io.netty:netty-all}). {@link #normalizeForContainment} never strips {@code .}/{@code :}
+     * (only {@code _}/backslashes/case), so this still sees them exactly as the raw CSV {@code
+     * product_name} column wrote them. An ordinary product name essentially never has this exact
+     * shape — a literal colon in a product name is already rare, and one preceded by a multi-segment
+     * dot chain rarer still — which is what makes this a reliable, narrowly-scoped gate for {@link
+     * #REVERSE_DNS_PACKAGE_PREFIXES}'s own bypass, rather than relying on ecosystem-detection (a
+     * registry match) — closed mode's Maven Central mirror is a permanent no-op (see this class's own
+     * top-level javadoc), so a real Maven row here never has a registry-resolved ecosystem to gate on
+     * in the first place; gating on that signal would have silently defeated the very fix it's
+     * supposed to let through.
+     */
+    private static final java.util.regex.Pattern REVERSE_DNS_COORDINATE_SHAPE =
+            java.util.regex.Pattern.compile("^[a-z0-9]+(?:\\.[a-z0-9]+)+:.+$");
 
     private final CpeDictionaryRepository cpeDictionaryRepository;
     private final CpeNameVariantCache cpeNameVariantCache;
@@ -2446,19 +2478,25 @@ public class Stage1IdentificationService {
         //
         // Backlog item 367: a leading token is also accepted, without needing vendorExplains at all,
         // if it's a recognized reverse-DNS package-name prefix (see REVERSE_DNS_PACKAGE_PREFIXES's own
-        // javadoc) — a Maven groupId's leading TLD-like segment is real structure, not noise, but it's
-        // essentially never itself a CPE vendor slug, so requiring vendorExplains on it alone
-        // structurally rejected every Maven coordinate whose match didn't happen to start at token 0.
+        // javadoc) AND the query itself actually has a genuine Maven-coordinate shape (see
+        // queryLooksLikeReverseDnsCoordinate/REVERSE_DNS_COORDINATE_SHAPE's own javadoc — peer review
+        // REVISE, 2026-09-06) — a Maven groupId's leading TLD-like segment is real structure, not
+        // noise, but it's essentially never itself a CPE vendor slug, so requiring vendorExplains on
+        // it alone structurally rejected every Maven coordinate whose match didn't happen to start at
+        // token 0. Gating on the query's own shape (rather than firing for any bare allowlisted word
+        // anywhere) is what keeps this from wrongly admitting an unrelated candidate against a
+        // non-Maven query like ".NET Framework" purely because it tokenizes to a leading "net".
         int start = java.util.Collections.indexOfSubList(queryTokens, candidateTokens);
         if (start < 0) {
             return false;
         }
         String cpeVendor = normalizeForContainment(cpeVendorOf(entry));
+        boolean queryLooksLikeMavenCoordinate = queryLooksLikeReverseDnsCoordinate(normalizedQuery);
         for (int i = 0; i < start; i++) {
             if (vendorExplains(cpeVendor, queryTokens.get(i))) {
                 continue;
             }
-            if (REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(i))) {
+            if (queryLooksLikeMavenCoordinate && REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(i))) {
                 continue;
             }
             return false;
@@ -2498,6 +2536,16 @@ public class Stage1IdentificationService {
             }
         }
         return true;
+    }
+
+    /** Backlog item 367 (peer review REVISE, 2026-09-06): see {@link #REVERSE_DNS_COORDINATE_SHAPE}'s
+     *  own javadoc for why this structural check on the whole query string — not just a bare leading
+     *  token — is what gates {@link #REVERSE_DNS_PACKAGE_PREFIXES}'s Direction 2 leading-token bypass
+     *  in {@link #explainsQuery}. Package-private (not private) solely so {@code
+     *  Stage1IdentificationServiceTest} can exercise it directly, same convention as {@link
+     *  #normalizeForContainment}. */
+    boolean queryLooksLikeReverseDnsCoordinate(String normalizedQuery) {
+        return REVERSE_DNS_COORDINATE_SHAPE.matcher(normalizedQuery).matches();
     }
 
     /**

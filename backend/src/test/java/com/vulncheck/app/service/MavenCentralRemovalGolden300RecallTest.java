@@ -89,6 +89,17 @@ import org.springframework.transaction.annotation.Transactional;
  * both re-run after this fix landed and stayed at 64/68 — no regression for non-Maven
  * identification.
  *
+ * <p><b>Peer review REVISE (2026-09-06):</b> the version of the fix measured above consulted
+ * {@code REVERSE_DNS_PACKAGE_PREFIXES} unconditionally for any bare leading token, which is a real
+ * false-positive risk for a non-Maven query that happens to tokenize with one of those words leading
+ * (e.g. {@code ".NET Framework"} → {@code ["net", "framework"]}) — see {@link
+ * Stage1IdentificationService#queryLooksLikeReverseDnsCoordinate} for the narrowed fix, which now
+ * additionally requires the query itself to structurally look like a genuine Maven coordinate
+ * ({@code segment.segment:artifact}) before the allowlist bypass fires at all. Re-measured against
+ * this same real dev DB after the narrowing landed: identical 6/20, same 6 rows recovered, same 3
+ * still {@code UNIDENTIFIED} — the narrowing closes the false-positive class without costing any of
+ * the recovered Maven rows.
+ *
  * <p>This is an analysis tool, not a regression gate — no assertions, same convention as the
  * sibling {@link ChocolateyRemovalGolden300RecallTest}: it prints a per-row breakdown plus a
  * summary for a human to read.
