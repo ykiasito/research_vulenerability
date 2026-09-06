@@ -223,6 +223,33 @@ public class Stage1IdentificationService {
      */
     private static final String JENKINS_TARGET_SW = "jenkins";
 
+    /**
+     * Backlog item 367 (real-devDB 20-row Maven investigation, 2026-09-06): reverse-DNS package-name
+     * prefixes that {@link #explainsQuery}'s Direction 2 leading-token loop treats as automatically
+     * explained, without requiring {@link #vendorExplains} to confirm them against the candidate's
+     * own CPE vendor. A Maven {@code groupId:artifactId} coordinate almost always leads with a
+     * reverse-DNS segment ({@code com.google.guava:guava}, {@code org.slf4j:slf4j-api}, {@code
+     * io.netty:netty-all}, {@code ch.qos.logback:logback-classic}) and that leading segment is
+     * essentially never itself a recognized CPE vendor slug — the actual vendor identity lives one or
+     * two segments further in ({@code google}, {@code slf4j}, {@code netty}, {@code qos}), which
+     * {@link #vendorExplains} already confirms just fine once it's reached. Before this fix, the
+     * *first* segment alone (the bare TLD-like prefix) failed {@code vendorExplains} and the whole
+     * candidate was rejected regardless of how well everything after it lined up — 9 of the 14
+     * candidate-pool-reachable-but-rejected Maven golden-300 rows shared exactly this root cause.
+     *
+     * <p>Deliberately just the small set of prefixes actually observed in real-world Maven groupIds
+     * (generic TLDs {@code com}/{@code org}/{@code net}/{@code io}/{@code edu}/{@code gov} plus the
+     * handful of country-code TLDs conventionally used the same way, e.g. {@code ch.qos.logback},
+     * {@code de.*}), not a general "any short token is probably a TLD" heuristic — kept narrow on
+     * purpose since this list is an unconditional bypass of {@link #vendorExplains} for these exact
+     * tokens. Only ever consulted for tokens strictly ahead of a Direction 2 match (the existing loop
+     * bound already restricts this to leading positions) — never applied to the trailing-token check
+     * a few lines below, which polices a different, non-groupId-shaped part of the query.
+     */
+    private static final java.util.Set<String> REVERSE_DNS_PACKAGE_PREFIXES = java.util.Set.of(
+            "com", "org", "net", "io", "edu", "gov", "mil", "int", "biz", "info", "name",
+            "ch", "de", "uk", "jp", "cn", "eu", "us");
+
     private final CpeDictionaryRepository cpeDictionaryRepository;
     private final CpeNameVariantCache cpeNameVariantCache;
     private final IdentifiedProductRepository identifiedProductRepository;
@@ -2416,15 +2443,25 @@ public class Stage1IdentificationService {
         // as a contiguous run of whole tokens somewhere within the query. Accepted only if every
         // query token *ahead of* that run is explained by the candidate's own CPE vendor — see this
         // method's own class-level javadoc above for the full Docker/GitHub Desktop reasoning.
+        //
+        // Backlog item 367: a leading token is also accepted, without needing vendorExplains at all,
+        // if it's a recognized reverse-DNS package-name prefix (see REVERSE_DNS_PACKAGE_PREFIXES's own
+        // javadoc) — a Maven groupId's leading TLD-like segment is real structure, not noise, but it's
+        // essentially never itself a CPE vendor slug, so requiring vendorExplains on it alone
+        // structurally rejected every Maven coordinate whose match didn't happen to start at token 0.
         int start = java.util.Collections.indexOfSubList(queryTokens, candidateTokens);
         if (start < 0) {
             return false;
         }
         String cpeVendor = normalizeForContainment(cpeVendorOf(entry));
         for (int i = 0; i < start; i++) {
-            if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
-                return false;
+            if (vendorExplains(cpeVendor, queryTokens.get(i))) {
+                continue;
             }
+            if (REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(i))) {
+                continue;
+            }
+            return false;
         }
         // REVISE item 5: a single-token candidate that matched with nothing ahead of it (start == 0)
         // has no leading anchor at all vouching for the tie — the trailing leftovers must be
