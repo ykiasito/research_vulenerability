@@ -18,6 +18,7 @@ import com.vulncheck.app.repository.ResearchJobItemRepository;
 import com.vulncheck.app.repository.ResearchJobRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.CsvParsingService;
+import com.vulncheck.app.service.MirrorFreshnessService;
 import com.vulncheck.app.service.PendingCsvUploadStore;
 import com.vulncheck.app.service.ResearchJobProcessingService;
 import com.vulncheck.app.service.ResearchJobService;
@@ -70,6 +71,12 @@ class JobControllerDetailRenderingTest {
     private CsvParsingService csvParsingService;
     @MockBean
     private PendingCsvUploadStore pendingCsvUploadStore;
+    // Closed-mode backlog item 382: JobController#detail now unconditionally calls
+    // MirrorFreshnessService#staleMirrorWarnings() -- left unstubbed deliberately, since Mockito's
+    // default answer already returns an empty List for an unstubbed List-returning method, which is
+    // exactly "no mirror freshness warnings" (irrelevant to every assertion in this class).
+    @MockBean
+    private MirrorFreshnessService mirrorFreshnessService;
 
     /** Same interface-projection fixture-builder shape as {@link JobControllerTest#cappedView}. */
     private JobItemVulnerabilityCappedView cappedView(Long jobItemId, String cveOrGhsaId, String severity,
