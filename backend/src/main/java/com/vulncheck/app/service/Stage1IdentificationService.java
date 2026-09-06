@@ -2706,22 +2706,29 @@ public class Stage1IdentificationService {
         // an arbitrary colon-suffixed qualifier like "x64" is not.
         //
         // Peer review REVISE round 3 (2026-09-07): the bypass above must also require
-        // !itemVendorContradicts(...) — without it, a 2-segment groupId (e.g. "org.mockito:mockito
-        // -core") only ever has ONE leading token ahead of the match, so this bypass is the ONLY
-        // gate that leading token ever goes through, and itemVendorContradicts's own vendor-mismatch
-        // check (below, start == 0 only) would never fire for it. Skipping it here would let a
-        // candidate whose CPE vendor the item's own vendor field actively contradicts (e.g. item
-        // vendor "Acme Corp" against an unrelated "microsoft:acme" candidate) into the pool purely
-        // because "org"/"com" sits on the allowlist. itemVendorContradicts already returns false for
-        // a blank item vendor (see its own javadoc), and every Maven-coordinate row in this
-        // project's own golden-300/real-1000 fixtures has a blank vendor column, so this addition
-        // costs none of this fix's own recovered rows.
+        // !itemVendorContradicts(...) — without it, whenever the Direction 2 match itself starts at
+        // token 1 (the artifactId shares a word stem with the groupId's own non-TLD segment, e.g.
+        // "org.acmecorp:acmecorp-core" matching candidate product "acmecorp"), this bypass is the
+        // ONLY gate the single leading token ("org") ever goes through, and itemVendorContradicts's
+        // own vendor-mismatch check (below, start == 0 only) never gets a chance to fire for it.
+        // Skipping it here would let a candidate whose CPE vendor the item's own vendor field
+        // actively contradicts (e.g. item vendor "Acme Corp" against an unrelated
+        // "microsoft:acmecorp" candidate) into the pool purely because "org"/"com" sits on the
+        // allowlist. itemVendorContradicts already returns false for a blank item vendor (see its
+        // own javadoc), and every Maven-coordinate row in this project's own golden-300/real-1000
+        // fixtures has a blank vendor column, so this addition costs none of this fix's own
+        // recovered rows.
         int start = java.util.Collections.indexOfSubList(queryTokens, candidateTokens);
         if (start < 0) {
             return false;
         }
         String cpeVendor = normalizeForContainment(cpeVendorOf(entry));
-        boolean queryLooksLikeMavenCoordinate = queryLooksLikeReverseDnsCoordinate(normalizedQuery)
+        // Peer review REVISE round 4 (2026-09-07): short-circuited on start > 0 first — start == 0
+        // (no leading tokens at all) is the common case across the candidate pool scan, and neither
+        // queryLooksLikeReverseDnsCoordinate's regex nor matchedArtifactTailRelatesToCandidate's
+        // token walk is ever consulted by the loop below when there's no leading token to bypass.
+        boolean queryLooksLikeMavenCoordinate = start > 0
+                && queryLooksLikeReverseDnsCoordinate(normalizedQuery)
                 && matchedArtifactTailRelatesToCandidate(normalizedQuery, candidateTokens);
         for (int i = 0; i < start; i++) {
             if (vendorExplains(cpeVendor, queryTokens.get(i))) {
