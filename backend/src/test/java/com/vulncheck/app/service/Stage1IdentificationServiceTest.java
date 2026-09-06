@@ -3497,6 +3497,31 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void bypassNeverFiresWhenTheLeadingSegmentIsNotARecognizedReverseDnsPrefix() {
+        // Backlog item 412 REVISE (senior review round 1, 2026-09-07): before this test, the
+        // REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(0)) condition inside
+        // bypassLeadingRunAsMavenCoordinate had zero regression coverage — every other case in this
+        // file exercising the widened bypass happens to lead with "com"/"org"/"net", so deleting that
+        // condition entirely still left every existing test green. This query leads with "acmecorp",
+        // which is not on the allowlist, while every other guard the bypass depends on is otherwise
+        // satisfied: the query has the genuine dot-then-colon Maven shape
+        // (queryLooksLikeReverseDnsCoordinate), the artifact tail "widget-core" relates back to the
+        // matched candidate product "widget" (matchedArtifactTailRelatesToCandidate), and the item
+        // vendor is blank so it can't contradict the candidate's CPE vendor
+        // (!itemVendorContradicts). The REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(0))
+        // check is therefore the ONLY thing standing between this query and a wrong-vendor admission —
+        // "unrelatedvendor" has no lexical relation whatsoever to "acmecorp"/"tooling". No
+        // stubSaveReturnsArgument() here — the rejected candidate never reaches save().
+        CpeDictionaryEntry unrelatedVendorWidget =
+                cpeEntry("cpe:2.3:a:unrelatedvendor:widget:1.0:*:*:*:*:*:*:*", "widget");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(unrelatedVendorWidget));
+
+        assertThat(service(List.of()).identify(item("acmecorp.tooling:widget-core"), USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
     void queryLooksLikeReverseDnsCoordinateOnlyMatchesAGenuineMultiSegmentGroupIdArtifactShape() {
         // Backlog item 367 REVISE: direct unit coverage of the structural gate itself (same
         // convention as normalizeForContainmentStripsCpeBackslashEscapes... below, which also calls a
