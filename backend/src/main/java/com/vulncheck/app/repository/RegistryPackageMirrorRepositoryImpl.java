@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
@@ -164,6 +165,14 @@ class RegistryPackageMirrorRepositoryImpl implements RegistryPackageMirrorReposi
                 "SELECT package_name FROM registry_package_mirror WHERE ecosystem = ? AND last_synced_at >= ?",
                 String.class, ecosystem, Timestamp.from(cutoff));
         return new HashSet<>(names);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<Instant> maxLastSyncedAt() {
+        Timestamp max = jdbcTemplate.queryForObject(
+                "SELECT MAX(last_synced_at) FROM registry_package_mirror", Timestamp.class);
+        return Optional.ofNullable(max).map(Timestamp::toInstant);
     }
 
     private List<String> toStringList(Array sqlArray) throws SQLException {

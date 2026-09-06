@@ -1,5 +1,6 @@
 package com.vulncheck.app.controller;
 
+import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -8,6 +9,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.vulncheck.app.config.SecurityConfig;
 import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
+import com.vulncheck.app.repository.CveOrgSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
 import com.vulncheck.app.repository.NvdCveSyncStateRepository;
@@ -23,6 +25,8 @@ import com.vulncheck.app.service.cveorg.CveOrgSyncService;
 import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.osv.OsvSyncService;
 import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
+import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -61,6 +65,8 @@ class AdminControllerSecurityTest {
     @MockBean
     private CveOrgSyncService cveOrgSyncService;
     @MockBean
+    private CveOrgSyncStateRepository cveOrgSyncStateRepository;
+    @MockBean
     private SiemensCsafSyncService siemensCsafSyncService;
     @MockBean
     private RedHatCsafSyncService redHatCsafSyncService;
@@ -86,6 +92,21 @@ class AdminControllerSecurityTest {
     private NvdCveSyncStateRepository nvdCveSyncStateRepository;
     @MockBean
     private CpeDictionarySyncStateRepository cpeDictionarySyncStateRepository;
+
+    /**
+     * Closed-mode backlog item 382: {@code AdminController#registryMirrorFullSync} (exercised
+     * below by {@code adminUserIsAllowedThroughToRegistryMirrorSync}) now unconditionally calls
+     * {@link RegistryMirrorSyncService#currentStatus()} to populate the sync-status display —
+     * stubbed here so that call returns a real {@link RegistryMirrorSyncService.SyncStatus} instead
+     * of Mockito's default {@code null} (this record type isn't one of the types Mockito's default
+     * answer auto-fills, unlike the {@code Optional}/{@code List} return types elsewhere in this
+     * controller).
+     */
+    @BeforeEach
+    void stubRegistryMirrorSyncStatus() {
+        when(registryMirrorSyncService.currentStatus())
+                .thenReturn(new RegistryMirrorSyncService.SyncStatus(false, Optional.empty()));
+    }
 
     @Test
     void unauthenticatedRequestIsRedirectedToLogin() throws Exception {

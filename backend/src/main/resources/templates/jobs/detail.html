@@ -17,6 +17,16 @@
     アップロードされたCSVのバージョン情報が実際の製品バージョンと一致していない可能性があります。結果は参考情報とし、必要に応じてご自身でも確認してください。
 </p>
 
+<!-- closed-mode backlog item 382: 閉域モードではミラーが唯一のデータ源のため、ミラーが古い・未同期の
+     ままだと調査結果自体が古い情報に基づいてしまう。MirrorFreshnessService の判定結果を表示する。 -->
+<div th:if="${not #lists.isEmpty(mirrorFreshnessWarnings)}" style="background-color: #fff3cd; border: 1px solid #ffe08a; padding: 0.6em 1em; color: #7a5c00;">
+    ⚠ 閉域モードのミラーの一部が古い、または未同期の可能性があります。この調査結果は最新の脆弱性情報を
+    反映していない場合があります。
+    <ul style="margin: 0.3em 0 0;">
+        <li th:each="w : ${mirrorFreshnessWarnings}" th:text="${w}"></li>
+    </ul>
+</div>
+
 <p style="font-size: 0.9em; color: #555;">
     <strong>調査確度</strong>の目安:
     <span style="color: #0a7d2c;">🟢 高</span> = レジストリでバージョンまで確認済み /

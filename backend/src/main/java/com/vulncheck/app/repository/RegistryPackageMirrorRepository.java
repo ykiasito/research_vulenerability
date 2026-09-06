@@ -3,6 +3,7 @@ package com.vulncheck.app.repository;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -61,4 +62,15 @@ public interface RegistryPackageMirrorRepository {
      * returned set, regardless of {@code cutoff} -- there is no {@code last_synced_at} to compare.
      */
     Set<String> findFreshlySyncedNormalizedPackageNames(String ecosystem, Instant cutoff);
+
+    /**
+     * The most recent {@code last_synced_at} across every ecosystem/package row in this table, or
+     * empty if the mirror has never synced a single row -- closed-mode backlog item 382: used by
+     * {@code AdminController}'s registry-mirror sync-status display and by {@link
+     * com.vulncheck.app.service.MirrorFreshnessService} for the mirror-freshness banner. This table
+     * (unlike {@code ghsa_sync_state}/{@code cve_org_sync_state}) has no single-row sync-state
+     * tracker of its own -- every row is a per-(ecosystem, package) mirror entry -- so this is the
+     * only place "when did this mirror last write anything" can be read from.
+     */
+    Optional<Instant> maxLastSyncedAt();
 }
