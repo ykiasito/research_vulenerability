@@ -153,9 +153,14 @@ public class RestClientConfig {
      * #osvSyncRestClient} (no-auto-redirect, same SSRF-hardening rationale) even though this
      * particular call has no known redirect in practice, for consistency across the sync clients.
      * The baseline/delta zip bodies themselves are NOT fetched through this client — {@code
-     * CveOrgSyncService#download} streams them through a plain {@link java.net.URLConnection} with
-     * an unbounded read timeout, same as {@link #ghsaSyncRestClient}/{@link #osvSyncRestClient}'s
-     * large-download callers.
+     * CveOrgSyncService#download} streams them through a plain {@link java.net.URLConnection},
+     * validated + redirect-revalidated against its own host allowlist (same SSRF-hardening as this
+     * bean provides for the releases-API call above), with a finite 30s read timeout rather than
+     * the unbounded one {@link #ghsaSyncRestClient}/{@link #osvSyncRestClient}'s equivalent
+     * large-download callers still use — a deliberate divergence (not a copy-paste gap): {@code
+     * CveOrgSyncService#openConnection}'s read timeout is a per-read/idle timeout, not a
+     * whole-download budget, so it doesn't cap a genuinely-streaming multi-GB transfer, only a
+     * connection that goes fully idle for that long.
      */
     @Bean
     public RestClient cveOrgSyncRestClient() {
