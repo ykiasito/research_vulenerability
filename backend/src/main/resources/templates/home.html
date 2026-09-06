@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html xmlns:th="http://www.thymeleaf.org">
+<html xmlns:th="http://www.thymeleaf.org" xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
 <head>
     <meta charset="UTF-8"/>
     <link rel="stylesheet" th:href="@{/css/style.css}"/>
@@ -9,7 +9,10 @@
 <h1>ソフトウェア脆弱性調査サーバー</h1>
 <p th:text="'ログイン済み: ' + ${email}"></p>
 
-<p><a th:href="@{/jobs}">調査ジョブ一覧</a> | <a th:href="@{/jobs/new}">新規CSVアップロード</a> | <a th:href="@{/settings/secrets}">APIキー設定</a> | <a th:href="@{/guide}">初期設定・使い方</a></p>
+<!-- closed-mode backlog item 393/408: /settings/secrets は SecurityConfig で ROLE_ADMIN 限定に
+     したため、非管理者にはこのリンク(区切り文字ごと)自体を出さない -- 出すと素のwhitelabel 403
+     に直行してしまう。 -->
+<p><a th:href="@{/jobs}">調査ジョブ一覧</a> | <a th:href="@{/jobs/new}">新規CSVアップロード</a><span sec:authorize="hasRole('ADMIN')"> | <a th:href="@{/settings/secrets}">APIキー設定</a></span> | <a th:href="@{/guide}">初期設定・使い方</a></p>
 
 <form th:action="@{/logout}" method="post">
     <button type="submit">ログアウト</button>
