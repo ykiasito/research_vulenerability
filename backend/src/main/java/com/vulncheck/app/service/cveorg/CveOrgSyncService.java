@@ -13,10 +13,12 @@ import java.net.URI;
 import java.net.URLConnection;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
@@ -47,6 +49,19 @@ public class CveOrgSyncService {
     private static final String LATEST_RELEASE_API = "https://api.github.com/repos/CVEProject/cvelistV5/releases/latest";
     private static final String BASELINE_ASSET_SUFFIX = "_all_CVEs_at_midnight.zip.zip";
     private static final String DELTA_ASSET_INFIX = "_delta_CVEs_at_";
+
+    /** Hosts {@link #download}'s {@code url} (parsed from GitHub's {@code browser_download_url},
+     *  not a hardcoded constant) is allowed to connect to — {@code github.com}'s own
+     *  releases-download endpoint plus its signed asset CDN, which it typically redirects to once
+     *  (backlog items 359/361). */
+    private static final Set<String> ALLOWED_HOSTS = Set.of("github.com", "objects.githubusercontent.com");
+    private static final int DOWNLOAD_CONNECT_TIMEOUT_MILLIS = 10_000;
+    /** Finite, not {@code 0}/unbounded (backlog item 362) — {@link URLConnection#setReadTimeout} is
+     *  a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long
+     *  a genuinely-streaming multi-GB download can take; it only kills a connection that goes fully
+     *  idle for this long, matching {@code cveOrgSyncRestClient}'s own read timeout (see {@code
+     *  RestClientConfig#cveOrgSyncRestClient}) for consistency. */
+    private static final int DOWNLOAD_READ_TIMEOUT_MILLIS = 30_000;
 
     private final RestClient cveOrgSyncRestClient;
     private final CveOrgRecordRepository cveOrgRecordRepository;
@@ -266,15 +281,104 @@ public class CveOrgSyncService {
         }
     }
 
-    /** Plain {@link URLConnection}, not the {@code cveOrgSyncRestClient} bean — that client's 30s
-     *  read timeout (fine for the quick releases-API call) is far too short for a download that
-     *  can run for minutes (baseline: well over 1GB). */
+    /** Plain {@link URLConnection} for the actual bytes (via {@link #openConnection}), not the
+     *  {@code cveOrgSyncRestClient} bean directly — that client's 30s read timeout is fine for the
+     *  quick releases-API call but far too short for a download that can run for minutes
+     *  (baseline: well over 1GB). {@code url} is GitHub-supplied (parsed from {@code
+     *  browser_download_url}), so it's validated and any redirect re-validated before ever
+     *  connecting (backlog items 359/361/362) — see {@link #validatedUri}/{@link
+     *  #resolveRedirectTarget}/{@link #openConnection}, mirroring {@code
+     *  GhsaSyncService#resolveRedirectTarget}/{@code #openStream}'s SSRF-hardening for its
+     *  equivalent tarball-body download. */
     private InputStream download(String url) throws IOException {
-        URLConnection connection = URI.create(url).toURL().openConnection();
-        connection.setConnectTimeout(10_000);
-        connection.setReadTimeout(0);
+        URI validated = validatedUri(url);
+        if (validated == null) {
+            throw new IOException("Rejected non-allowlisted download URL: " + url);
+        }
+        URI resolved = resolveRedirectTarget(validated);
+        return openConnection(resolved).getInputStream();
+    }
+
+    /**
+     * Validates {@code url} is {@code https} and its host is one of {@link #ALLOWED_HOSTS} before
+     * ever connecting — {@code url} (passed from {@link #download}) ultimately comes from GitHub's
+     * parsed {@code browser_download_url}, not a hardcoded constant, so a compromised/spoofed
+     * release response could otherwise redirect this sync job at an arbitrary host (or a
+     * non-network scheme such as {@code file://}, which would bypass network-level egress controls
+     * entirely). Matches the same defense already applied by {@code OsvSyncService}, {@code
+     * GhsaSyncService}, and both CSAF sync services (backlog items 359/361).
+     *
+     * <p>Package-private (not {@code private}) so the unit test can call it directly, matching
+     * {@code RestClientConfig#simpleRequestFactory}'s established convention for this kind of seam.
+     */
+    URI validatedUri(String url) {
+        URI uri;
+        try {
+            uri = URI.create(url);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || !ALLOWED_HOSTS.contains(uri.getHost())) {
+            log.warn("CVE.org sync: rejecting fetch of {} — not https or not an allowlisted host", url);
+            return null;
+        }
+        return uri;
+    }
+
+    /**
+     * Re-resolves {@code uri}'s single 3xx redirect hop (if any) through {@link
+     * #cveOrgSyncRestClient} — the same no-auto-redirect bean used for the releases-API call — so
+     * the redirect target's host can be validated against {@link #ALLOWED_HOSTS} before ever being
+     * followed (backlog item 361). GitHub's {@code github.com/.../releases/download/...} endpoint
+     * typically redirects once to its signed asset CDN ({@code objects.githubusercontent.com}),
+     * mirroring {@code GhsaSyncService#resolveRedirectTarget}'s tarball-endpoint case. On a
+     * non-redirect response the original (already-validated) {@code uri} is returned as-is — a real
+     * connection problem surfaces at {@link #openConnection}'s own attempt, not here.
+     *
+     * <p>Package-private (not {@code private}) so the unit test can call it directly against a
+     * {@code MockRestServiceServer}-backed client.
+     */
+    URI resolveRedirectTarget(URI uri) throws IOException {
+        try {
+            return cveOrgSyncRestClient.get().uri(uri).exchange((request, response) -> {
+                if (!response.getStatusCode().is3xxRedirection()) {
+                    return uri;
+                }
+                String location = response.getHeaders().getFirst(HttpHeaders.LOCATION);
+                if (location == null) {
+                    throw new IllegalStateException(
+                            "CVE.org sync: redirect response had no Location header for " + uri);
+                }
+                URI target = uri.resolve(location);
+                URI validatedTarget = validatedUri(target.toString());
+                if (validatedTarget == null) {
+                    throw new IllegalStateException(
+                            "CVE.org sync: rejected non-allowlisted redirect target " + target);
+                }
+                return validatedTarget;
+            });
+        } catch (IllegalStateException e) {
+            throw new IOException(e.getMessage(), e);
+        } catch (Exception e) {
+            throw new IOException("CVE.org sync: transport error resolving redirect for " + uri, e);
+        }
+    }
+
+    /**
+     * Builds the raw {@link URLConnection} for the (already validated + redirect-resolved)
+     * download URL, with a finite connect/read timeout (backlog item 362) instead of the previous
+     * unbounded ({@code setReadTimeout(0)}) one — see {@link #DOWNLOAD_READ_TIMEOUT_MILLIS}'s
+     * javadoc for why a finite value doesn't cap a genuinely-streaming multi-GB download.
+     *
+     * <p>Package-private so the unit test can assert the concrete timeout values directly, same
+     * convention as {@code RestClientConfig#noRedirectRequestFactory}'s own test.
+     */
+    URLConnection openConnection(URI uri) throws IOException {
+        URLConnection connection = uri.toURL().openConnection();
+        connection.setConnectTimeout(DOWNLOAD_CONNECT_TIMEOUT_MILLIS);
+        connection.setReadTimeout(DOWNLOAD_READ_TIMEOUT_MILLIS);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (cve.org sync)");
-        return connection.getInputStream();
+        return connection;
     }
 
     private record GitHubRelease(String tag, String baselineZipUrl, String deltaZipUrl) {
