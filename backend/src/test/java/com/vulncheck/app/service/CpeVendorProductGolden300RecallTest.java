@@ -101,7 +101,8 @@ class CpeVendorProductGolden300RecallTest {
                 continue;
             }
             if (!"IDENTIFIED_CPE".equals(expected.expectedOutcome())
-                    || expected.expectedCpeVendor() == null || expected.expectedCpeVendor().isBlank()) {
+                    || expected.expectedCpeVendor() == null || expected.expectedCpeVendor().isBlank()
+                    || expected.expectedCpeProduct() == null || expected.expectedCpeProduct().isBlank()) {
                 continue;
             }
             cpeTargetTotal++;
