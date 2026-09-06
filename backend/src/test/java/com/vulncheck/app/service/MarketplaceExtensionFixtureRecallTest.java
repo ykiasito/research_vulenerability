@@ -113,7 +113,15 @@ import org.springframework.transaction.annotation.Transactional;
         + "re-measured here since this fixture's own baseline purpose (recording the pre-item-303 "
         + "control state) doesn't need updating for an unrelated fix; see Stage1IdentificationServiceTest's "
         + "own item 319 unit tests for the actual regression coverage. Left disabled so it can never "
-        + "re-fire on a routine mvn test run -- see class javadoc.")
+        + "re-fire on a routine mvn test run -- see class javadoc. "
+        + "First-ever closed-mode measurement (item360 Step3, 2026-09-06, post item360-Step2 master "
+        + "sync at c93340a): extension rows 20/23 = 0.8696, control rows 5/6 = 0.8333. Remaining "
+        + "extension mismatches: Python (resolves to python:python instead of "
+        + "microsoft:python_extension, same unrelated static-path issue noted above), ESLint and Live "
+        + "Share (both come back UNIDENTIFIED rather than their expected microsoft:eslint / "
+        + "microsoft:visual_studio_live_share). The sole control mismatch is the same pre-existing "
+        + "item 319 case: 'Visual Studio Code Server' now correctly resolves to UNIDENTIFIED (not a "
+        + "wrong-CPE miss, matching the fix already documented above), not coder:code-server.")
 class MarketplaceExtensionFixtureRecallTest {
 
     private static final Long REAL_USER_ID = 5L;
