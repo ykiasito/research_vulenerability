@@ -100,6 +100,15 @@ import org.springframework.transaction.annotation.Transactional;
  * still {@code UNIDENTIFIED} — the narrowing closes the false-positive class without costing any of
  * the recovered Maven rows.
  *
+ * <p><b>Peer review REVISE round 2 (2026-09-06):</b> the shape check above still wasn't enough — a
+ * verified counterexample, {@code "net.framework:x64"}, has the exact same "two dot-segments then a
+ * colon" shape as the genuine {@code io.netty:netty-all}, so it slipped through the round-1 fix. See
+ * {@link Stage1IdentificationService#matchedArtifactTailRelatesToCandidate} for the second, narrower
+ * gate this added: the colon-suffixed tail must actually relate back to the matched candidate's own
+ * product identity (the way a real Maven artifactId conventionally does), not just have the right
+ * shape. Re-measured against this same real dev DB after this second narrowing landed: identical
+ * 6/20 again — no further cost to the recovered Maven rows.
+ *
  * <p>This is an analysis tool, not a regression gate — no assertions, same convention as the
  * sibling {@link ChocolateyRemovalGolden300RecallTest}: it prints a per-row breakdown plus a
  * summary for a human to read.

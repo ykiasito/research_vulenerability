@@ -2478,20 +2478,24 @@ public class Stage1IdentificationService {
         //
         // Backlog item 367: a leading token is also accepted, without needing vendorExplains at all,
         // if it's a recognized reverse-DNS package-name prefix (see REVERSE_DNS_PACKAGE_PREFIXES's own
-        // javadoc) AND the query itself actually has a genuine Maven-coordinate shape (see
-        // queryLooksLikeReverseDnsCoordinate/REVERSE_DNS_COORDINATE_SHAPE's own javadoc — peer review
-        // REVISE, 2026-09-06) — a Maven groupId's leading TLD-like segment is real structure, not
-        // noise, but it's essentially never itself a CPE vendor slug, so requiring vendorExplains on
-        // it alone structurally rejected every Maven coordinate whose match didn't happen to start at
-        // token 0. Gating on the query's own shape (rather than firing for any bare allowlisted word
-        // anywhere) is what keeps this from wrongly admitting an unrelated candidate against a
-        // non-Maven query like ".NET Framework" purely because it tokenizes to a leading "net".
+        // javadoc) AND the query itself actually has a genuine Maven-coordinate shape AND its
+        // colon-suffixed tail actually relates back to the matched candidate itself (see
+        // queryLooksLikeReverseDnsCoordinate/matchedArtifactTailRelatesToCandidate's own javadoc —
+        // peer review REVISE round 2, 2026-09-06) — a Maven groupId's leading TLD-like segment is
+        // real structure, not noise, but it's essentially never itself a CPE vendor slug, so requiring
+        // vendorExplains on it alone structurally rejected every Maven coordinate whose match didn't
+        // happen to start at token 0. Gating on the query's own shape alone is not enough (round 2:
+        // "net.framework:x64" has the identical two-dot-segment-then-colon shape as the genuine
+        // "io.netty:netty-all"), so the tail-relatedness check is what tells them apart — a real Maven
+        // artifactId is conventionally derived from (or equal to) the matched product identity itself,
+        // an arbitrary colon-suffixed qualifier like "x64" is not.
         int start = java.util.Collections.indexOfSubList(queryTokens, candidateTokens);
         if (start < 0) {
             return false;
         }
         String cpeVendor = normalizeForContainment(cpeVendorOf(entry));
-        boolean queryLooksLikeMavenCoordinate = queryLooksLikeReverseDnsCoordinate(normalizedQuery);
+        boolean queryLooksLikeMavenCoordinate = queryLooksLikeReverseDnsCoordinate(normalizedQuery)
+                && matchedArtifactTailRelatesToCandidate(normalizedQuery, candidateTokens);
         for (int i = 0; i < start; i++) {
             if (vendorExplains(cpeVendor, queryTokens.get(i))) {
                 continue;
@@ -2546,6 +2550,46 @@ public class Stage1IdentificationService {
      *  #normalizeForContainment}. */
     boolean queryLooksLikeReverseDnsCoordinate(String normalizedQuery) {
         return REVERSE_DNS_COORDINATE_SHAPE.matcher(normalizedQuery).matches();
+    }
+
+    /**
+     * Backlog item 367 (peer review REVISE round 2, 2026-09-06): {@link
+     * #queryLooksLikeReverseDnsCoordinate}'s shape check alone is not enough — the reviewer's own
+     * counterexample, {@code net.framework:x64}, has the exact same "two dot-segments then a colon"
+     * shape as the genuine {@code io.netty:netty-all}, so shape alone can't tell a real Maven
+     * coordinate from an adversarially-constructed lookalike (a reverse-DNS-dotted identifier, e.g. a
+     * Flatpak/Snap app ID like {@code org.videolan.VLC}, with an arbitrary colon-suffixed qualifier
+     * tacked on). What genuinely distinguishes them: a real Maven {@code artifactId} is conventionally
+     * derived from, or equal to, the very product identity the candidate itself matched on (95% of
+     * this fix's own recovered rows: {@code guava:guava}, {@code slf4j-api}/{@code slf4j}, {@code
+     * netty-all}/{@code netty}, {@code jackson-databind}/{@code jackson}, {@code okhttp}/{@code
+     * okhttp3}, {@code logback-classic}/{@code logback}) — an arbitrary qualifier like {@code x64} or
+     * {@code stable} bears no such relationship to whatever the candidate matched. Checks the part of
+     * {@code normalizedQuery} after its first colon (the artifactId/tail) against {@code
+     * candidateTokens} (the very tokens {@link #explainsQuery} just matched) using the same
+     * equal-or-&gt;=4-char-substring test {@link #vendorExplains} already uses elsewhere in this class,
+     * rather than inventing a new similarity rule.
+     */
+    private boolean matchedArtifactTailRelatesToCandidate(String normalizedQuery, List<String> candidateTokens) {
+        int colonIndex = normalizedQuery.indexOf(':');
+        if (colonIndex < 0 || colonIndex == normalizedQuery.length() - 1) {
+            return false;
+        }
+        List<String> artifactTailTokens = tokenize(normalizedQuery.substring(colonIndex + 1));
+        for (String artifactToken : artifactTailTokens) {
+            for (String candidateToken : candidateTokens) {
+                if (artifactToken.equals(candidateToken)) {
+                    return true;
+                }
+                if (artifactToken.length() >= 4 && candidateToken.contains(artifactToken)) {
+                    return true;
+                }
+                if (candidateToken.length() >= 4 && artifactToken.contains(candidateToken)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
