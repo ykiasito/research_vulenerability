@@ -1,8 +1,10 @@
 package com.vulncheck.app.controller;
 
+import com.vulncheck.app.entity.CveOrgSyncState;
 import com.vulncheck.app.entity.User;
 import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
+import com.vulncheck.app.repository.CveOrgSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
 import com.vulncheck.app.repository.NvdCveSyncStateRepository;
@@ -53,6 +55,7 @@ public class AdminController {
     private final UserApiKeyService userApiKeyService;
     private final UserRepository userRepository;
     private final CveOrgSyncService cveOrgSyncService;
+    private final CveOrgSyncStateRepository cveOrgSyncStateRepository;
     private final SiemensCsafSyncService siemensCsafSyncService;
     private final RedHatCsafSyncService redHatCsafSyncService;
     private final CsafSyncStateRepository csafSyncStateRepository;
@@ -175,22 +178,45 @@ public class AdminController {
     }
 
     @GetMapping("/admin/cve-org")
-    public String cveOrgForm() {
+    public String cveOrgForm(Model model) {
+        model.addAttribute("syncState", cveOrgSyncStateRepository.findById((short) 1).orElse(null));
         return "admin/cve-org";
     }
 
     @PostMapping("/admin/cve-org/sync-delta")
     public String cveOrgSyncDelta(Model model) {
         int count = cveOrgSyncService.syncDelta();
-        model.addAttribute("result", count + " 件のCVEレコードを差分同期しました。");
+        addCveOrgSyncResult(model, count + " 件のCVEレコードを差分同期しました。", "差分同期");
         return "admin/cve-org";
     }
 
     @PostMapping("/admin/cve-org/sync-baseline")
     public String cveOrgSyncBaseline(Model model) {
         int count = cveOrgSyncService.syncBaseline();
-        model.addAttribute("result", count + " 件のCVEレコードを全件投入しました。");
+        addCveOrgSyncResult(model, count + " 件のCVEレコードを全件投入しました。", "全件投入");
         return "admin/cve-org";
+    }
+
+    /**
+     * Closed-mode backlog item 379 follow-up (senior review on PR #278): {@link
+     * CveOrgSyncService#syncDelta}/{@link CveOrgSyncService#syncBaseline} return a plain upserted
+     * count even when the whole run failed via {@link CveOrgSyncService} recording a {@code
+     * last_sync_error} (a 0-upsert failed run and a genuinely-idle "nothing new today" successful
+     * run were otherwise indistinguishable from the count alone) -- item 379's own point was to
+     * surface exactly that failure, which never reached this page before. Re-reads the
+     * just-written {@link CveOrgSyncState} after the call: if it now carries a {@code
+     * last_sync_error}, shows that (via {@code admin/cve-org.html}'s {@code syncFailureMessage}
+     * block, styled red) instead of the misleadingly green {@code result} success message --
+     * the two are mutually exclusive in the template, never both shown for the same run.
+     */
+    private void addCveOrgSyncResult(Model model, String successMessage, String label) {
+        CveOrgSyncState state = cveOrgSyncStateRepository.findById((short) 1).orElse(null);
+        model.addAttribute("syncState", state);
+        if (state != null && state.getLastSyncError() != null) {
+            model.addAttribute("syncFailureMessage", label + "に失敗しました。詳細: " + state.getLastSyncError());
+        } else {
+            model.addAttribute("result", successMessage);
+        }
     }
 
     @GetMapping("/admin/csaf-siemens")

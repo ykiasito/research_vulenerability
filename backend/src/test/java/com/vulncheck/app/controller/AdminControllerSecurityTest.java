@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.vulncheck.app.config.SecurityConfig;
 import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
+import com.vulncheck.app.repository.CveOrgSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
 import com.vulncheck.app.repository.NvdCveSyncStateRepository;
@@ -60,6 +61,8 @@ class AdminControllerSecurityTest {
     private UserRepository userRepository;
     @MockBean
     private CveOrgSyncService cveOrgSyncService;
+    @MockBean
+    private CveOrgSyncStateRepository cveOrgSyncStateRepository;
     @MockBean
     private SiemensCsafSyncService siemensCsafSyncService;
     @MockBean

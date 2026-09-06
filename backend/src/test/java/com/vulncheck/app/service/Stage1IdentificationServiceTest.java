@@ -312,6 +312,50 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void installUrlDeclaredCpeSurvivesRegistryDistrustReCheck() {
+        // Backlog item 389 (root cause of item 377's ESLint closed-mode regression): a chosenCpe that
+        // only passed the target_sw gate via its OWN install_url declaration (never a registry
+        // ecosystem mapping) must not be wrongly re-rejected here just because an unrelated,
+        // unconfirmed-version registry match on the same item is separately judged untrustworthy
+        // below. The pre-389 bug passed installUrl=null into both of this re-check's TargetSwContext
+        // constructions, which discarded the install_url signal too instead of only the distrusted
+        // registry ecosystem's own context — silently sending a real VS Code Marketplace extension
+        // (e.g. dbaeumer.vscode-eslint, whose npm "eslint" registry match is unconfirmed-version and
+        // unrelated to the VS Code extension's own identity) to UNIDENTIFIED.
+        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("npm", "eslint", "pkg:npm/eslint@2.1.7", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        CpeDictionaryEntry vscodeEslintExtension = cpeEntry(
+                "cpe:2.3:a:microsoft:eslint:2.0:*:*:*:*:visual_studio_code:*:*", "eslint");
+        vscodeEslintExtension.setTitle("ESLint");
+        vscodeEslintExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeEslintExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("ESLint");
+        item.setInstallUrl("https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint");
+
+        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        // The distrusted npm registry match must not be attached — only the install_url-gated CPE
+        // survives on its own.
+        assertThat(result.get().getEcosystem()).isNull();
+        assertThat(result.get().getPackageName()).isNull();
+        assertThat(result.get().getCpe())
+                .isEqualTo("cpe:2.3:a:microsoft:eslint:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
     void unconfirmedVersionRegistryMatchIsStillUsedWhenNoCpeCorroborationExists() {
         // Same weak signal as above, but with no CPE candidate at all — still the only signal
         // available, so it's used as a best-effort fallback (unchanged from prior behavior).
@@ -1591,6 +1635,117 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
         assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void mavenArtifactTokenVariantFindsCandidateAndIsAcceptedWhenAiConfirmsIt() {
+        // Backlog item 388 (REVISE, senior review 2026-09-06): the Maven-coordinate normalization
+        // fallback now lives inside computeNameVariantMatches, reached via findByNameVariants only as
+        // the genuine last resort — after the literal query, the exact-vendor-product fallback (empty
+        // here since findByVendorProductPairs is unstubbed), AND a failed live NVD lookup have all
+        // already come back empty, exactly like every other name-variant direction. The bare
+        // artifactId ("log4j-core") is tried first and finds nothing (no CPE is really slugged that
+        // way); the suffix-stripped token ("log4j") is tried next and finds the real entry. Same
+        // "never auto-trust a mechanically-derived guess" AI-confirmation gate as any other
+        // variant-derived match.
+        CpeDictionaryEntry log4j = cpeEntry("cpe:2.3:a:apache:log4j:2.17.0:*:*:*:*:*:*:*", "log4j");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findFuzzyMatches(eq("log4j"), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(log4j));
+        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches Log4j", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.apache.logging.log4j:log4j-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:log4j:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void mavenArtifactTokenVariantCandidateIsDroppedRatherThanAutoAcceptedWithNoApiKey() {
+        // Same setup as the AI-confirmed case above, but with no Claude key configured — a
+        // mechanically-derived artifactId-token guess must never be auto-trusted, same as any other
+        // variant-derived candidate (resolveSingleCpeCandidate's own forced-AI-check javadoc).
+        CpeDictionaryEntry kafka = cpeEntry("cpe:2.3:a:apache:kafka:3.6.0:*:*:*:*:*:*:*", "kafka");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findFuzzyMatches(eq("kafka"), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(kafka));
+        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("org.apache.kafka:kafka-clients"), USER_ID);
+
+        assertThat(result).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void mavenArtifactTokenVariantFallbackNeverFiresWhenTheLiteralCoordinateAlreadyMatches() {
+        // The variant fallback is strictly additive — a productName that already matches literally
+        // must never trigger the extra artifactId-token search at all. Product deliberately set to
+        // the exact literal query text so the strict containment pass unambiguously accepts it
+        // regardless of tokenization details, keeping this test's only concern the call count below.
+        CpeDictionaryEntry log4jCore = cpeEntry(
+                "cpe:2.3:a:apache:log4j-core:2.17.0:*:*:*:*:*:*:*", "org.apache.logging.log4j:log4j-core");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(log4jCore));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.apache.logging.log4j:log4j-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        verify(cpeDictionaryRepository, org.mockito.Mockito.times(1))
+                .findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt());
+    }
+
+    @Test
+    void mavenArtifactTokenVariantFallbackNeverFiresWhenARegistryMatchAlreadyCoversTheItem() {
+        // Backlog item 388 REVISE point 1/6 (senior review 2026-09-06): the exact regression class
+        // item 302's own exact-match fallback was already moved out of localCpeLookup to avoid — a
+        // registry match with an UNCONFIRMED version relies on chosenCpe staying null to keep
+        // trustRegistryMatch true (see resolveCandidates' own comment on that flag). A Maven-coordinate
+        // item is exactly the shape most likely to have a real Maven Central registry match, so this
+        // guards that the token-variant fallback never reaches the dictionary at all once
+        // registryEcosystem is present — the registry match's own ecosystem/package/purl must survive
+        // untouched and the CPE must stay null, never overridden by a variant-derived guess.
+        PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("maven", "org.apache.logging.log4j:log4j-core",
+                        "pkg:maven/org.apache.logging.log4j/log4j-core@2.17.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "maven";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of(mavenLookup)).identify(item("org.apache.logging.log4j:log4j-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("maven");
+        assertThat(result.get().getPackageName()).isEqualTo("org.apache.logging.log4j:log4j-core");
+        assertThat(result.get().getCpe()).isNull();
+        // Only the one literal query (localCpeLookup's own concurrent literal search) — the Maven
+        // token-variant fallback, the exact-vendor-product fallback, and the live NVD fallback must
+        // all be structurally unreachable once a registry match already covers the item.
+        verify(cpeDictionaryRepository, org.mockito.Mockito.times(1))
+                .findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt());
+        verifyNoInteractions(nvdCpeSyncService);
     }
 
     @Test
@@ -3112,6 +3267,167 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:foo_bar:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void mavenCoordinateShapedQueryRecoversAReverseDnsLeadingTokenCandidate() {
+        // Backlog item 367 (real-devDB Maven investigation, 2026-09-06): a genuine Maven
+        // groupId:artifactId coordinate leads with a reverse-DNS segment ("com") that is essentially
+        // never itself a recognized CPE vendor slug — the real vendor identity ("google") sits one
+        // segment further in. Mocked here (rather than relying solely on the real-dev-DB golden-300
+        // measurement) so this exact admission path has its own fast, deterministic regression test,
+        // matching this file's established convention for every other explainsQuery tweak.
+        CpeDictionaryEntry googleGuava = cpeEntry("cpe:2.3:a:google:guava:32.0.0:*:*:*:*:*:*:*", "guava");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(googleGuava));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("com.google.guava:guava"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:google:guava:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void reverseDnsLeadingTokenBypassNeverFiresForANonMavenShapedQuery() {
+        // Backlog item 367 REVISE (peer review, 2026-09-06): the first version of this fix consulted
+        // REVERSE_DNS_PACKAGE_PREFIXES unconditionally for any bare leading token, regardless of
+        // whether the query actually looked like a Maven coordinate — a real false-positive risk for
+        // a query like ".NET Framework" (tokenizes to ["net", "framework"]), where a large enough CPE
+        // dictionary plausibly has some unrelated vendor's own "framework" entry. Two same-slug
+        // ("framework") candidates here, differing only in CPE vendor: "net:framework" is legitimately
+        // vendor-explained (vendorExplains("net", "net") is a genuine whole-token match, nothing to do
+        // with this fix) and must still be admitted; "acmecorp:framework" is NOT vendor-explained and,
+        // without the queryLooksLikeReverseDnsCoordinate gate, would have wrongly been let through
+        // purely because "net" sits on the allowlist. Asserting cpeCandidateCount (rather than just
+        // the chosen CPE, which "net:framework" would win either way on ranking) is what actually
+        // proves the wrong-vendor candidate was excluded from admission, not merely outranked.
+        CpeDictionaryEntry netFramework = cpeEntry("cpe:2.3:a:net:framework:3.0:*:*:*:*:*:*:*", "framework");
+        CpeDictionaryEntry acmeFramework = cpeEntry("cpe:2.3:a:acmecorp:framework:3.0:*:*:*:*:*:*:*", "framework");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(netFramework, acmeFramework));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item(".NET Framework"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:net:framework:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void reverseDnsLeadingTokenBypassRejectsADotShapedQueryWhoseArtifactTailIsUnrelatedToTheMatch() {
+        // Backlog item 367 REVISE round 2 (peer review, 2026-09-06): the round-1 fix's
+        // queryLooksLikeReverseDnsCoordinate shape check alone isn't enough — the reviewer's own
+        // verified counterexample, "net.framework:x64", tokenizes to ["net", "framework", "x64"] and
+        // has the EXACT SAME two-dot-segment-then-colon shape as the genuine "io.netty:netty-all", so
+        // shape alone can't tell them apart. What does: a real Maven artifactId is conventionally
+        // derived from (or equal to) the product identity the candidate matched on ("netty-all"
+        // relates to "netty"); an arbitrary colon-suffixed qualifier like "x64" does not relate to
+        // "framework" at all. Same minimal-pair shape as the round-1 test above (two same-slug
+        // "framework" candidates, only one is vendor-explained the ordinary way), but this time both
+        // the leading token ("net") AND the query's dot-then-colon shape are identical between the
+        // legitimate and adversarial cases — only the artifact tail's relatedness to the match differs.
+        CpeDictionaryEntry netFramework = cpeEntry("cpe:2.3:a:net:framework:3.0:*:*:*:*:*:*:*", "framework");
+        CpeDictionaryEntry acmeFramework = cpeEntry("cpe:2.3:a:acmecorp:framework:3.0:*:*:*:*:*:*:*", "framework");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(netFramework, acmeFramework));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("net.framework:x64"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:net:framework:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void reverseDnsLeadingTokenBypassStillAdmitsADotShapedQueryWhoseArtifactTailRelatesToTheMatch() {
+        // Backlog item 367 REVISE round 2: the positive contrast to the test directly above — same
+        // leading bypassed token ("net"), same dot-then-colon shape, but this time the artifact tail
+        // ("foocorp-utils") genuinely relates to the matched candidate's own product ("foocorp"), the
+        // way a real Maven artifactId routinely does. Confirms the round-2 tightening (requiring that
+        // relatedness) doesn't also reject a query that legitimately needs the leading-token bypass —
+        // "foocorpvendor" does not vendor-explain "net" any more than "acmecorp" did above, so this
+        // candidate is only admitted via the gated bypass, not via ordinary vendorExplains.
+        CpeDictionaryEntry foocorpProduct =
+                cpeEntry("cpe:2.3:a:foocorpvendor:foocorp:2.0:*:*:*:*:*:*:*", "foocorp");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(foocorpProduct));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("net.foocorp:foocorp-utils"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:foocorpvendor:foocorp:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void reverseDnsLeadingTokenBypassNeverFiresWhenTheItemVendorContradictsTheCandidateCpeVendor() {
+        // Backlog item 367 REVISE round 4 (senior review, 2026-09-07): the round-3 version of this
+        // test used "net.acmecorp:buildtool", which tokenizes to 3 leading-eligible tokens ("net",
+        // "acmecorp") ahead of a match starting at index 2 — "acmecorp" alone is enough to fail
+        // vendorExplains and reject the candidate regardless of the itemVendorContradicts guard,
+        // making that test pass even with the guard removed. This version instead uses a query whose
+        // Direction 2 match starts at token 1 (the artifactId shares a word stem with the groupId's
+        // own non-TLD segment, "acmecorp"), so the single leading token ("org") only ever goes
+        // through the REVERSE_DNS_PACKAGE_PREFIXES bypass — itemVendorContradicts's own separate
+        // check (further below, start == 0 only) never gets a chance to fire for it. Without
+        // requiring !itemVendorContradicts(...) inside the bypass itself, this candidate would
+        // wrongly be admitted purely because "org" sits on the allowlist, even though the item's own
+        // vendor field ("Acme Corp") actively contradicts the candidate's actual CPE vendor
+        // ("microsoft", entirely unrelated to "acmecorp"). No stubSaveReturnsArgument() here — the
+        // rejected candidate never reaches save(), so stubbing it would be an unnecessary stub.
+        CpeDictionaryEntry microsoftAcmecorp =
+                cpeEntry("cpe:2.3:a:microsoft:acmecorp:2.0:*:*:*:*:*:*:*", "acmecorp");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(microsoftAcmecorp));
+
+        ResearchJobItem item = item("org.acmecorp:acmecorp-core");
+        item.setVendor("Acme Corp");
+
+        assertThat(service(List.of()).identify(item, USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void reverseDnsLeadingTokenBypassStillAdmitsTheSameCandidateWhenTheItemVendorIsBlank() {
+        // Backlog item 367 REVISE round 4 (senior review, 2026-09-07): the direct positive
+        // counterpart to the test directly above — same query, same single candidate, only
+        // difference is a blank item vendor (the actual shape of every Maven-coordinate row in this
+        // project's own golden-300/real-1000 fixtures). itemVendorContradicts returns false for a
+        // blank item vendor (see its own javadoc), so the bypass still fires and this is the only
+        // direct evidence that the round-3 itemVendorContradicts guard doesn't cost this fix's own
+        // recovered rows, rather than merely an inference from itemVendorContradicts's javadoc.
+        CpeDictionaryEntry microsoftAcmecorp =
+                cpeEntry("cpe:2.3:a:microsoft:acmecorp:2.0:*:*:*:*:*:*:*", "acmecorp");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(microsoftAcmecorp));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.acmecorp:acmecorp-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:microsoft:acmecorp:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void queryLooksLikeReverseDnsCoordinateOnlyMatchesAGenuineMultiSegmentGroupIdArtifactShape() {
+        // Backlog item 367 REVISE: direct unit coverage of the structural gate itself (same
+        // convention as normalizeForContainmentStripsCpeBackslashEscapes... below, which also calls a
+        // package-private helper directly) — a real Maven coordinate matches, a bare short word, a
+        // colon-free product name, and a single-segment "groupId" (no dot at all, e.g. "junit:junit")
+        // all correctly do not.
+        Stage1IdentificationService service = service(List.of());
+
+        assertThat(service.queryLooksLikeReverseDnsCoordinate("com.google.guava:guava")).isTrue();
+        assertThat(service.queryLooksLikeReverseDnsCoordinate("io.netty:netty-all")).isTrue();
+        assertThat(service.queryLooksLikeReverseDnsCoordinate(".net framework")).isFalse();
+        assertThat(service.queryLooksLikeReverseDnsCoordinate("framework")).isFalse();
+        assertThat(service.queryLooksLikeReverseDnsCoordinate("junit:junit")).isFalse();
     }
 
     @Test
