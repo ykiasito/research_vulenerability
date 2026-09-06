@@ -254,6 +254,29 @@ class CveOrgSyncServiceTest {
                 });
     }
 
+    /** Senior review REVISE (item 416, 2026-09-07): {@code URI#resolve(String)} calls {@code
+     *  URI.create} internally, so a redirect {@code Location} header that isn't a parseable URI
+     *  reference (here, a raw unescaped space) used to throw an uncaught, unchecked {@link
+     *  IllegalArgumentException} straight out of {@link CveOrgSyncService#download} — bypassing
+     *  {@code syncBaseline}/{@code syncDelta}'s {@code catch (IOException e)} entirely (so item 379's
+     *  {@code recordSyncFailure} never ran) and embedding the raw, unsanitized {@code Location}
+     *  string (including any signed query string it carries) in the exception's own message. Must
+     *  now surface as an {@code IOException} without leaking the malformed Location's secret. */
+    @Test
+    void downloadRejectsAMalformedRedirectLocationWithoutLeakingASignedQueryString() throws Exception {
+        CveOrgSyncService service = serviceWithLocalhostAllowed();
+        String secret = "SECRETVALUE456";
+
+        withLocalServer(
+                Map.of("/hop0", redirectTo("/bad path?sig=" + secret)),
+                port -> {
+                    Throwable thrown = catchThrowable(() -> service.download("http://localhost:" + port + "/hop0"));
+
+                    assertThat(thrown).isInstanceOf(IOException.class);
+                    assertThat(fullStackTraceText(thrown)).doesNotContain(secret);
+                });
+    }
+
     @Test
     void downloadRejectsARedirectMissingTheLocationHeader() throws Exception {
         CveOrgSyncService service = serviceWithLocalhostAllowed();

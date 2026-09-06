@@ -106,7 +106,8 @@ public class CveOrgSyncService {
             recordSyncFailure(message);
             return 0;
         }
-        log.info("CVE.org baseline sync starting from release {} ({})", release.tag(), release.baselineZipUrl());
+        log.info("CVE.org baseline sync starting from release {} ({})", LogSanitizer.sanitize(release.tag()),
+                sanitizedForLogging(release.baselineZipUrl()));
 
         int upserted = 0;
         try (InputStream outerStream = download(release.baselineZipUrl());
@@ -156,7 +157,8 @@ public class CveOrgSyncService {
             recordSyncFailure(message);
             return 0;
         }
-        log.info("CVE.org delta sync starting from release {} ({})", release.tag(), release.deltaZipUrl());
+        log.info("CVE.org delta sync starting from release {} ({})", LogSanitizer.sanitize(release.tag()),
+                sanitizedForLogging(release.deltaZipUrl()));
 
         int upserted = 0;
         try (InputStream stream = download(release.deltaZipUrl());
@@ -377,7 +379,26 @@ public class CveOrgSyncService {
                 if (redirectsRemaining <= 0) {
                     throw new IOException("CVE.org sync: too many redirects resolving download URL (max " + MAX_REDIRECTS + ")");
                 }
-                URI target = current.resolve(location);
+                URI target;
+                try {
+                    // URI#resolve(String) calls URI.create internally, so a Location header that
+                    // isn't a parseable URI reference (a raw space, an unencoded '|', etc. — real
+                    // shapes seen from misbehaving/malicious redirects) throws an unchecked
+                    // IllegalArgumentException here rather than the IOException this method's
+                    // signature promises. Left uncaught, that would both skip syncBaseline/syncDelta's
+                    // catch (IOException) — so recordSyncFailure (item 379) never runs — and surface
+                    // the raw, unsanitized Location string (including any signed sig=/jwt= query
+                    // parameters, plus any CR/LF it carries) via the exception's own message to
+                    // whatever catches it further up (CveOrgScheduledSync has no try/catch of its
+                    // own, so Spring's scheduled-task error handler would log it verbatim).
+                    target = current.resolve(location);
+                } catch (IllegalArgumentException e) {
+                    // Deliberately embeds neither location nor e (or e.getMessage()) — both carry the
+                    // raw, unsanitized Location string; only the already-validated, sanitized current
+                    // hop is safe to include here.
+                    throw new IOException("CVE.org sync: redirect Location header was not a parseable URI (from "
+                            + sanitizedForLogging(current) + ")");
+                }
                 URI next = validatedUri(target.toString());
                 if (next == null) {
                     throw new IOException(
