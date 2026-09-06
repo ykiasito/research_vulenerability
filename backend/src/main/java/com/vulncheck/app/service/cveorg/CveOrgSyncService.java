@@ -47,6 +47,14 @@ public class CveOrgSyncService {
     private static final String LATEST_RELEASE_API = "https://api.github.com/repos/CVEProject/cvelistV5/releases/latest";
     private static final String BASELINE_ASSET_SUFFIX = "_all_CVEs_at_midnight.zip.zip";
     private static final String DELTA_ASSET_INFIX = "_delta_CVEs_at_";
+    /** Finite, not {@code 0}/unbounded (backlog item 398) — {@link URLConnection#setReadTimeout} is
+     *  a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long a
+     *  genuinely-streaming multi-GB baseline download can take; it only kills a connection that goes
+     *  fully idle for this long. Without a finite value, a peer that keeps the connection open but
+     *  stops sending bytes would hang this thread forever, without ever reaching {@link
+     *  #recordSyncFailure}. 30s is the same value used by the sibling sync services (backlog items
+     *  378/381 for {@code GhsaSyncService}/{@code OsvSyncService}). */
+    private static final int DOWNLOAD_READ_TIMEOUT_MILLIS = 30_000;
 
     private final RestClient cveOrgSyncRestClient;
     private final CveOrgRecordRepository cveOrgRecordRepository;
@@ -302,12 +310,12 @@ public class CveOrgSyncService {
     }
 
     /** Plain {@link URLConnection}, not the {@code cveOrgSyncRestClient} bean — that client's 30s
-     *  read timeout (fine for the quick releases-API call) is far too short for a download that
-     *  can run for minutes (baseline: well over 1GB). */
+     *  read timeout happens to match {@link #DOWNLOAD_READ_TIMEOUT_MILLIS} used here, but the bean
+     *  itself isn't reused because it isn't wired for streaming a multi-GB response body. */
     private InputStream download(String url) throws IOException {
         URLConnection connection = URI.create(url).toURL().openConnection();
         connection.setConnectTimeout(10_000);
-        connection.setReadTimeout(0);
+        connection.setReadTimeout(DOWNLOAD_READ_TIMEOUT_MILLIS);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (cve.org sync)");
         return connection.getInputStream();
     }
