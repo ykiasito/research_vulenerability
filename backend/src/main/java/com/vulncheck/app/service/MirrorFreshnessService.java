@@ -72,18 +72,11 @@ import org.springframework.stereotype.Service;
  * which side of "stale" a mirror falls on — it only bounds how long a just-fixed sync can take to
  * stop showing the banner.
  *
- * <p><b>CVE.org (closed-mode backlog item 379) is deliberately age-only for now</b> — {@code
- * CveOrgSyncService} does not yet advance {@code cve_org_sync_state} on a failed attempt at all
- * (unlike GHSA/OSV above), so a continuously-failing CVE.org sync simply leaves {@code
- * last_synced_at} frozen at whatever its last real success was, which the age check below already
- * catches on its own without needing a {@code last_sync_error} column. Item 379's actual fix (a
- * schema change plus the corresponding {@code CveOrgSyncService} logic) is being implemented
- * against {@code master}/{@code test} rather than this closed-mode branch directly — the
- * closed-mode architecture gate (see {@code docs/spec/closed-mode-plan.md} §3-2) only allows this
- * branch's diff from {@code master} to be deletions, and {@code CveOrgSyncService}/{@code
- * CveOrgSyncState} are shared, unmodified-here files. Once that fix reaches this branch through the
- * normal master→closed-mode sync (§9-3), {@link #checkCveOrg} should be extended to match {@link
- * #checkGhsa}/{@link #checkOsv}'s error check.
+ * <p><b>CVE.org (closed-mode backlog item 379)</b> reached this branch through the normal
+ * master→closed-mode sync (§9-3, 2026-09-07): {@code CveOrgSyncService} now advances {@code
+ * cve_org_sync_state.last_sync_error} on every failed attempt (cleared on the next success), so
+ * {@link #checkCveOrg} checks it exactly like {@link #checkGhsa}/{@link #checkOsv} already do,
+ * rather than relying on the age check alone.
  *
  * <p>Age thresholds are derived from each mirror's own scheduled cadence (see the {@code
  * @Scheduled} cron on {@code CveOrgScheduledSync}/{@code GhsaScheduledSync}/{@code
@@ -152,12 +145,16 @@ public class MirrorFreshnessService {
         return warnings;
     }
 
-    /** Age-only for now — see this class's own javadoc for why (closed-mode backlog item 379 has
-     *  not landed on this branch yet). */
     private void checkCveOrg(List<String> warnings) {
         CveOrgSyncState state = cveOrgSyncStateRepository.findById((short) 1).orElse(null);
         if (state == null || !state.isBaselineLoaded()) {
             warnings.add("CVE.org: baselineが未読み込みです。");
+            return;
+        }
+        if (state.getLastSyncError() != null) {
+            // Deliberately not state.getLastSyncError() itself — see this class's own javadoc
+            // ("The raw last_sync_error text is never shown here").
+            warnings.add("CVE.org: 直近の同期が失敗しています。管理者に/admin/cve-orgで詳細を確認してください。");
             return;
         }
         addIfStale(warnings, "CVE.org", toInstant(state.getLastSyncedAt()), DAILY_MIRROR_STALE_AFTER);

@@ -33,9 +33,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
  * Closed-mode backlog item 382. Each mirror is exercised with its own healthy baseline plus every
  * distinct way it can go stale, since {@link MirrorFreshnessService#staleMirrorWarnings()} is the
  * sole gate deciding whether {@code jobs/detail.html} shows a freshness banner at all. CVE.org's
- * {@code checkCveOrg} path is deliberately age-only (no {@code last_sync_error} check) — see
- * {@link MirrorFreshnessService}'s own class javadoc for why (closed-mode backlog item 379 hasn't
- * landed on this branch yet).
+ * {@code checkCveOrg} now also checks {@code last_sync_error} (closed-mode backlog item 379,
+ * landed via the 2026-09-07 master→closed-mode sync), matching {@code checkGhsa}/{@code checkOsv}.
  */
 @ExtendWith(MockitoExtension.class)
 class MirrorFreshnessServiceTest {
@@ -96,10 +95,6 @@ class MirrorFreshnessServiceTest {
         assertThat(warnings).anyMatch(w -> w.contains("CVE.org") && w.contains("baseline"));
     }
 
-    /** Closed-mode backlog item 379 has not landed on this branch yet (see this class's own
-     *  javadoc) — {@code CveOrgSyncState} has no {@code last_sync_error} field here, so a recent
-     *  {@code last_synced_at} is never treated as stale regardless of any prior failure; only the
-     *  age check below applies to CVE.org for now. */
     @Test
     void cveOrgWithAnOldSyncIsStale() {
         CveOrgSyncState state = new CveOrgSyncState();
@@ -116,6 +111,30 @@ class MirrorFreshnessServiceTest {
         List<String> warnings = service.staleMirrorWarnings();
 
         assertThat(warnings).anyMatch(w -> w.contains("CVE.org") && w.contains("経過"));
+    }
+
+    /** Same rationale as {@link #ghsaWithARecentButFailedSyncIsStaleAndDoesNotLeakTheRawErrorText}
+     *  (closed-mode backlog item 379, landed via the 2026-09-07 master→closed-mode sync) — CVE.org
+     *  now has its own independent {@code checkCveOrg} error branch to regress. */
+    @Test
+    void cveOrgWithARecentButFailedSyncIsStaleAndDoesNotLeakTheRawErrorText() {
+        String secretDetail = "java.net.UnknownHostException: internal-cve-org-mirror.example";
+        CveOrgSyncState state = new CveOrgSyncState();
+        state.setBaselineLoaded(true);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5));
+        state.setLastSyncError(secretDetail);
+        when(cveOrgSyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        stubHealthyGhsa(OffsetDateTime.now(ZoneOffset.UTC));
+        stubHealthyOsv(OffsetDateTime.now(ZoneOffset.UTC));
+        stubHealthyNvdCve(OffsetDateTime.now(ZoneOffset.UTC));
+        stubHealthyCsaf(OffsetDateTime.now(ZoneOffset.UTC));
+        when(registryPackageMirrorRepository.maxLastSyncedAt())
+                .thenReturn(Optional.of(Instant.now()));
+
+        List<String> warnings = service.staleMirrorWarnings();
+
+        assertThat(warnings).anyMatch(w -> w.contains("CVE.org") && w.contains("/admin/cve-org"));
+        assertThat(warnings).noneMatch(w -> w.contains(secretDetail));
     }
 
     // -------------------------------------------------------------------------------- GHSA -------
