@@ -3,11 +3,18 @@ package com.vulncheck.app.service.cveorg;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import com.sun.net.httpserver.HttpServer;
+import com.vulncheck.app.entity.CveOrgSyncState;
 import com.vulncheck.app.repository.CveOrgAffectedProductRepository;
 import com.vulncheck.app.repository.CveOrgRecordRepository;
 import com.vulncheck.app.repository.CveOrgSyncStateRepository;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
@@ -19,13 +26,19 @@ import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
+import java.util.zip.ZipOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
 /**
@@ -56,9 +69,20 @@ import org.springframework.web.client.RestClient;
  * real GitHub one, which {@link #validatedUriRejectsDisallowedHost}/{@link
  * #validatedUriAcceptsAllowlistedGitHubHost} already cover directly against the real production
  * predicate.
+ *
+ * <p>Closed-mode backlog item 379 (master sync, 2026-09-07): {@link CveOrgSyncService#syncBaseline}/
+ * {@link CveOrgSyncService#syncDelta} also record a failed attempt (or clear a previously-recorded
+ * one on success) into {@code cve_org_sync_state} — see the {@code recordSyncFailure}/{@code
+ * markSynced} coverage at the bottom of this file. Those tests combine a {@link
+ * MockRestServiceServer}-bound {@link RestClient} (for the releases-API metadata call) with the same
+ * localhost-allowlisted local {@link HttpServer} harness used above (for the asset download itself),
+ * since production's {@code urlAllowed} would otherwise reject the test server's {@code localhost}
+ * URL just like any other non-GitHub host.
  */
 @ExtendWith(MockitoExtension.class)
 class CveOrgSyncServiceTest {
+
+    private static final String LATEST_RELEASE_API = "https://api.github.com/repos/CVEProject/cvelistV5/releases/latest";
 
     @Mock
     private CveOrgRecordRepository cveOrgRecordRepository;
@@ -67,22 +91,30 @@ class CveOrgSyncServiceTest {
     @Mock
     private CveOrgSyncStateRepository cveOrgSyncStateRepository;
 
-    private CveOrgSyncService service() {
+    private CveOrgSyncService service(RestClient restClient) {
         return new CveOrgSyncService(
-                RestClient.builder().build(),
+                restClient,
                 cveOrgRecordRepository,
                 cveOrgAffectedProductRepository,
                 cveOrgSyncStateRepository);
     }
 
+    private CveOrgSyncService service() {
+        return service(RestClient.builder().build());
+    }
+
     /** Relaxes {@code urlAllowed} (see the class javadoc) to accept any scheme, host {@code
      *  localhost} only — matching production's shape (a fixed allowlist) but pointed at the
      *  {@code HttpServer} test harness instead of real GitHub hosts. */
-    private CveOrgSyncService serviceWithLocalhostAllowed() {
-        CveOrgSyncService service = service();
+    private CveOrgSyncService serviceWithLocalhostAllowed(RestClient restClient) {
+        CveOrgSyncService service = service(restClient);
         Predicate<URI> localhostOnly = uri -> "localhost".equals(uri.getHost());
         ReflectionTestUtils.setField(service, "urlAllowed", localhostOnly);
         return service;
+    }
+
+    private CveOrgSyncService serviceWithLocalhostAllowed() {
+        return serviceWithLocalhostAllowed(RestClient.builder().build());
     }
 
     private static String fullStackTraceText(Throwable t) {
@@ -475,6 +507,96 @@ class CveOrgSyncServiceTest {
         withPlainLocalServer(respondWithStatus(200), port -> {
             HttpURLConnection connection = service.openConnection(URI.create("http://localhost:" + port + "/"));
             assertThat(connection.getInstanceFollowRedirects()).isFalse();
+        });
+    }
+
+    // ------------------------------------------------------------- sync failure bookkeeping -----
+
+    /** Before this fix (backlog item 379), a release response with no matching delta asset just
+     *  logged a warning and returned — {@code cve_org_sync_state} stayed completely untouched,
+     *  forever, on a run shaped like this. */
+    @Test
+    void syncDeltaRecordsAFailureWhenTheLatestReleaseHasNoDeltaAsset() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        server.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(LATEST_RELEASE_API))
+                .andRespond(withSuccess("{\"tag_name\":\"cve_2026-09-06_0000Z\",\"assets\":[]}", MediaType.APPLICATION_JSON));
+        CveOrgSyncService service = service(builder.build());
+
+        int upserted = service.syncDelta();
+
+        assertThat(upserted).isZero();
+        ArgumentCaptor<CveOrgSyncState> captor = ArgumentCaptor.forClass(CveOrgSyncState.class);
+        verify(cveOrgSyncStateRepository).save(captor.capture());
+        assertThat(captor.getValue().getLastSyncError()).contains("delta asset");
+        assertThat(captor.getValue().getLastSyncedAt()).isNotNull();
+    }
+
+    /** A genuine download failure (here, a 403 on the resolved baseline asset URL) must also reach
+     *  {@code cve_org_sync_state}, not just the log — the recorded message must not be the raw
+     *  exception message (which could echo request details). */
+    @Test
+    void syncBaselineRecordsAFailureWhenTheDownloadFails() throws Exception {
+        withLocalServer(Map.of("/asset", respondWithStatus(403)), port -> {
+            RestClient.Builder builder = RestClient.builder();
+            MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+            String releaseJson = "{\"tag_name\":\"cve_2026-09-06_0000Z\",\"assets\":[{"
+                    + "\"name\":\"2026-09-06T00_00_00Z_all_CVEs_at_midnight.zip.zip\","
+                    + "\"browser_download_url\":\"http://localhost:" + port + "/asset\"}]}";
+            server.expect(method(HttpMethod.GET))
+                    .andExpect(requestTo(LATEST_RELEASE_API))
+                    .andRespond(withSuccess(releaseJson, MediaType.APPLICATION_JSON));
+
+            CveOrgSyncService service = serviceWithLocalhostAllowed(builder.build());
+
+            int upserted = service.syncBaseline();
+
+            assertThat(upserted).isZero();
+            ArgumentCaptor<CveOrgSyncState> captor = ArgumentCaptor.forClass(CveOrgSyncState.class);
+            verify(cveOrgSyncStateRepository).save(captor.capture());
+            assertThat(captor.getValue().getLastSyncError()).contains("baseline sync failed");
+            assertThat(captor.getValue().getLastSyncedAt()).isNotNull();
+        });
+    }
+
+    /** A successful sync must clear a previously-recorded error, not just leave it stale. Uses a
+     *  valid but empty outer zip (no {@code CVE-*.json} entries) as the baseline asset — this test
+     *  only cares about {@code cve_org_sync_state}'s bookkeeping on the success path, not record
+     *  upserts. */
+    @Test
+    void syncBaselineClearsAPreviouslyRecordedErrorOnSuccess() throws Exception {
+        CveOrgSyncState existing = new CveOrgSyncState();
+        existing.setLastSyncError("previous run failed");
+        when(cveOrgSyncStateRepository.findById((short) 1)).thenReturn(Optional.of(existing));
+
+        ByteArrayOutputStream zipBytes = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(zipBytes)) {
+            // Deliberately empty -- an outer zip with zero entries is still a valid zip, and the
+            // success path (markSynced) doesn't require any CVE record to have been upserted.
+        }
+        byte[] emptyZip = zipBytes.toByteArray();
+
+        withLocalServer(Map.of("/asset", respondWithBody(emptyZip)), port -> {
+            RestClient.Builder builder = RestClient.builder();
+            MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+            String releaseJson = "{\"tag_name\":\"cve_2026-09-06_0000Z\",\"assets\":[{"
+                    + "\"name\":\"2026-09-06T00_00_00Z_all_CVEs_at_midnight.zip.zip\","
+                    + "\"browser_download_url\":\"http://localhost:" + port + "/asset\"}]}";
+            server.expect(method(HttpMethod.GET))
+                    .andExpect(requestTo(LATEST_RELEASE_API))
+                    .andRespond(withSuccess(releaseJson, MediaType.APPLICATION_JSON));
+
+            CveOrgSyncService service = serviceWithLocalhostAllowed(builder.build());
+
+            int upserted = service.syncBaseline();
+
+            assertThat(upserted).isZero();
+            ArgumentCaptor<CveOrgSyncState> captor = ArgumentCaptor.forClass(CveOrgSyncState.class);
+            verify(cveOrgSyncStateRepository).save(captor.capture());
+            assertThat(captor.getValue().getLastSyncError()).isNull();
+            assertThat(captor.getValue().isBaselineLoaded()).isTrue();
+            assertThat(captor.getValue().getLastReleaseTag()).isEqualTo("cve_2026-09-06_0000Z");
         });
     }
 }
