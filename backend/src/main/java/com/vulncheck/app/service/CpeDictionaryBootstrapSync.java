@@ -21,10 +21,16 @@ import org.springframework.stereotype.Component;
  * deployment's real request rate against NVD — the exact mistake that had to be undone earlier
  * when a separate test process was run alongside the app against the package registries.
  *
- * <p>Runs on its own daemon thread so a multi-hour sync never blocks application startup, and is
- * deliberately unauthenticated (no NVD API key): a key would only shorten the per-request rate-limit
- * wait from 6.5s to 0.7s, which is a small share of a sync dominated by ~30s-per-page transfer time,
- * and this way the sync needs no credential wiring at all.
+ * <p>Runs on its own daemon thread so a multi-hour sync never blocks application startup.
+ *
+ * <p>Resolves the admin's NVD API key via {@link UserApiKeyService#getAdminNvdApiKey()} (closed-mode
+ * backlog item 392) — there is no logged-in user context at startup, so the admin's own registered
+ * key (rather than a per-request user key, as {@code AdminController#sync} uses) is the only key this
+ * path can use, matching the scheduled twin's ({@code CpeDictionaryScheduledResync}) resolution. This
+ * path was previously hardcoded to {@code Optional.empty()} (always unkeyed) on the assumption that a
+ * key only shortens the per-request rate-limit wait from 6.5s to 0.7s against a sync dominated by
+ * ~30s-per-page transfer time; the measured impact is larger than that (~18 minutes added to the
+ * ~103-minute keyed baseline), so this now uses the admin key when one is registered.
  *
  * <p>Shares {@link NvdCpeSyncService}'s single {@code fullSyncRunning} guard (via {@link
  * NvdCpeSyncService#tryBeginFullSync}) with the admin-triggered full sync ({@code
@@ -51,6 +57,7 @@ import org.springframework.stereotype.Component;
 public class CpeDictionaryBootstrapSync implements ApplicationRunner {
 
     private final NvdCpeSyncService nvdCpeSyncService;
+    private final UserApiKeyService userApiKeyService;
 
     @Value("${app.cpe-full-sync-on-startup:false}")
     private boolean enabled;
@@ -125,19 +132,38 @@ public class CpeDictionaryBootstrapSync implements ApplicationRunner {
     }
 
     /**
+     * Resolves the admin's NVD API key (closed-mode backlog item 392), wrapped in its own
+     * try/catch — same fail-soft rationale as {@code
+     * CpeDictionaryScheduledResync#resolveAdminKey}/{@code NvdCveBackfillScheduledRunner#runTick}'s
+     * equivalent resolution: a decrypt failure here must never prevent {@link
+     * NvdCpeSyncService#syncAllAndRelease} (the only place that releases the sync guard acquired by
+     * {@link #run}) from being reached.
+     */
+    private Optional<String> resolveAdminKey() {
+        try {
+            return userApiKeyService.getAdminNvdApiKey();
+        } catch (Throwable t) {
+            log.warn("Could not resolve the admin's NVD key — running the startup full sync unkeyed (slower)", t);
+            return Optional.empty();
+        }
+    }
+
+    /**
      * Spawns and starts the worker thread that runs the actual sync. Package-private (rather than
      * inlined in {@link #run}) so a unit test can force this step to fail (e.g. via a Mockito spy)
      * without needing a real thread-creation failure (native-thread exhaustion, a SecurityManager
      * denial) to exercise {@link #run}'s guard-release catch block.
      */
     void startWorker() {
+        Optional<String> adminKey = resolveAdminKey();
         Thread worker = new Thread(() -> {
-            log.warn("Full NVD CPE dictionary sync starting — this takes hours; safe to leave "
-                    + "CPE_FULL_SYNC_ON_STARTUP=true across future restarts (app.cpe-full-sync-max-age-days's "
-                    + "freshness gate will skip this again on the next boot once the mirror is up to date)");
+            log.warn("Full NVD CPE dictionary sync starting (admin NVD key present: {}) — this takes hours; safe "
+                    + "to leave CPE_FULL_SYNC_ON_STARTUP=true across future restarts (app.cpe-full-sync-max-age-"
+                    + "days's freshness gate will skip this again on the next boot once the mirror is up to date)",
+                    adminKey.isPresent());
             long startedAt = System.currentTimeMillis();
             try {
-                SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(Optional.empty());
+                SyncOutcome outcome = nvdCpeSyncService.syncAllAndRelease(adminKey);
                 long minutes = (System.currentTimeMillis() - startedAt) / 60000;
                 if (outcome.completed()) {
                     log.warn("Full NVD CPE dictionary sync finished: {} entries upserted in {} minutes",
