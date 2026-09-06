@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# install.sh — one-shot setup for this app (Spring Boot backend + FastAPI llm-service +
-# PostgreSQL 16, all via Docker Compose). Checks Docker, prepares .env with a freshly
-# generated encryption key/DB password if one doesn't already exist, then builds and
-# starts the stack. Safe to re-run: it never overwrites an existing .env.
+# install.sh — one-shot setup for this app (Spring Boot backend + PostgreSQL 16, all via
+# Docker Compose; this closed-mode branch has no llm-service — the Python/FastAPI Claude
+# LLM microservice used on other branches was fully removed here). Checks Docker, prepares
+# .env with a freshly generated encryption key/DB password if one doesn't already exist,
+# then builds and starts the stack. Safe to re-run: it never overwrites an existing .env.
 #
 set -euo pipefail
 

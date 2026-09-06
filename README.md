@@ -2,7 +2,9 @@
 
 A CSV-upload-based vulnerability pre-screening web app. Upload a CSV list of software you plan to deploy (product name, version, purpose, etc.), and it looks up known vulnerabilities (CVEs, etc.) for each product and returns the results. It's designed with a GUI for non-engineers, and **assumes personal, individual use**.
 
-Tech stack: Spring Boot (Java 21, Thymeleaf) + Python/FastAPI (Claude LLM microservice) + PostgreSQL 16, all orchestrated with Docker Compose.
+Tech stack: Spring Boot (Java 21, Thymeleaf) + PostgreSQL 16, all orchestrated with Docker Compose.
+
+This is the `closed-mode` branch: it is designed to run fully offline, with **no external LLM/AI API calls anywhere in the CSV upload → identification pipeline**. There is no `llm-service` component here — the Python/FastAPI Claude LLM microservice used on other branches of this project was fully removed on `closed-mode`. `docker-compose.yml` on this branch defines exactly two services, `backend` and `postgres`; if you've read about a third `llm-service` container or port 8000 elsewhere, that does not apply here.
 
 Detailed design and specification documents for this project are for personal use and are not included in this repository.
 
@@ -25,6 +27,39 @@ On first run, it creates a new `.env` from `.env.example`, auto-generates an enc
 
 Once started, the app is available at `http://localhost:8080`.
 
+## Initial Data Setup (Important — Do This Before Trusting Any Results)
+
+Right after a fresh install, the CPE dictionary and all vulnerability data mirrors are **empty**. If you upload a CSV and run a job in this state, everything will come back as "no known vulnerabilities" — but that's simply because there's no data to match against yet, not because the software you listed is actually safe. Do the following, **in this order**, before treating any job's results as meaningful, and before opening this app up to anyone else on your network:
+
+1. **Register the `ADMIN_EMAIL` account first, before anyone else can reach the app.** `/register` is open to anyone who can reach the app, and whoever registers with the email address that matches `ADMIN_EMAIL` in `.env` is granted admin rights (needed for all of the steps below, under `/admin/**`). Port 8080 is reachable from your whole network by default (see "Important Notes" below), and there is no TLS, so register the admin account immediately after the first `docker compose up`, before exposing the app to other users.
+2. Run a full CPE dictionary sync from `/admin/cpe-dictionary` — click **フル同期を開始** ("start full sync"), not the keyword-only **同期実行** button above it (that one only syncs entries matching a single keyword you type in). Without the full sync, product/version identification has essentially nothing to match against. It's rate-limited by NVD and can take a few hours.
+3. Run the GHSA and OSV baseline syncs from `/admin/ghsa` and `/admin/osv` — click **全件同期を実行** ("run full sync") on each, not the **差分同期を今すぐ実行** ("run delta sync now") button above it. Their daily delta sync only keeps things up to date after this baseline has been loaded once; it does not populate it in the first place.
+4. Run the CSAF vendor-advisory baseline syncs from `/admin/csaf-siemens` and `/admin/csaf-redhat` — same **全件同期を実行** button on each. Like GHSA/OSV, these two are always-on sources that get queried for every item, and their scheduled jobs are delta-only, so without this step they stay empty forever.
+5. Run the NVD CVE backfill from `/admin/nvd-cve` — click **同期を開始** ("start sync"). This may take several clicks: each click runs one time/request-budgeted tick, and the page tells you whether the baseline is complete yet. This step is not optional in practice — it's the primary vulnerability data source behind CPE-based identifications (e.g. Chrome, OpenSSL, nginx-type entries).
+6. Set up the registry mirror for package-ecosystem rows (npm, PyPI, crates.io, RubyGems, Packagist, NuGet, Hex, pub.dev, Go modules) — **in two steps, in this order, on `/admin/registry-mirror`**:
+   - **First**, add the package names you actually care about using the seed-name form (ecosystem dropdown: `crates.io`, `rubygems`, `packagist`, `hex`, `npm`, `pypi`, `nuget`, `go`, `pub`; button **シード一覧に追加**, "add to seed list").
+   - **Then** click **同期を開始** ("start sync") to actually fetch them.
+
+   On a fresh install the seed set (previously-identified package names plus whatever you've manually added) is empty, so clicking sync alone fetches **zero** packages across all 9 ecosystems — silently, with no error. This branch also has no live-registry fallback (removed in an earlier closed-mode phase): a package that has never been mirrored is reported as a confident **"not found"**, not "may be incomplete". Skip this step, or forget to seed a package you actually care about, and every row for that package will look clean indefinitely, regardless of reality.
+
+**CVE.org** (`/admin/cve-org`) is deliberately left out of the numbered steps above: its full baseline sync is roughly 380,000 records — over 1GB downloaded, over 3GB once expanded in the database — and is meant to be a one-time run on a host sized for it (button: **全件初期投入を実行（本番のみ）**, "run full initial load (production only)"). Decide based on your host's disk/bandwidth budget whether to run it now or later. Until you do, CVE.org stays empty and contributes nothing to job results, just like the sources above before their own baseline step.
+
+Only after steps 1-6 above (and your CVE.org decision) have completed at least once should you trust job results **for the ecosystems this app can actually check** — see the "What This App Cannot Check" caveat immediately below, since that limitation holds regardless of how much data you've loaded. This is also the point to close off network access for real operation, not open it up further.
+
+### What This App Cannot Check, No Matter How Much Data You Load
+
+Some software simply has no automated lookup path on this branch, however completely you've done the steps above. The in-app guide at `/guide/integrations` lists these explicitly (§3, "自動照合できない配布チャネル"); as of this writing, they are:
+
+- Maven Central (Java, `group:artifact:version` coordinates)
+- Docker Hub (container images)
+- apt/rpm and other Linux distribution package managers
+- VS Code Marketplace (extensions)
+- Chrome Web Store (extensions)
+- Homebrew (macOS/Linux packages)
+- Mobile app stores (App Store, Google Play, etc.)
+
+**Maven Central specifically**: unlike the 9 registries covered in step 6 above, it has no mirror on this branch and no live-lookup fallback either (`MavenCentralRegistryClient#lookup` is a permanent `Optional.empty()`, by design — see its class javadoc). This isn't something seeding or syncing can fix; every Maven-coordinate row will always come back as no findings, forever, on this branch. Products from any of the channels above must be checked by other means (e.g. reading the vendor's own advisories directly) — do not read a clean result for these rows as "no known vulnerabilities."
+
 ## Important Notes
 
 **This app assumes personal use on a private, non-public network. Do not deploy it as-is to an environment exposed to the internet.**
@@ -34,7 +69,9 @@ Specifically, the current docker-compose configuration has the following constra
 - TLS (HTTPS) is not configured. Communication is in plain text.
 - The `Secure` attribute is not set on the session cookie.
 
-(Addressed on 2026-08-29) PostgreSQL (port 5432) and llm-service (port 8000) have been changed in `docker-compose.yml` to bind to `127.0.0.1` only, and are no longer reachable from outside the host. However, this only holds when running Docker Compose as-is; it loses meaning if you set up reverse-proxy forwarding or expose the host itself directly to the internet.
+(Addressed on 2026-08-29) PostgreSQL (port 5432) is bound to `127.0.0.1` only in `docker-compose.yml`, and is not reachable from outside the host. However, this only holds when running Docker Compose as-is; it loses meaning if you set up reverse-proxy forwarding or expose the host itself directly to the internet.
+
+**Unlike PostgreSQL, the backend (port 8080) is bound to all host network interfaces, not just localhost** — it is reachable from any machine that can route to the host, which is what lets other machines on your network use the app at all. Docker Compose itself does not restrict this any further, so if you need to limit who can reach it, that's on your host firewall / network segmentation, not this app's configuration. This is also why registering the `ADMIN_EMAIL` account before anyone else can reach the app (see "Initial Data Setup" above) matters more here than it would on a purely localhost-bound port.
 
 If you run this in an environment connected to an untrusted network such as the internet, you must, in addition to the above, terminate TLS via a reverse proxy and set the `Secure` attribute on cookies.
 
