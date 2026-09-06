@@ -1,14 +1,15 @@
 # アーキテクチャ
 
+> **注記**: 本ドキュメントは`closed-mode`ブランチの実装を説明しています。閉域モードのデータ非送信設計についての詳細は[CLOSED_MODE_DATA_HANDLING.md](./CLOSED_MODE_DATA_HANDLING.md)を参照してください。
+
 ## 技術スタック
 
 | コンポーネント | 技術 | 役割 |
 |---|---|---|
 | backend | Spring Boot 3.5.16 (Java 21) + Thymeleaf | 認証・GUI・調査パイプライン全体のオーケストレーション |
-| llm-service | Python / FastAPI + `anthropic` SDK | Claude API呼び出しの薄いラッパー（Tier2/3・Stage4専用） |
-| DB | PostgreSQL 16（`pg_trgm`拡張使用） | 永続化・CPE辞書のあいまい検索 |
+| DB | PostgreSQL 16（`pg_trgm`拡張使用） | 永続化・CPE辞書/レジストリ/脆弱性データの各種ローカルミラーとそのあいまい検索 |
 
-3サービスとも `docker-compose.yml` でオーケストレーションされ、`backend` は8080番、`llm-service` は8000番、`postgres` は5432番で待受する。`backend` → `llm-service` はサービス名 `http://llm-service:8000` で通信する（`app.llm-service-url` / 環境変数 `LLM_SERVICE_URL`）。
+閉域モードでは外部のLLMマイクロサービスは存在しません。旧バージョンにあったPython/FastAPI製`llm-service`（Claude API呼び出し用ラッパー）はソースディレクトリごと削除済みで、`docker-compose.yml`にも定義がありません。2サービス（`backend`・`postgres`）のみが`docker-compose.yml`でオーケストレーションされ、`backend`は8080番、`postgres`は5432番で待受します。
 
 ## 認証・セッション
 
@@ -26,7 +27,7 @@ Spring Security によるフォームベースセッション認証。パスワ�
 | GET | `/jobs/new` | CSVアップロードフォーム |
 | POST | `/jobs` | CSVアップロード→ジョブ作成（同期でCSV解析、非同期で調査実行） |
 | GET | `/jobs/{id}` | ジョブ詳細・結果一覧（所有者チェックあり） |
-| GET/POST | `/settings/secrets` | APIキー登録画面 |
+| GET/POST | `/settings/secrets` | APIキー登録画面（閉域モードではNVD APIキーのみ登録可能。Claude APIキーの読み出し経路自体が削除済みのため、登録フォームにも選択肢として現れない） |
 | POST | `/settings/secrets/{provider}/delete` | APIキー削除 |
 | GET | `/admin/cpe-dictionary` | CPE辞書の手動同期画面 |
 | POST | `/admin/cpe-dictionary/sync` | NVD CPE APIからキーワード同期を実行 |
@@ -49,21 +50,33 @@ CSVアップロード（`POST /jobs`）は以下の順で動く。
 
 **自己呼び出しの罠を避けるための設計**: `@Async` と `@Transactional` はSpring AOPプロキシ経由でのみ効くため、同一クラス内メソッドからの直接呼び出し（`this.foo()`）では素通りしてしまう。これを避けるため、ジョブ作成（`ResearchJobService`）と非同期処理起動（`ResearchJobProcessingService`）を別Beanに分離し、コントローラがコミット後に明示的に後者を呼び出す構成にしている。
 
-## 外部API連携一覧
+## 識別・調査パイプライン本体は外部通信手段を持たない
+
+閉域モードでは、CSVアップロード後のStage1（製品識別）・Stage2（脆弱性調査）・Stage4（最終リサーチ）は、いずれも**ローカルDBのミラーテーブルにのみ**問い合わせます。旧バージョンにあった以下の外部ライブ呼び出しは物理的に削除されています。
+
+- Stage1のレジストリ照合（npm/PyPI/Maven Central/Go Module Proxy/NuGet等）: 各`*RegistryClient`はローカルDBのミラーテーブルのみに問い合わせる実装で、ライブHTTP照会（`lookupLive`相当）のコード自体が削除済み。`RestClient`等のフィールドも保持しません。
+- Stage1のCPE照合: 旧バージョンにあった「ローカル辞書が空振りの場合にNVD CPE APIへライブ照会する」フォールバックは削除済みで、`pg_trgm`によるローカルCPE辞書のあいまい検索のみで完結します。
+- Stage2の脆弱性調査（NVD CVE／OSV／GHSA／cve.org／CSAF）: いずれも対応する`*VulnerabilitySource`実装がローカルDBのリポジトリ／`JdbcTemplate`のみを保持し、ライブAPI呼び出し経路は削除済みです。
+- Stage1のTier2/3（あいまい候補のAI判定・Web検索名称解決）とStage4（最終リサーチ）: `Stage1AiArbitration`・`Stage4WebSearchResearchService`はいずれもAI呼び出し経路が物理的に削除されており、常に「AI利用不可」のフォールバック（未確定候補は破棄、またはUNIDENTIFIEDのまま）を返します。Claude API（Anthropic Messages API）を呼び出す経路自体がコードベースに存在しません。
+
+この設計の詳細と検証方法は[CLOSED_MODE_DATA_HANDLING.md](./CLOSED_MODE_DATA_HANDLING.md)を参照してください。
+
+## バックグラウンド一括同期が使う外部API
+
+上記の識別・調査パイプライン本体とは別に、ローカルミラーを構築・更新するための一括同期処理（クラス名に`Sync`が付く専用クラス群、詳細は[CLOSED_MODE_DATA_HANDLING.md](./CLOSED_MODE_DATA_HANDLING.md)）が、以下の外部APIをバックグラウンドで叩きます。CSVアップロードそのものを直接のトリガーにはしません。
 
 | API | 用途 | 認証 |
 |---|---|---|
-| npm Registry | Stage1 Tier1（レジストリ照合） | 不要 |
-| PyPI JSON API | 同上 | 不要 |
-| Maven Central Solr Search API | 同上 | 不要 |
-| Go Module Proxy | 同上 | 不要 |
-| NuGet Flat Container API | 同上 | 不要 |
-| NVD CPE API v2.0 | CPE辞書同期・Stage1のライブCPE照会 | 任意（ユーザー登録のNVDキー、無料） |
-| NVD CVE API v2.0 | Stage2脆弱性調査（`cpeName`によるバージョン範囲解決） | 任意（同上） |
-| OSV.dev `/v1/query` | Stage2脆弱性調査 | 不要 |
-| cve.org（CVE Services API、`CveOrgSyncService`によるミラー同期のみ、Stage2実行時はライブ呼び出し無し） | Stage2脆弱性調査（`CveOrgVulnerabilitySource`、ローカルミラー照会） | 不要（同期処理側） |
-| Anthropic Messages API | Tier2/3・Stage4 | ユーザー個別のClaude APIキー（暗号化保存） |
+| npm Registry / PyPI JSON API / Maven Central Solr Search API / Go Module Proxy / NuGet Flat Container API 等（9エコシステム） | 各`*MirrorSyncService`によるレジストリミラー同期（既定無効） | 不要 |
+| NVD CPE API v2.0 | `NvdCpeSyncService`によるCPE辞書ミラー同期。管理画面（`/admin/cpe-dictionary`）からの手動キーワード同期にも使われる | 任意（ユーザー登録のNVDキー、無料） |
+| NVD CVE API v2.0 | `NvdCveSyncService`によるNVD CVEミラー同期 | 任意（同上） |
+| OSV.dev | `OsvSyncService`によるOSVミラー同期 | 不要 |
+| cve.org（CVE Services API／GitHub Releases API） | `CveOrgSyncService`によるCVE.orgミラー同期 | 不要 |
+| CSAF（Red Hat / Siemens） | `RedHatCsafSyncService` / `SiemensCsafSyncService`によるCSAFミラー同期 | 不要 |
+| GitHub REST（advisories／GHSA） | `GhsaSyncService`によるGHSAミラー同期 | 不要 |
 
-**GitHub REST（advisories／GHSA）は2026-08-25時点で意図的に未接続**: `GhsaVulnerabilitySource`は実装済みだが`@Component`を外してあり、Stage2の`VulnerabilitySource`一覧には含まれない。未認証60req/hourの制限がStage2のper-item fan-outと組み合わさると1,000件ジョブで約18時間のスリープを要し、スループット目標を破壊するため。クラスは削除せず、将来の**リポジトリ単位（per-itemではない）**利用のために保持している。詳細は[pipeline.md](./pipeline.md)のStage2節と`GhsaVulnerabilitySource`のクラスjavadoc参照。
+**GHSAはStage2の脆弱性照会対象に含まれますが、参照先はローカルミラーのみです**: `GhsaVulnerabilitySource`はStage2実行時にGitHubへライブ問い合わせすることはなく、`GhsaSyncService`が事前にミラーしたローカルテーブルのみを照会します。ミラー同期自体はbaseline投入後、管理者操作とは独立して日次で自動実行されます。詳細は[pipeline.md](./pipeline.md)のStage2節と`GhsaVulnerabilitySource`のクラスjavadoc参照。
 
-NVD系はプロセス全体で共有する `NvdRateLimiter` でレート制限している（APIキー無し: 最小間隔6.5秒 / ジョブ実行ユーザーがNVDキー登録済み: 最小間隔0.7秒）。
+NVD系の同期処理はプロセス全体で共有する `NvdRateLimiter` でレート制限している（APIキー無し: 最小間隔6.5秒 / 同期実行ユーザーがNVDキー登録済み: 最小間隔0.7秒）。
+
+Claude API（Anthropic Messages API）を呼び出す経路は、同期処理も含めコードベース全体に存在しません。
