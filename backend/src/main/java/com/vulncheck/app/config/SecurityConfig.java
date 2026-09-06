@@ -24,6 +24,15 @@ public class SecurityConfig {
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers("/register", "/login", "/css/**", "/js/**", "/robots.txt").permitAll()
                         .requestMatchers("/admin/**").hasRole("ADMIN")
+                        // Closed-mode backlog item 393: the only remaining provider on this page is
+                        // NVD (item392/B2 already stripped the Claude key UI, see SecretsController's
+                        // own VALID_PROVIDERS), and item363's investigation found a non-admin's
+                        // registered NVD key is never read by anything — only the admin account's own
+                        // key is ever resolved (UserApiKeyService#getAdminNvdApiKey / the admin-only
+                        // /admin/** sync routes). Gating the whole page here, the same way /admin/**
+                        // is gated, avoids letting non-admin users accumulate encrypted keys that can
+                        // never be used.
+                        .requestMatchers("/settings/secrets/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )
                 .formLogin(form -> form

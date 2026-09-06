@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html xmlns:th="http://www.thymeleaf.org">
+<html xmlns:th="http://www.thymeleaf.org" xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
 <head>
     <meta charset="UTF-8"/>
     <link rel="stylesheet" th:href="@{/css/style.css}"/>
@@ -14,11 +14,15 @@
 <h3>1-1. アカウント登録・ログイン</h3>
 <p>トップページから登録済みのアカウントでログインしてください。未登録の場合は登録画面から作成できます。</p>
 
-<h3>1-2. NVD APIキーの登録（任意・推奨）</h3>
+<h3>1-2. NVD APIキーの登録（管理者アカウントのみ・一般ユーザーは対応不要）</h3>
+<!-- closed-mode backlog item 393/408: /settings/secrets は ROLE_ADMIN 限定のため、非管理者には
+     リンクではなくプレーンテキストで表示する(クリックさせて素のwhitelabel 403に直行させない)。 -->
 <p>
-    <a th:href="@{/settings/secrets}">APIキー設定</a>画面からNVDの無料APIキーも登録できます。
-    費用は一切かかりません。登録すると、CPE辞書のライブ照会・NVD脆弱性検索のレート制限が緩和されます
-    （未登録: 約6.5秒に1回 → 登録済み: 約0.7秒に1回）。取得手順は同画面に記載しています。
+    <span sec:authorize="hasRole('ADMIN')"><a th:href="@{/settings/secrets}">APIキー設定</a></span><span sec:authorize="!hasRole('ADMIN')">APIキー設定</span>画面はNVDの無料APIキーを登録するための画面で、
+    管理者アカウントにのみ表示されます（一般ユーザーが登録したキーはNVD同期処理から参照されないため）。
+    一般ユーザーはこの手順を行う必要はありません。管理者は登録することで、CPE辞書・NVD脆弱性の
+    ミラー同期処理のNVDリクエスト間隔が緩和されます（未登録: 5リクエスト/30秒 → 登録済み: 50リクエスト/30秒）。
+    取得手順は同画面に記載しています。
 </p>
 
 <h2>2. 使い方</h2>
