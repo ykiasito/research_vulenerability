@@ -212,6 +212,43 @@ class CveOrgSyncServiceTest {
                 .hasMessageNotContaining(secret);
     }
 
+    /** Backlog item 362 follow-up (senior review, 2026-09-06, second round): the previous test
+     *  above only covers a clean rejection (an {@link IllegalStateException} this class itself
+     *  throws with an already-sanitized message) — it does NOT cover a genuine transport-level
+     *  failure, where {@code cveOrgSyncRestClient} throws Spring's {@code ResourceAccessException}
+     *  (connect timeout/reset/TLS failure), whose OWN message embeds the full, un-sanitized request
+     *  URI ("I/O error on GET request for \"&lt;uri&gt;\": ..."). {@code uri} passed into {@link
+     *  CveOrgSyncService#resolveRedirectTarget} here already carries a signed query string — as it
+     *  would on any redirect hop past the first — so if that exception were chained as this
+     *  method's cause, the secret would resurface via {@code getCause().getMessage()}, which
+     *  {@code syncBaseline}/{@code syncDelta}'s {@code log.error("...", e)} would print in full.
+     *  Asserts on the FULL stack-trace text (not just the top-level message), since SLF4J's
+     *  cause-chain rendering is what the fix must defend against, and only checking {@code
+     *  getMessage()} wouldn't catch a leak reintroduced via {@code getCause()}. */
+    @Test
+    void resolveRedirectTargetTransportFailureDoesNotLeakTheSignedQueryStringAnywhereInTheThrowable() {
+        RestClient.Builder builder = builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        CveOrgSyncService service = service(builder.build());
+        String secret = "SECRETVALUE789";
+        URI uri = URI.create("https://release-assets.githubusercontent.com/hop2?sig=" + secret + "&jwt=whatever");
+
+        server.expect(requestTo(uri.toString())).andRespond(request -> {
+            throw new IOException("connection reset by peer");
+        });
+
+        Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(() -> service.resolveRedirectTarget(uri));
+
+        assertThat(thrown).isInstanceOf(IOException.class);
+        assertThat(fullStackTraceText(thrown)).doesNotContain(secret);
+    }
+
+    private static String fullStackTraceText(Throwable t) {
+        java.io.StringWriter writer = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(writer));
+        return writer.toString();
+    }
+
     @Test
     void resolveRedirectTargetRejectsARedirectMissingTheLocationHeader() {
         RestClient.Builder builder = builder();
@@ -229,12 +266,46 @@ class CveOrgSyncServiceTest {
     // ------------------------------------------------------------------------- download --------
 
     /** Backlog item 361 follow-up (senior review, 2026-09-06): {@link CveOrgSyncService#download}
-     *  loops through {@link CveOrgSyncService#resolveRedirectTarget} (bounded by {@code
-     *  MAX_REDIRECTS = 3}) rather than following a single hop — a chain that keeps redirecting past
-     *  the bound must fail closed with an {@link IOException} instead of looping forever or
-     *  silently giving up and connecting to an unvalidated final hop. */
+     *  loops through {@link CveOrgSyncService#resolveRedirectTarget}, tolerating up to {@code
+     *  MAX_REDIRECTS = 3} actual redirect hops (matching {@code GhsaSyncService.fetchBounded}'s own
+     *  {@code redirectsRemaining} semantics: 3 -> 2 -> 1 -> 0) — a chain needs a genuine 4th
+     *  redirect (past the tolerated 3) to fail closed with an {@link IOException}, rather than
+     *  looping forever or silently giving up and connecting to an unvalidated final hop. (An
+     *  earlier version of this test used only 3 redirects and still expected failure — that was
+     *  itself evidence of the off-by-one bug a second peer review caught: the loop used to require
+     *  its own final iteration to observe a non-redirect, tolerating only 2 hops, not 3.) */
     @Test
     void downloadFailsWhenTheRedirectChainExceedsTheMaxRedirectsBound() {
+        RestClient.Builder builder = builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        CveOrgSyncService service = service(builder.build());
+        URI hop0 = URI.create("https://github.com/CVEProject/cvelistV5/releases/download/x/y.zip");
+        URI hop1 = URI.create("https://release-assets.githubusercontent.com/hop1");
+        URI hop2 = URI.create("https://objects.githubusercontent.com/hop2");
+        URI hop3 = URI.create("https://release-assets.githubusercontent.com/hop3");
+        URI hop4 = URI.create("https://objects.githubusercontent.com/hop4");
+
+        server.expect(requestTo(hop0.toString())).andRespond(withStatus(HttpStatus.FOUND).header("Location", hop1.toString()));
+        server.expect(requestTo(hop1.toString())).andRespond(withStatus(HttpStatus.FOUND).header("Location", hop2.toString()));
+        server.expect(requestTo(hop2.toString())).andRespond(withStatus(HttpStatus.FOUND).header("Location", hop3.toString()));
+        server.expect(requestTo(hop3.toString())).andRespond(withStatus(HttpStatus.FOUND).header("Location", hop4.toString()));
+
+        assertThatThrownBy(() -> service.download(hop0.toString()))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("too many redirects");
+        server.verify();
+    }
+
+    /** Confirms the corrected loop genuinely tolerates exactly {@code MAX_REDIRECTS = 3} redirect
+     *  hops before it must observe a non-redirect — i.e. the boundary the fix in {@link
+     *  #downloadFailsWhenTheRedirectChainExceedsTheMaxRedirectsBound} exercises from the failing
+     *  side is exercised here from the succeeding side, one hop short of failure. Stops short of
+     *  the actual byte fetch ({@link CveOrgSyncService#openConnection} opens a real connection,
+     *  which would require a live network call to an allowlisted host — outside this unit test's
+     *  scope) — asserts on {@link CveOrgSyncService#resolveRedirectTarget} chained three times
+     *  instead, which is exactly the loop body {@link CveOrgSyncService#download} repeats. */
+    @Test
+    void resolvingThreeChainedRedirectsSucceedsWithoutExhaustingTheBound() throws IOException {
         RestClient.Builder builder = builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         CveOrgSyncService service = service(builder.build());
@@ -246,10 +317,17 @@ class CveOrgSyncServiceTest {
         server.expect(requestTo(hop0.toString())).andRespond(withStatus(HttpStatus.FOUND).header("Location", hop1.toString()));
         server.expect(requestTo(hop1.toString())).andRespond(withStatus(HttpStatus.FOUND).header("Location", hop2.toString()));
         server.expect(requestTo(hop2.toString())).andRespond(withStatus(HttpStatus.FOUND).header("Location", hop3.toString()));
+        server.expect(requestTo(hop3.toString())).andRespond(withSuccess());
 
-        assertThatThrownBy(() -> service.download(hop0.toString()))
-                .isInstanceOf(IOException.class)
-                .hasMessageContaining("too many redirects");
+        URI afterHop1 = service.resolveRedirectTarget(hop0);
+        URI afterHop2 = service.resolveRedirectTarget(afterHop1);
+        URI afterHop3 = service.resolveRedirectTarget(afterHop2);
+        URI terminal = service.resolveRedirectTarget(afterHop3);
+
+        assertThat(afterHop1).isEqualTo(hop1);
+        assertThat(afterHop2).isEqualTo(hop2);
+        assertThat(afterHop3).isEqualTo(hop3);
+        assertThat(terminal).isEqualTo(hop3);
         server.verify();
     }
 
