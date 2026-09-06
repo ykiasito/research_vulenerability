@@ -70,6 +70,30 @@ services:
       # compose setup has no TLS termination — set to true in .env only once this deployment sits
       # behind TLS (e.g. the EC2/production rollout), otherwise logins will silently stop working.
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      # Closed-mode backlog item 390: these were previously missing from this environment block, so
+      # setting them in .env had no effect on the running container (Compose only forwards variable
+      # names explicitly listed here) even though application.yml already read them. Weekly resync
+      # of the 9 registry mirrors (see application.yml) — off by default, same safety-first
+      # convention as the CPE resync flags above; can also be triggered on demand via
+      # /admin/registry-mirror.
+      REGISTRY_MIRROR_SCHEDULED_SYNC_ENABLED: ${REGISTRY_MIRROR_SCHEDULED_SYNC_ENABLED:-false}
+      REGISTRY_MIRROR_SCHEDULED_SYNC_CRON: ${REGISTRY_MIRROR_SCHEDULED_SYNC_CRON:-0 0 2 * * SUN}
+      REGISTRY_MIRROR_SYNC_CHUNK_SIZE: ${REGISTRY_MIRROR_SYNC_CHUNK_SIZE:-200}
+      REGISTRY_MIRROR_SYNC_FRESHNESS_DAYS: ${REGISTRY_MIRROR_SYNC_FRESHNESS_DAYS:-7}
+      # NVD CVE API bulk mirror backfill/delta (see application.yml, closed-mode backlog item 202/
+      # 284). Off by default -- required, not optional: the ~2-3GB storage impact is on top of this
+      # app's 15GB DB size hard cap, so growing this mirror must be a deliberate per-environment
+      # opt-in, same convention as every other *-mirror-enabled/*-scheduled-resync-enabled flag
+      # above. Also triggerable on demand via the /admin/nvd-cve sync-now button regardless of this
+      # setting.
+      NVD_CVE_BACKFILL_ENABLED: ${NVD_CVE_BACKFILL_ENABLED:-false}
+      NVD_CVE_BACKFILL_CRON: ${NVD_CVE_BACKFILL_CRON:-0 0 6 * * *}
+      NVD_CVE_BACKFILL_MAX_REQUESTS_PER_RUN: ${NVD_CVE_BACKFILL_MAX_REQUESTS_PER_RUN:-60}
+      NVD_CVE_BACKFILL_MAX_DURATION_MINUTES: ${NVD_CVE_BACKFILL_MAX_DURATION_MINUTES:-60}
+      NVD_CVE_DELTA_ENABLED: ${NVD_CVE_DELTA_ENABLED:-false}
+      NVD_CVE_DELTA_CRON: ${NVD_CVE_DELTA_CRON:-0 30 6 * * *}
+      NVD_CVE_DELTA_MAX_REQUESTS_PER_RUN: ${NVD_CVE_DELTA_MAX_REQUESTS_PER_RUN:-60}
+      NVD_CVE_DELTA_MAX_DURATION_MINUTES: ${NVD_CVE_DELTA_MAX_DURATION_MINUTES:-60}
     ports:
       - "8080:8080"
     volumes:
