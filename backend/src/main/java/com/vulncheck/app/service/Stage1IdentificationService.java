@@ -91,6 +91,47 @@ public class Stage1IdentificationService {
      */
     private static final int MAX_NAME_VARIANT_QUERIES_PER_ITEM = 3;
     /**
+     * Backlog item 388: a Maven {@code groupId:artifactId} coordinate (e.g. {@code
+     * "org.apache.logging.log4j:log4j-core"}) fed verbatim into the pg_trgm similarity search buries
+     * the artifactId's real identity under the groupId's own dotted-package-name scaffolding —
+     * measured live: {@code "org.apache.logging.log4j:log4j-core"} scores only 0.222 product
+     * -similarity against the dictionary's real {@code apache:log4j} entry, under the {@link
+     * #CPE_PRODUCT_SIMILARITY_THRESHOLD} 0.3 bar, so the entry never even enters {@link
+     * #localCpeLookup}'s candidate pool in the first place (same story for {@code
+     * "org.apache.kafka:kafka-clients"} against {@code apache:kafka}, 0.24). Recognized purely by
+     * shape ({@link #MAVEN_COORDINATE_SHAPE}: a dotted groupId, a colon, then an artifactId) — this
+     * class has no ecosystem signal available at the point {@link #mavenArtifactTokenVariants} is
+     * called from ({@link #computeNameVariantMatches}, itself only ever reached once a registry match
+     * has already been ruled out — see {@link #resolveCpeCandidates}'s own {@code
+     * registryEcosystem.isPresent()} guard), so shape detection is the only signal available.
+     */
+    private static final java.util.regex.Pattern MAVEN_COORDINATE_SHAPE =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+:[A-Za-z0-9_.+-]+$");
+    /**
+     * Backlog item 388: trailing artifactId segments common enough across the Java ecosystem to
+     * carry no product-identifying meaning of their own — stripped from the end of a hyphen-split
+     * artifactId (e.g. {@code "log4j-core"} -&gt; {@code "log4j"}, {@code "kafka-clients"} -&gt;
+     * {@code "kafka"}) before it's tried as an extra search variant in {@link
+     * #mavenArtifactTokenVariants}, and also excluded outright from that same method's per-segment
+     * variant list (REVISE, senior review 2026-09-06) — a segment this class has itself defined as
+     * carrying no product-identifying meaning of its own must never be queried as a standalone
+     * candidate string either. Deliberately a short, conservative list rather than an attempt at
+     * completeness — a suffix missed here just means that one variant doesn't fire, never a wrong
+     * match, since {@link #mavenArtifactTokenVariants} also tries each individual (non-generic, non
+     * -trivially-short) hyphen segment on its own as a further variant.
+     */
+    private static final java.util.Set<String> MAVEN_ARTIFACT_GENERIC_SUFFIXES =
+            java.util.Set.of("core", "api", "client", "clients", "impl", "common", "commons");
+    /**
+     * REVISE (senior review 2026-09-06): a per-segment variant this short is a real precision risk on
+     * its own, independent of whether it happens to also be a known {@link
+     * #MAVEN_ARTIFACT_GENERIC_SUFFIXES} entry — measured live against the real dictionary, {@code
+     * product % 'io'} alone (2 characters) matches thousands of unrelated rows purely on trigram
+     * noise. 3 characters is the same floor {@link #MIN_ANCHOR_LENGTH_FOR_INITIALISM_EXPANSION} uses
+     * elsewhere in this class for the same "too short to carry real signal" reasoning.
+     */
+    private static final int MIN_MAVEN_SEGMENT_LENGTH_FOR_VARIANT = 3;
+    /**
      * Item 302: how many of the item's own leading tokenized words (vendor side and product-name
      * side, each capped independently) feed the exact {@code (vendor, product)} pair fallback in
      * {@link #localCpeLookup} ({@link
@@ -285,7 +326,7 @@ public class Stage1IdentificationService {
         result = result.flatMap(product -> highConfidenceVerificationService.verifyIfEligible(item, product, userId));
 
         log.info("Stage1 identify item {} ('{}' v{}): registryMatch={}, cpeCandidates={}, result={}",
-                item.getId(), item.getProductName(), item.getVersion(),
+                item.getId(), LogSanitizer.sanitize(item.getProductName()), LogSanitizer.sanitize(item.getVersion()),
                 registryResolution.match().map(RegistryMatch::packageName).orElse(null),
                 cpeCandidateResult.candidates().size(),
                 result.map(this::describe).orElse("UNIDENTIFIED"));
@@ -434,7 +475,7 @@ public class Stage1IdentificationService {
                             + "no AI verification available, version is unconfirmed, and item vendor '{}' is "
                             + "present (REVISE item 3: measured 14/14 wrong with a non-blank vendor vs 5/5 "
                             + "correct with a blank one)", item.getId(), weakMatch.ecosystem(),
-                            weakMatch.packageName(), item.getVendor());
+                            weakMatch.packageName(), LogSanitizer.sanitize(item.getVendor()));
                     registryMatch = Optional.empty();
                     RescuedCpe rescued = rescueCpeAfterRegistryMatchRejected(
                             item, userId, vendorForCpeRescue, productNameForCpeRescue);
@@ -489,10 +530,26 @@ public class Stage1IdentificationService {
             // itself is being discarded as untrustworthy, that ecosystem context goes with it, so the
             // CPE must be re-checked against a bare no-registry-context gate before it's allowed to
             // survive on its own.
-            // installUrl deliberately omitted (null) here too — this re-check exists purely to
-            // strip the now-distrusted registry match's own ecosystem context (Round-5 fix's own
-            // scope), not to touch any other declared-platform source.
-            if (chosenCpe != null && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), "", null))) {
+            // Backlog item 389 (originally item 377's ESLint root-cause): passes the item's real
+            // installUrl through here, NOT null — TargetSwContext#from already keeps the
+            // install_url-derived signal (installUrlDeclaredTargetSw) structurally independent from
+            // the registry-ecosystem-derived one (mappedTargetSw, only ever populated when
+            // registryEcosystem is non-empty). Passing registryEcosystem=Optional.empty() is what
+            // actually strips the now-distrusted registry match's own ecosystem context — that alone
+            // already achieves this re-check's stated scope. Nulling installUrl too (the pre-389
+            // bug) went further than that scope and silently discarded an unrelated, still-valid
+            // declared-platform source: an item whose chosenCpe only ever passed the gate because of
+            // its own install_url (e.g. a VS Code marketplace extension) had that CPE wrongly
+            // re-rejected here whenever it also happened to carry an unconfirmed-version registry
+            // match to distrust (see Stage1IdentificationServiceTest's item-389 regression case for
+            // the ESLint marketplace-extension scenario this fixes). Practical effect (senior-reviewer
+            // verification, round 2): for an item that does declare an install_url, this if's own
+            // gate check below never fails in the first place, so this whole Round-5 re-check
+            // (discard chosenCpe, then try selectFallbackCpeCandidateAfterRegistryDistrust) is
+            // effectively a no-op for that item — chosenCpe simply survives untouched, which is what
+            // actually fixes the ESLint scenario above.
+            if (chosenCpe != null
+                    && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), "", item.getInstallUrl()))) {
                 log.info("Dropping CPE {} for item {} — it only passed the target_sw gate via the "
                         + "now-distrusted registry match's ecosystem context, so it cannot stand on its own",
                         chosenCpe.getCpeString(), item.getId());
@@ -509,7 +566,7 @@ public class Stage1IdentificationService {
                 // #degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived} already uses elsewhere)
                 // catches the case where a genuinely correct candidate (e.g. openssl:openssl) was
                 // sitting right there the whole time, instead of silently going UNIDENTIFIED.
-                chosenCpe = selectFallbackCpeCandidateAfterRegistryDistrust(discardedCpe, cpeCandidates);
+                chosenCpe = selectFallbackCpeCandidateAfterRegistryDistrust(discardedCpe, cpeCandidates, item.getInstallUrl());
                 if (chosenCpe != null) {
                     log.info("Falling back to remaining CPE candidate {} for item {} after discarding {} — "
                             + "it independently passes the bare target_sw gate",
@@ -713,12 +770,26 @@ public class Stage1IdentificationService {
      *
      * @return the best surviving candidate, or {@code null} if none of the others pass the bare gate
      *      either — the caller then correctly falls through to the existing UNIDENTIFIED outcome.
+     *
+     * <p>Backlog item 389: takes the item's own {@code installUrl} as a parameter rather than
+     * hardcoding it away, purely to stay consistent with the caller's own re-check just above (the
+     * {@code if (chosenCpe != null && !passesTargetSwGate(...))} guard in {@link #resolveCandidates}
+     * that decides whether this method is even invoked) — not because this parameterization changes
+     * this method's own outcome today. Measured (senior-reviewer verification, round 2): it doesn't.
+     * {@link TargetSwContext#from} has {@code declaredTargetSw()} prefer the install_url-derived
+     * signal over the (here always-empty) registry-ecosystem one, so whenever an item actually
+     * declares an install_url, that same preference already applies to the caller's own bare-gate
+     * re-check — which is exactly the check that decides whether this method gets called at all — so
+     * that {@code if} guard does not fire for an install_url-declared item, and this method is never
+     * reached for one. On every call that does reach here, {@code installUrl} is therefore
+     * effectively blank/absent, i.e. behaviorally equivalent to the pre-389 hardcoded {@code null}.
+     * This parameter is kept anyway as drift protection: if the caller's own gate condition above
+     * ever changes such that this equivalence no longer holds, this method's own gate would silently
+     * fall out of sync with it without this.
      */
     private CpeDictionaryEntry selectFallbackCpeCandidateAfterRegistryDistrust(
-            CpeDictionaryEntry discardedCpe, List<CpeDictionaryEntry> cpeCandidates) {
-        // installUrl deliberately omitted (null) — same "bare (no-ecosystem-context) gate" scope as
-        // this method's own javadoc, item 176's fix, unrelated to item 303's install_url signal.
-        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "", null);
+            CpeDictionaryEntry discardedCpe, List<CpeDictionaryEntry> cpeCandidates, String installUrl) {
+        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "", installUrl);
         for (CpeDictionaryEntry candidate : cpeCandidates) {
             if (candidate == discardedCpe) {
                 continue;
@@ -877,7 +948,20 @@ public class Stage1IdentificationService {
      *
      *  <p>Backlog item 89 P2: returns {@link LocalCpeMatches} rather than a bare list so {@link
      *  #resolveCpeCandidates} can learn whether {@link #plausibleContainmentOnly}'s relaxed second
-     *  pass is what actually produced {@code candidates} here — see that method's own javadoc. */
+     *  pass is what actually produced {@code candidates} here — see that method's own javadoc.
+     *
+     *  <p>Backlog item 388 (REVISE, senior review 2026-09-06): a Maven {@code groupId:artifactId}
+     *  coordinate normalization fallback briefly lived here, gated on "the literal query found
+     *  nothing" exactly the way item 302's own exact-match fallback originally did — and hit the
+     *  exact same regression class item 302's own REVISE already named and fixed (see {@link
+     *  #exactVendorProductMatches}'s javadoc): reachable from a concurrent, registry-context-blind
+     *  path, it could manufacture a non-null {@code chosenCpe} for an item a registry match already
+     *  covers, flipping {@code trustRegistryMatch} false and discarding that match's ecosystem/
+     *  package/purl. The Maven normalization now lives in {@link #computeNameVariantMatches} instead
+     *  — reached only from {@link #resolveCpeCandidates}'s existing {@link #findByNameVariants} call
+     *  site, strictly after that method's own {@code registryEcosystem.isPresent()} early return, so
+     *  it is structurally unreachable whenever a registry match already exists — see that method's
+     *  own javadoc. */
     private LocalCpeMatches localCpeLookup(String vendor, String productName, String itemVersion) {
         List<CpeDictionaryEntry> pool = cpeDictionaryRepository.findFuzzyMatches(
                 productName, CPE_PRODUCT_SIMILARITY_THRESHOLD, CPE_TITLE_SIMILARITY_THRESHOLD, CPE_CANDIDATE_POOL);
@@ -885,6 +969,69 @@ public class Stage1IdentificationService {
         List<CpeDictionaryEntry> ranked = rankCpeCandidates(
                 vendor, productName, containment.candidates(), Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
         return new LocalCpeMatches(ranked, containment.usedRelaxedPass());
+    }
+
+    /**
+     * Backlog item 388: normalized search-variant tokens derived from {@code productName}'s
+     * artifactId, tried by {@link #computeNameVariantMatches} as one more name-variant direction.
+     * Returns an empty list for anything that doesn't match {@link #MAVEN_COORDINATE_SHAPE} — this
+     * never fires for an ordinary (non-Maven-coordinate) product name, and costs nothing (no DB call
+     * at all) when it doesn't.
+     *
+     * <p>Three kinds of variant, in this order — most specific first, since {@link
+     * #computeNameVariantMatches} stops at the first one that finds anything:
+     * <ol>
+     *   <li>The bare artifactId itself, unchanged. REVISE (senior review 2026-09-06): the literal
+     *       query {@link #localCpeLookup} already ran is the <em>whole</em> {@code groupId:artifactId}
+     *       coordinate, never the bare artifactId alone — measured live, {@code similarity('tomcat',
+     *       'org.apache.tomcat.embed:tomcat-embed-core')} is only 0.241 (under threshold) while the
+     *       bare artifactId {@code 'tomcat-embed-core'} alone scores 0.389 against it, so trying the
+     *       unmodified artifactId here is a real, previously-untried variant, not a repeat of the
+     *       literal query.</li>
+     *   <li>The artifactId with a trailing {@link #MAVEN_ARTIFACT_GENERIC_SUFFIXES} segment (or
+     *       chain of them) stripped, e.g. {@code "log4j-core"} -&gt; {@code "log4j"}, {@code
+     *       "kafka-clients"} -&gt; {@code "kafka"}.</li>
+     *   <li>Each individual hyphen-separated segment of the artifactId on its own, excluding both a
+     *       {@link #MAVEN_ARTIFACT_GENERIC_SUFFIXES} segment (by definition not product-identifying)
+     *       and anything shorter than {@value #MIN_MAVEN_SEGMENT_LENGTH_FOR_VARIANT} characters (a
+     *       segment that short is a real precision risk on its own — measured live: {@code product %
+     *       'java'} alone exact-matches {@code ibm:java}/{@code kubernetes:java}/etc. at similarity
+     *       1.0, and {@code product % 'server'} matches 38,564 dictionary rows). Catches a meaningful
+     *       segment whose sibling segment isn't a suffix this class happens to know about, without
+     *       needing an exhaustive suffix list.</li>
+     * </ol>
+     *
+     * <p>Deduplicated (a {@link java.util.LinkedHashSet} preserves this ordering across the dedup).
+     */
+    private List<String> mavenArtifactTokenVariants(String productName) {
+        if (productName == null || !MAVEN_COORDINATE_SHAPE.matcher(productName.trim()).matches()) {
+            return List.of();
+        }
+        String artifactId = productName.substring(productName.lastIndexOf(':') + 1).trim();
+        if (artifactId.isBlank()) {
+            return List.of();
+        }
+        java.util.LinkedHashSet<String> variants = new java.util.LinkedHashSet<>();
+        variants.add(artifactId);
+
+        String[] segments = artifactId.split("-");
+        int end = segments.length;
+        while (end > 1 && MAVEN_ARTIFACT_GENERIC_SUFFIXES.contains(segments[end - 1].toLowerCase(java.util.Locale.ROOT))) {
+            end--;
+        }
+        if (end < segments.length) {
+            variants.add(String.join("-", Arrays.copyOfRange(segments, 0, end)));
+        }
+        if (segments.length > 1) {
+            for (String segment : segments) {
+                String normalizedSegment = segment.toLowerCase(java.util.Locale.ROOT);
+                if (segment.length() >= MIN_MAVEN_SEGMENT_LENGTH_FOR_VARIANT
+                        && !MAVEN_ARTIFACT_GENERIC_SUFFIXES.contains(normalizedSegment)) {
+                    variants.add(segment);
+                }
+            }
+        }
+        return List.copyOf(variants);
     }
 
     /**
@@ -960,9 +1107,25 @@ public class Stage1IdentificationService {
      * expanded name all score under threshold against {@code visual_studio_code}), so this needs its
      * own retrieval strategy, not just a lower threshold.
      *
-     * <p>Two independent, mechanical directions — not a hardcoded table of specific product-name
-     * pairs — plus a related vendor-prefix strip:
+     * <p>Four independent, mechanical directions — not a hardcoded table of specific product-name
+     * pairs — tried in the order below:
      * <ul>
+     *   <li><b>Maven artifactId normalization</b> (backlog item 388, REVISE senior review 2026-09-06):
+     *       for a {@code groupId:artifactId}-shaped {@code productName} (see {@link
+     *       #mavenArtifactTokenVariants}'s own javadoc for the exact token set and why it's ordered
+     *       most-specific-first), retries the same trigram+containment pipeline the literal query
+     *       already used against each normalized token in turn ({@link #literalVariantSearch}).
+     *       Tried first — cheap to rule out (a regex check, zero DB cost) for every non-Maven
+     *       {@code productName}, and when it does apply, no other direction below realistically fires
+     *       for a dotted-groupId-and-colon string anyway. Originally lived inside {@link
+     *       #localCpeLookup} itself, gated only on "the literal query found nothing" — the exact same
+     *       registry-match regression class item 302's own exact-match fallback was already moved out
+     *       of {@code localCpeLookup} to avoid (see {@link #exactVendorProductMatches}'s javadoc).
+     *       Living here instead means it inherits this method's own two safety properties for free:
+     *       the {@value #MAX_NAME_VARIANT_QUERIES_PER_ITEM} query cap below, and — because {@link
+     *       #resolveCpeCandidates} only ever reaches {@link #findByNameVariants} strictly after its
+     *       own {@code registryEcosystem.isPresent()} early return — unreachability whenever a
+     *       registry match already exists.</li>
      *   <li><b>Contraction</b> (long form -&gt; acronym): "GNU Image Manipulation Program" -&gt;
      *       "GIMP" ({@link NameVariantGenerator#contractToAcronym}). Requires an exact product-slug
      *       match ({@link #acronymVariantSearch}) rather than the literal query's containment check
@@ -984,11 +1147,13 @@ public class Stage1IdentificationService {
      * variant-derived candidate.
      *
      * <p>Bounded to at most {@value #MAX_NAME_VARIANT_QUERIES_PER_ITEM} extra local-dictionary
-     * queries per item (stops at the first direction that finds anything) and memoized per
-     * (vendor, productName) via {@link #cpeNameVariantCache} for the rest of this process's life —
-     * this project's CSVs repeat the same product name across many version-duplicate rows, so a
-     * job that pays for this once for "VS Code" should not pay for it again on every other row (see
-     * {@link RegistryLookupCache}'s own precedent for the same reasoning).
+     * queries per item TOTAL across every direction above, including however many of {@link
+     * #mavenArtifactTokenVariants}'s own tokens get tried (stops at the first query, in any
+     * direction, that finds anything) and memoized per (vendor, productName) via {@link
+     * #cpeNameVariantCache} for the rest of this process's life — this project's CSVs repeat the same
+     * product name across many version-duplicate rows, so a job that pays for this once for "VS Code"
+     * should not pay for it again on every other row (see {@link RegistryLookupCache}'s own precedent
+     * for the same reasoning).
      */
     private List<CpeDictionaryEntry> findByNameVariants(String vendor, String productName) {
         return cpeNameVariantCache.get(vendor, productName, () -> computeNameVariantMatches(vendor, productName));
@@ -996,6 +1161,20 @@ public class Stage1IdentificationService {
 
     private List<CpeDictionaryEntry> computeNameVariantMatches(String vendor, String productName) {
         int queriesLeft = MAX_NAME_VARIANT_QUERIES_PER_ITEM;
+
+        for (String mavenVariant : mavenArtifactTokenVariants(productName)) {
+            if (queriesLeft <= 0) {
+                return List.of();
+            }
+            List<CpeDictionaryEntry> viaMavenVariant = literalVariantSearch(vendor, mavenVariant);
+            queriesLeft--;
+            if (!viaMavenVariant.isEmpty()) {
+                return viaMavenVariant;
+            }
+        }
+        if (queriesLeft <= 0) {
+            return List.of();
+        }
 
         String acronym = NameVariantGenerator.contractToAcronym(productName);
         if (acronym != null) {
@@ -1844,7 +2023,7 @@ public class Stage1IdentificationService {
         String query = cpeQuery(vendor, productName);
         if (registryEcosystem.isPresent()) {
             log.info("Local CPE dictionary had no candidates for '{}' — skipping live NVD CPE lookup "
-                    + "since a registry match already covers this item", query);
+                    + "since a registry match already covers this item", LogSanitizer.sanitize(query));
             return new CpeCandidateResult(List.of(), false, false);
         }
 

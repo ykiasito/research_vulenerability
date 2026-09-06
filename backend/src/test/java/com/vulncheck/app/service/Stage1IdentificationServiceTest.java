@@ -312,6 +312,50 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void installUrlDeclaredCpeSurvivesRegistryDistrustReCheck() {
+        // Backlog item 389 (root cause of item 377's ESLint closed-mode regression): a chosenCpe that
+        // only passed the target_sw gate via its OWN install_url declaration (never a registry
+        // ecosystem mapping) must not be wrongly re-rejected here just because an unrelated,
+        // unconfirmed-version registry match on the same item is separately judged untrustworthy
+        // below. The pre-389 bug passed installUrl=null into both of this re-check's TargetSwContext
+        // constructions, which discarded the install_url signal too instead of only the distrusted
+        // registry ecosystem's own context — silently sending a real VS Code Marketplace extension
+        // (e.g. dbaeumer.vscode-eslint, whose npm "eslint" registry match is unconfirmed-version and
+        // unrelated to the VS Code extension's own identity) to UNIDENTIFIED.
+        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("npm", "eslint", "pkg:npm/eslint@2.1.7", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        CpeDictionaryEntry vscodeEslintExtension = cpeEntry(
+                "cpe:2.3:a:microsoft:eslint:2.0:*:*:*:*:visual_studio_code:*:*", "eslint");
+        vscodeEslintExtension.setTitle("ESLint");
+        vscodeEslintExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeEslintExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("ESLint");
+        item.setInstallUrl("https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint");
+
+        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        // The distrusted npm registry match must not be attached — only the install_url-gated CPE
+        // survives on its own.
+        assertThat(result.get().getEcosystem()).isNull();
+        assertThat(result.get().getPackageName()).isNull();
+        assertThat(result.get().getCpe())
+                .isEqualTo("cpe:2.3:a:microsoft:eslint:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
     void unconfirmedVersionRegistryMatchIsStillUsedWhenNoCpeCorroborationExists() {
         // Same weak signal as above, but with no CPE candidate at all — still the only signal
         // available, so it's used as a best-effort fallback (unchanged from prior behavior).
@@ -1591,6 +1635,117 @@ class Stage1IdentificationServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
         assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void mavenArtifactTokenVariantFindsCandidateAndIsAcceptedWhenAiConfirmsIt() {
+        // Backlog item 388 (REVISE, senior review 2026-09-06): the Maven-coordinate normalization
+        // fallback now lives inside computeNameVariantMatches, reached via findByNameVariants only as
+        // the genuine last resort — after the literal query, the exact-vendor-product fallback (empty
+        // here since findByVendorProductPairs is unstubbed), AND a failed live NVD lookup have all
+        // already come back empty, exactly like every other name-variant direction. The bare
+        // artifactId ("log4j-core") is tried first and finds nothing (no CPE is really slugged that
+        // way); the suffix-stripped token ("log4j") is tried next and finds the real entry. Same
+        // "never auto-trust a mechanically-derived guess" AI-confirmation gate as any other
+        // variant-derived match.
+        CpeDictionaryEntry log4j = cpeEntry("cpe:2.3:a:apache:log4j:2.17.0:*:*:*:*:*:*:*", "log4j");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findFuzzyMatches(eq("log4j"), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(log4j));
+        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches Log4j", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.apache.logging.log4j:log4j-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:log4j:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void mavenArtifactTokenVariantCandidateIsDroppedRatherThanAutoAcceptedWithNoApiKey() {
+        // Same setup as the AI-confirmed case above, but with no Claude key configured — a
+        // mechanically-derived artifactId-token guess must never be auto-trusted, same as any other
+        // variant-derived candidate (resolveSingleCpeCandidate's own forced-AI-check javadoc).
+        CpeDictionaryEntry kafka = cpeEntry("cpe:2.3:a:apache:kafka:3.6.0:*:*:*:*:*:*:*", "kafka");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findFuzzyMatches(eq("kafka"), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(kafka));
+        when(nvdCpeSyncService.syncKeywordSinglePage(anyString(), anyInt(), any())).thenReturn(0);
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("org.apache.kafka:kafka-clients"), USER_ID);
+
+        assertThat(result).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void mavenArtifactTokenVariantFallbackNeverFiresWhenTheLiteralCoordinateAlreadyMatches() {
+        // The variant fallback is strictly additive — a productName that already matches literally
+        // must never trigger the extra artifactId-token search at all. Product deliberately set to
+        // the exact literal query text so the strict containment pass unambiguously accepts it
+        // regardless of tokenization details, keeping this test's only concern the call count below.
+        CpeDictionaryEntry log4jCore = cpeEntry(
+                "cpe:2.3:a:apache:log4j-core:2.17.0:*:*:*:*:*:*:*", "org.apache.logging.log4j:log4j-core");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(log4jCore));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.apache.logging.log4j:log4j-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        verify(cpeDictionaryRepository, org.mockito.Mockito.times(1))
+                .findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt());
+    }
+
+    @Test
+    void mavenArtifactTokenVariantFallbackNeverFiresWhenARegistryMatchAlreadyCoversTheItem() {
+        // Backlog item 388 REVISE point 1/6 (senior review 2026-09-06): the exact regression class
+        // item 302's own exact-match fallback was already moved out of localCpeLookup to avoid — a
+        // registry match with an UNCONFIRMED version relies on chosenCpe staying null to keep
+        // trustRegistryMatch true (see resolveCandidates' own comment on that flag). A Maven-coordinate
+        // item is exactly the shape most likely to have a real Maven Central registry match, so this
+        // guards that the token-variant fallback never reaches the dictionary at all once
+        // registryEcosystem is present — the registry match's own ecosystem/package/purl must survive
+        // untouched and the CPE must stay null, never overridden by a variant-derived guess.
+        PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("maven", "org.apache.logging.log4j:log4j-core",
+                        "pkg:maven/org.apache.logging.log4j/log4j-core@2.17.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "maven";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of(mavenLookup)).identify(item("org.apache.logging.log4j:log4j-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("maven");
+        assertThat(result.get().getPackageName()).isEqualTo("org.apache.logging.log4j:log4j-core");
+        assertThat(result.get().getCpe()).isNull();
+        // Only the one literal query (localCpeLookup's own concurrent literal search) — the Maven
+        // token-variant fallback, the exact-vendor-product fallback, and the live NVD fallback must
+        // all be structurally unreachable once a registry match already covers the item.
+        verify(cpeDictionaryRepository, org.mockito.Mockito.times(1))
+                .findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt());
+        verifyNoInteractions(nvdCpeSyncService);
     }
 
     @Test

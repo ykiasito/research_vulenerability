@@ -28,4 +28,11 @@ public class CveOrgSyncState {
 
     @Column(name = "last_synced_at")
     private OffsetDateTime lastSyncedAt;
+
+    /** Set by {@link com.vulncheck.app.service.cveorg.CveOrgSyncService} on every failed sync
+     *  attempt (baseline or delta), cleared to {@code null} on the next successful one — closed-mode
+     *  backlog item 379, matching {@code GhsaSyncState}/{@code OsvSyncState}'s field of the same
+     *  name. */
+    @Column(name = "last_sync_error")
+    private String lastSyncError;
 }

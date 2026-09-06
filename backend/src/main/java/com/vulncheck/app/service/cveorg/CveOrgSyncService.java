@@ -47,6 +47,14 @@ public class CveOrgSyncService {
     private static final String LATEST_RELEASE_API = "https://api.github.com/repos/CVEProject/cvelistV5/releases/latest";
     private static final String BASELINE_ASSET_SUFFIX = "_all_CVEs_at_midnight.zip.zip";
     private static final String DELTA_ASSET_INFIX = "_delta_CVEs_at_";
+    /** Finite, not {@code 0}/unbounded (backlog item 398) — {@link URLConnection#setReadTimeout} is
+     *  a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long a
+     *  genuinely-streaming multi-GB baseline download can take; it only kills a connection that goes
+     *  fully idle for this long. Without a finite value, a peer that keeps the connection open but
+     *  stops sending bytes would hang this thread forever, without ever reaching {@link
+     *  #recordSyncFailure}. 30s is the same value used by the sibling sync services (backlog items
+     *  378/381 for {@code GhsaSyncService}/{@code OsvSyncService}). */
+    private static final int DOWNLOAD_READ_TIMEOUT_MILLIS = 30_000;
 
     private final RestClient cveOrgSyncRestClient;
     private final CveOrgRecordRepository cveOrgRecordRepository;
@@ -58,7 +66,9 @@ public class CveOrgSyncService {
     public int syncBaseline() {
         GitHubRelease release = fetchLatestRelease();
         if (release == null || release.baselineZipUrl() == null) {
-            log.error("CVE.org baseline sync aborted: could not resolve the latest release's baseline asset");
+            String message = "Could not resolve the latest cvelistV5 release's baseline asset";
+            log.error("CVE.org baseline sync aborted: {}", message);
+            recordSyncFailure(message);
             return 0;
         }
         log.info("CVE.org baseline sync starting from release {} ({})", release.tag(), release.baselineZipUrl());
@@ -88,6 +98,12 @@ public class CveOrgSyncService {
             }
         } catch (IOException e) {
             log.error("CVE.org baseline sync failed after upserting {} records", upserted, e);
+            // Closed-mode backlog item 379: record the failure (rather than silently returning) so
+            // /admin/cve-org has a signal a continuously-failing baseline sync used to leave
+            // nowhere — deliberately e.getClass().getSimpleName(), not e.getMessage(), since a
+            // download IOException could in principle still be wrapping part of the request URL.
+            recordSyncFailure("baseline sync failed after upserting " + upserted + " records ("
+                    + e.getClass().getSimpleName() + ")");
             return upserted;
         }
 
@@ -100,7 +116,9 @@ public class CveOrgSyncService {
     public int syncDelta() {
         GitHubRelease release = fetchLatestRelease();
         if (release == null || release.deltaZipUrl() == null) {
-            log.warn("CVE.org delta sync skipped: could not resolve the latest release's delta asset");
+            String message = "Could not resolve the latest cvelistV5 release's delta asset";
+            log.warn("CVE.org delta sync skipped: {}", message);
+            recordSyncFailure(message);
             return 0;
         }
         log.info("CVE.org delta sync starting from release {} ({})", release.tag(), release.deltaZipUrl());
@@ -116,6 +134,10 @@ public class CveOrgSyncService {
             }
         } catch (IOException e) {
             log.error("CVE.org delta sync failed after upserting {} records", upserted, e);
+            // See syncBaseline's matching catch block for why this is e.getClass().getSimpleName(),
+            // not e.getMessage() (closed-mode backlog item 379).
+            recordSyncFailure("delta sync failed after upserting " + upserted + " records ("
+                    + e.getClass().getSimpleName() + ")");
             return upserted;
         }
 
@@ -227,14 +249,35 @@ public class CveOrgSyncService {
     }
 
     private void markSynced(String releaseTag, boolean baselineLoaded) {
-        CveOrgSyncState state = cveOrgSyncStateRepository.findById((short) 1).orElseGet(CveOrgSyncState::new);
-        state.setId((short) 1);
+        CveOrgSyncState state = loadState();
         state.setLastReleaseTag(releaseTag);
         state.setLastSyncedAt(OffsetDateTime.now());
+        state.setLastSyncError(null);
         if (baselineLoaded) {
             state.setBaselineLoaded(true);
         }
         cveOrgSyncStateRepository.save(state);
+    }
+
+    /** Closed-mode backlog item 379: records a failed sync attempt (baseline or delta) so the
+     *  failure is visible on /admin/cve-org instead of vanishing into the log alone. Deliberately
+     *  still advances {@code last_synced_at} to "now" — matching {@code
+     *  GhsaSyncService#failSync}'s convention — so this state's last_synced_at means "the last time
+     *  a sync was attempted", not "the last time one succeeded"; {@code last_sync_error} being
+     *  non-null is what actually distinguishes the two. Never touches {@code baseline_loaded}/
+     *  {@code last_release_tag} — a failed attempt must not make a previously-completed baseline
+     *  look un-loaded, nor overwrite a known-good release tag with nothing. */
+    private void recordSyncFailure(String message) {
+        CveOrgSyncState state = loadState();
+        state.setLastSyncedAt(OffsetDateTime.now());
+        state.setLastSyncError(message);
+        cveOrgSyncStateRepository.save(state);
+    }
+
+    private CveOrgSyncState loadState() {
+        CveOrgSyncState state = cveOrgSyncStateRepository.findById((short) 1).orElseGet(CveOrgSyncState::new);
+        state.setId((short) 1);
+        return state;
     }
 
     private GitHubRelease fetchLatestRelease() {
@@ -267,12 +310,12 @@ public class CveOrgSyncService {
     }
 
     /** Plain {@link URLConnection}, not the {@code cveOrgSyncRestClient} bean — that client's 30s
-     *  read timeout (fine for the quick releases-API call) is far too short for a download that
-     *  can run for minutes (baseline: well over 1GB). */
+     *  read timeout happens to match {@link #DOWNLOAD_READ_TIMEOUT_MILLIS} used here, but the bean
+     *  itself isn't reused because it isn't wired for streaming a multi-GB response body. */
     private InputStream download(String url) throws IOException {
         URLConnection connection = URI.create(url).toURL().openConnection();
         connection.setConnectTimeout(10_000);
-        connection.setReadTimeout(0);
+        connection.setReadTimeout(DOWNLOAD_READ_TIMEOUT_MILLIS);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (cve.org sync)");
         return connection.getInputStream();
     }
