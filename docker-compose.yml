@@ -33,9 +33,15 @@ services:
       APP_SECRET_ENCRYPTION_KEY: ${APP_SECRET_ENCRYPTION_KEY}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       JOB_RETENTION_DAYS: ${JOB_RETENTION_DAYS:-30}
-      # One-shot: mirrors the full NVD CPE Dictionary on boot (hours). Leave false; flip to true
-      # once per environment, then set it back. See CpeDictionaryBootstrapSync.
+      # One-shot: mirrors the full NVD CPE Dictionary on boot (hours). Safe to leave true across
+      # restarts once the weekly delta chain is running -- the freshness gate below skips this
+      # whenever the mirror is already up to date. See CpeDictionaryBootstrapSync.
       CPE_FULL_SYNC_ON_STARTUP: ${CPE_FULL_SYNC_ON_STARTUP:-false}
+      # Closed-mode backlog item 330: skips the startup full sync above entirely when the mirror's
+      # last unfiltered sync is within this many days. 0 or negative disables the gate (every
+      # enabled startup always runs the full sync, the pre-item-330 behavior). Does not apply to
+      # the admin-triggered /admin/cpe-dictionary/sync-all button, which always runs on demand.
+      CPE_FULL_SYNC_MAX_AGE_DAYS: ${CPE_FULL_SYNC_MAX_AGE_DAYS:-30}
       # Weekly automatic full re-sync of the same mirror (Sunday 01:30 UTC by default, ~103 min).
       # Off by default; enabling it is an operational decision (see
       # docs/spec/cpe-dictionary-mirror-plan.md).

@@ -3,6 +3,7 @@ package com.vulncheck.app.service.registry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
 import java.net.URI;
@@ -94,7 +95,7 @@ public class CratesIoMirrorSyncService {
             // behind RegistryMirrorSyncService#isValidSeedName's wider, upload-time gate.
             if (!RegistryMirrorPackageNameValidator.isValidSimpleName(packageName)) {
                 log.warn("crates.io mirror sync rejected package name as invalid for URL assembly: "
-                        + "package={}", packageName);
+                        + "package={}", LogSanitizer.sanitize(packageName));
                 unresolved++;
                 continue;
             }
@@ -151,15 +152,15 @@ public class CratesIoMirrorSyncService {
             }
             if (versions.isEmpty()) {
                 log.warn("crates.io sparse index returned a body with no parseable version lines for "
-                        + "package={}", packageName);
+                        + "package={}", LogSanitizer.sanitize(packageName));
                 return Optional.empty();
             }
             return Optional.of(versions);
         } catch (HttpClientErrorException.NotFound e) {
-            log.debug("crates.io sparse index has no entry for package={}", packageName);
+            log.debug("crates.io sparse index has no entry for package={}", LogSanitizer.sanitize(packageName));
             return Optional.empty();
         } catch (Exception e) {
-            log.warn("crates.io sparse index fetch failed for package={}", packageName, e);
+            log.warn("crates.io sparse index fetch failed for package={}", LogSanitizer.sanitize(packageName), e);
             return Optional.empty();
         }
     }

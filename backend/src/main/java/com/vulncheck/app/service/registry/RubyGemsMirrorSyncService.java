@@ -1,6 +1,7 @@
 package com.vulncheck.app.service.registry;
 
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
 import java.util.ArrayList;
@@ -117,15 +118,15 @@ public class RubyGemsMirrorSyncService {
             List<String> versions = parseVersions(body);
             if (versions.isEmpty()) {
                 log.warn("rubygems compact index returned a body with no parseable version lines for "
-                        + "package={}", packageName);
+                        + "package={}", LogSanitizer.sanitize(packageName));
                 return Optional.empty();
             }
             return Optional.of(versions);
         } catch (HttpClientErrorException.NotFound e) {
-            log.debug("rubygems compact index has no entry for package={}", packageName);
+            log.debug("rubygems compact index has no entry for package={}", LogSanitizer.sanitize(packageName));
             return Optional.empty();
         } catch (Exception e) {
-            log.warn("rubygems compact index fetch failed for package={}", packageName, e);
+            log.warn("rubygems compact index fetch failed for package={}", LogSanitizer.sanitize(packageName), e);
             return Optional.empty();
         }
     }

@@ -13,6 +13,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.vulncheck.app.repository.CpeDictionaryRepository;
+import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
@@ -40,6 +41,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.ui.ExtendedModelMap;
 import org.springframework.ui.Model;
 import org.springframework.web.client.RestClient;
@@ -85,12 +87,15 @@ class AdminControllerTest {
     private NvdCveSyncService nvdCveSyncService;
     @Mock
     private NvdCveSyncStateRepository nvdCveSyncStateRepository;
+    @Mock
+    private CpeDictionarySyncStateRepository cpeDictionarySyncStateRepository;
 
     private AdminController newController() {
         return new AdminController(nvdCpeSyncService, userApiKeyService, userRepository, cveOrgSyncService,
                 siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository, ghsaSyncService,
                 ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService, osvSyncStateRepository,
-                osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService, nvdCveSyncStateRepository);
+                osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService, nvdCveSyncStateRepository,
+                cpeDictionarySyncStateRepository);
     }
 
     @Test
@@ -184,7 +189,8 @@ class AdminControllerTest {
         // exact scenario would have let both syncs run at once.
         CpeDictionaryRepository sharedRepository = mock(CpeDictionaryRepository.class);
         NvdCpeSyncService sharedService = new NvdCpeSyncService(
-                mock(RestClient.class), sharedRepository, new NvdRateLimiter());
+                mock(RestClient.class), sharedRepository, new NvdRateLimiter(),
+                mock(CpeDictionarySyncStateRepository.class));
 
         // Stand-in for CpeDictionaryBootstrapSync.run() winning the race and starting first.
         assertThat(sharedService.tryBeginFullSync()).isTrue();
@@ -193,7 +199,7 @@ class AdminControllerTest {
                 cveOrgSyncService, siemensCsafSyncService, redHatCsafSyncService, csafSyncStateRepository,
                 ghsaSyncService, ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService,
                 osvSyncStateRepository, osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService,
-                nvdCveSyncStateRepository);
+                nvdCveSyncStateRepository, cpeDictionarySyncStateRepository);
         Model model = new ExtendedModelMap();
 
         String view = controller.cpeFullSync(model);
@@ -203,6 +209,21 @@ class AdminControllerTest {
         // The controller's attempt must never have reached syncAllAndRelease at all, let alone
         // made a network call or touched the repository, once the slot was denied.
         verifyNoInteractions(sharedRepository);
+    }
+
+    // --- closed-mode backlog item 330 (A): blank keyword must never reach NvdCpeSyncService -----
+
+    @Test
+    void syncRejectsBlankKeywordWithoutCallingTheServiceOrLookingUpTheUser() {
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+        UserDetails userDetails = mock(UserDetails.class);
+
+        String view = controller.sync("   ", userDetails, model);
+
+        assertThat(view).isEqualTo("admin/cpe-dictionary");
+        assertThat(model.getAttribute("result")).asString().contains("空欄");
+        verifyNoInteractions(nvdCpeSyncService, userRepository, userDetails);
     }
 
     @Test
@@ -402,6 +423,21 @@ class AdminControllerTest {
         String view = controller.nvdCveForm(model);
 
         assertThat(view).isEqualTo("admin/nvd-cve");
+        assertThat(model.getAttribute("syncState")).isSameAs(state);
+    }
+
+    /** Closed-mode backlog item 332: {@code GET /admin/cpe-dictionary} follows the same
+     *  syncState-exposure pattern as {@link #nvdCveFormExposesTheSyncStateToTheModel}. */
+    @Test
+    void formExposesTheCpeDictionarySyncStateToTheModel() {
+        com.vulncheck.app.entity.CpeDictionarySyncState state = new com.vulncheck.app.entity.CpeDictionarySyncState();
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.form(model);
+
+        assertThat(view).isEqualTo("admin/cpe-dictionary");
         assertThat(model.getAttribute("syncState")).isSameAs(state);
     }
 }

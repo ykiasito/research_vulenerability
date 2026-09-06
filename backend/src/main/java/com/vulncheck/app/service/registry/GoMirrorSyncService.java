@@ -1,6 +1,7 @@
 package com.vulncheck.app.service.registry;
 
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
 import java.util.ArrayList;
@@ -121,15 +122,16 @@ public class GoMirrorSyncService {
                 }
             }
             if (versions.isEmpty()) {
-                log.warn("Go module proxy returned no parseable version entries for module={}", modulePath);
+                log.warn("Go module proxy returned no parseable version entries for module={}",
+                        LogSanitizer.sanitize(modulePath));
                 return Optional.empty();
             }
             return Optional.of(versions);
         } catch (HttpClientErrorException.NotFound e) {
-            log.debug("Go module proxy has no entry for module={}", modulePath);
+            log.debug("Go module proxy has no entry for module={}", LogSanitizer.sanitize(modulePath));
             return Optional.empty();
         } catch (Exception e) {
-            log.warn("Go module proxy fetch failed for module={}", modulePath, e);
+            log.warn("Go module proxy fetch failed for module={}", LogSanitizer.sanitize(modulePath), e);
             return Optional.empty();
         }
     }

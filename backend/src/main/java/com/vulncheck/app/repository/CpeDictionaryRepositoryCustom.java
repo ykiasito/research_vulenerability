@@ -51,4 +51,45 @@ public interface CpeDictionaryRepositoryCustom {
      * the SQL regex alone can't fully replicate every token-boundary edge case.
      */
     List<CpeDictionaryEntry> findByLeadingInitialismMatch(String abbreviation, String anchor, int limit);
+
+    /**
+     * Exact-match lookup against the {@code (vendor, product)} composite btree index ({@code
+     * idx_cpe_dictionary_vendor_product}, see {@code V31__cpe_dictionary_vendor_product_index.sql}),
+     * backing item 302's candidate-pool fallback in {@code
+     * Stage1IdentificationService#exactVendorProductMatches} (called from {@code
+     * Stage1IdentificationService#resolveCpeCandidates}, not {@code localCpeLookup} — see that
+     * method's own javadoc for why).
+     *
+     * <p>Why exact match rather than a lower pg_trgm similarity threshold — same reasoning as {@link
+     * #findByLeadingInitialismMatch}'s own javadoc (short dictionary slugs are structurally
+     * disadvantaged against a longer query string): measured live 2026-09-05, {@code
+     * similarity('falcon', 'CrowdStrike Falcon Sensor')} = 0.269 (under the 0.3 product threshold) and
+     * {@code similarity('CrowdStrike Falcon 6.42.15610', 'CrowdStrike Falcon Sensor')} = 0.51 (under
+     * the 0.6 title threshold), so {@code crowdstrike:falcon} never enters the trigram-ranked
+     * candidate pool at all no matter how the rest of the ranking is tuned. Unlike lowering the
+     * thresholds (rejected by senior review — risks breaking the GIN index's own pre-filter
+     * selectivity and the downstream K1/K2/K3 ranking constants tuned against the current thresholds),
+     * this adds a second, independent retrieval path rather than touching the existing one at all: an
+     * exact {@code (vendor, product)} equality match needs no similarity score to be trustworthy in
+     * the first place.
+     *
+     * <p>{@code pairs} must be empty-safe (returns an empty list, no query issued) and is always
+     * passed as JDBC bind parameters, never string-interpolated — see the {@code Impl} class for the
+     * bounded pair-generation caveat this depends on ({@code product} is {@code VARCHAR(255)}, so an
+     * unbounded token cross-product could otherwise reach tens of thousands of pairs).
+     */
+    List<CpeDictionaryEntry> findByVendorProductPairs(List<VendorProductPair> pairs, int limit);
+
+    /**
+     * One candidate {@code (vendor, product)} slug pair for {@link #findByVendorProductPairs}.
+     * Deliberately a bare pair of normalized single-word tokens (not underscore-joined multi-word
+     * slugs like the dictionary's own {@code product} column can hold, e.g. {@code
+     * visual_studio_code}) — {@code Stage1IdentificationService} builds these from the plain
+     * cross-product of the item's own tokenized vendor/product-name words, which is exactly the
+     * shape a single-word dictionary slug like {@code falcon} needs to match on, not a broader
+     * name-variant search (that's a separate, already-existing fallback — see {@code
+     * Stage1IdentificationService#findByNameVariants}).
+     */
+    record VendorProductPair(String vendor, String product) {
+    }
 }

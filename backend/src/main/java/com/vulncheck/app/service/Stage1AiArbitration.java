@@ -45,7 +45,8 @@ public class Stage1AiArbitration {
     @FunctionalInterface
     public interface CpeCandidateLookup {
         Stage1IdentificationService.CpeCandidateResult fuzzyMatchCpe(String vendor, String productName, Long userId,
-                Optional<String> registryEcosystem, Optional<String> registryPackageName, String itemVersion);
+                Optional<String> registryEcosystem, Optional<String> registryPackageName, String itemVersion,
+                String installUrl);
     }
 
     /** {@code resolveCandidates} — see {@link CpeCandidateLookup}'s own javadoc for why this is kept

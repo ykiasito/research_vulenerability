@@ -15,6 +15,7 @@ import com.vulncheck.app.entity.CpeDictionaryEntry;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
+import com.vulncheck.app.repository.CpeDictionaryRepositoryCustom.VendorProductPair;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
 import com.vulncheck.app.service.nvd.CpeNameVariantCache;
 import com.vulncheck.app.service.registry.PackageRegistryLookup;
@@ -28,6 +29,7 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -1309,6 +1311,300 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void installUrlHostnameDeclaresATargetSwAndPassesTheGateWithNoRegistryMatch() {
+        // Backlog item 303 (task B): a marketplace extension has no package-registry ecosystem to
+        // route through at all — before this item, passesTargetSwGate's "no registry match at all
+        // -> reject" rule made a target_sw-scoped VS Code extension candidate structurally
+        // unreachable regardless of what install_url said. install_url is now a second, independent
+        // declared-platform source.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_extension:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
+    void installUrlDeclaredPlatformMustMatchTheCandidatesOwnTargetSwNotJustBePresent() {
+        // Backlog item 303: install_url declaring a platform is not a blanket admit — the declared
+        // value must still equal the candidate's own target_sw (same equality check a registry-
+        // derived declaration was always held to). A VS Code Marketplace install_url must not admit
+        // a JetBrains-plugin-scoped candidate.
+        CpeDictionaryEntry jetbrainsPlugin = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:jetbrains:*:*", "foo_extension");
+        jetbrainsPlugin.setTitle("Foo Plugin for JetBrains IDEs 2.0");
+        jetbrainsPlugin.setTargetSwValues(java.util.Set.of("jetbrains"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(jetbrainsPlugin));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlHostSpoofedInThePathOfAnUnrelatedHostDoesNotDeclareAPlatform() {
+        // Backlog item 303: the hostname match must be against the URI's real authority, never a
+        // substring anywhere in the URL — a naive substring check would be fooled by the real
+        // marketplace hostname sitting in the PATH of an attacker-controlled host.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://evil.com/marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlHostSuffixSpoofDoesNotDeclareAPlatformEither() {
+        // Backlog item 303: the mirror-image spoof attempt — the real marketplace hostname as a
+        // LEADING label of an attacker-controlled parent domain — must be rejected the same way.
+        // Trailing-label suffix matching (host equals or ends with ".<mapped host>") is what makes
+        // this fail: "marketplace.visualstudio.com.evil.com" ends with ".evil.com", not
+        // ".marketplace.visualstudio.com".
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://marketplace.visualstudio.com.evil.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlOnAGenuineSubdomainOfAMappedHostStillDeclaresThePlatform() {
+        // Backlog item 303: trailing-label matching must still accept a real subdomain of a mapped
+        // host (host equals the mapped value OR ends with "." + it) — this is the legitimate
+        // counterpart to the two spoof tests above, guarding against an over-corrected exact-only
+        // comparison.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://www.marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_extension:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
+    void chromeWebStoreLegacyUrlShapeDeclaresTheChromePlatform() {
+        // Backlog item 303: the legacy chrome.google.com/webstore/... URL shape needs both the host
+        // AND the /webstore path prefix — chrome.google.com alone hosts plenty of non-extension
+        // pages too, so the host by itself isn't specific enough to declare a platform.
+        CpeDictionaryEntry chromeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:chrome:*:*", "foo_extension");
+        chromeExtension.setTitle("Foo Extension for Chrome 2.0");
+        chromeExtension.setTargetSwValues(java.util.Set.of("chrome"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(chromeExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://chrome.google.com/webstore/detail/foo-extension/abcdefghijklmnop");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_extension:1.0.0:*:*:*:*:chrome:*:*");
+    }
+
+    @Test
+    void chromeGoogleComHostWithoutTheLegacyWebstorePathDoesNotDeclareAPlatform() {
+        // Backlog item 303: the counterpart to the legacy-shape test above — chrome.google.com
+        // hosting some other, non-webstore page must not declare chrome as the platform.
+        CpeDictionaryEntry chromeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:chrome:*:*", "foo_extension");
+        chromeExtension.setTitle("Foo Extension for Chrome 2.0");
+        chromeExtension.setTargetSwValues(java.util.Set.of("chrome"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(chromeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://chrome.google.com/intl/en/about/");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void jetbrainsMarketplaceInstallUrlDeclaresTheJetbrainsPlatform() {
+        CpeDictionaryEntry jetbrainsPlugin = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_plugin:2.0:*:*:*:*:jetbrains:*:*", "foo_plugin");
+        jetbrainsPlugin.setTitle("Foo Plugin for JetBrains IDEs 2.0");
+        jetbrainsPlugin.setTargetSwValues(java.util.Set.of("jetbrains"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(jetbrainsPlugin));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Plugin");
+        item.setInstallUrl("https://plugins.jetbrains.com/plugin/1234-foo-plugin");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_plugin:1.0.0:*:*:*:*:jetbrains:*:*");
+    }
+
+    @Test
+    void firefoxAddonsMozillaInstallUrlDeclaresTheFirefoxPlatform() {
+        CpeDictionaryEntry firefoxAddon = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_addon:2.0:*:*:*:*:firefox:*:*", "foo_addon");
+        firefoxAddon.setTitle("Foo Addon for Firefox 2.0");
+        firefoxAddon.setTargetSwValues(java.util.Set.of("firefox"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(firefoxAddon));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Addon");
+        item.setInstallUrl("https://addons.mozilla.org/en-US/firefox/addon/foo-addon/");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_addon:1.0.0:*:*:*:*:firefox:*:*");
+    }
+
+    @Test
+    void chromeGoogleComLegacyPathLookalikeDoesNotDeclareAPlatform() {
+        // Senior-reviewer REVISE (PR#229, measured live): a bare startsWith("/webstore") check also
+        // matched an unrelated path like "/webstoreEVIL/x" or "/webstore-foo" -- neither is the real
+        // legacy chrome.google.com/webstore/... shape, so neither must declare chrome.
+        CpeDictionaryEntry chromeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:chrome:*:*", "foo_extension");
+        chromeExtension.setTitle("Foo Extension for Chrome 2.0");
+        chromeExtension.setTargetSwValues(java.util.Set.of("chrome"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(chromeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("https://chrome.google.com/webstoreEVIL/detail/foo-extension/abcdefghijklmnop");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlWithNoSchemeStillDeclaresThePlatform() {
+        // Senior-reviewer REVISE (PR#229): a non-engineer pasting an install_url without "https://"
+        // must not silently disable this whole feature -- jobs/new.html's own vulncheckGetUrlHost
+        // already tolerates the same scheme-less shape for this same install_url column.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fooinc:foo_extension:1.0.0:*:*:*:*:visual_studio_code:*:*");
+    }
+
+    @Test
+    void installUrlWithNoSchemeHostSpoofedInThePathStillDoesNotDeclareAPlatform() {
+        // Senior-reviewer REVISE (PR#229): the scheme-less tolerance above must not weaken the
+        // existing path-spoof resistance -- prepending "https://" to a scheme-less URL still leaves
+        // URI itself to do the real authority/path parsing, so the real marketplace hostname sitting
+        // in an unrelated host's path must still fail to declare a platform.
+        CpeDictionaryEntry vscodeExtension = cpeEntry(
+                "cpe:2.3:a:fooinc:foo_extension:2.0:*:*:*:*:visual_studio_code:*:*", "foo_extension");
+        vscodeExtension.setTitle("Foo Extension for Visual Studio Code 2.0");
+        vscodeExtension.setTargetSwValues(java.util.Set.of("visual_studio_code"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vscodeExtension));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Foo Extension");
+        item.setInstallUrl("evil.com/marketplace.visualstudio.com/items?itemName=fooinc.foo-extension");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void installUrlDeclarationOverridesAnUnmappedRegistryEcosystemsDefaultAllow() {
+        // Senior-reviewer REVISE (PR#229): maven has no ECOSYSTEM_TO_TARGET_SW mapping, so without
+        // an install_url declaration this would reach passesTargetSwGate's hex/maven default-allow.
+        // But this item's own install_url declares "jetbrains" -- that declaration must take
+        // priority and be held to the same strict equality check as any other declared platform,
+        // rejecting a candidate scoped to an unrelated target_sw ("python" here) rather than
+        // falling through to the default-allow.
+        PackageRegistryLookup mavenLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch(
+                        "maven", "somelib", "pkg:maven/some/somelib@1.0.0", new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "maven";
+            }
+        };
+        CpeDictionaryEntry pythonScopedSomelib = cpeEntry("cpe:2.3:a:somevendor:somelib:1.0.0:*:*:*:*:python:*:*", "somelib");
+        pythonScopedSomelib.setTargetSwValues(java.util.Set.of("python"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(pythonScopedSomelib));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("somelib");
+        item.setInstallUrl("https://plugins.jetbrains.com/plugin/1234-somelib");
+
+        Optional<IdentifiedProduct> result = service(List.of(mavenLookup)).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("maven");
+        assertThat(result.get().getCpe()).isNull();
+    }
+
+    @Test
     void versionCoverageTieBreakPrefersACandidateWhoseCatalogedVersionsCoverTheItemsVersion() {
         // Backlog item 15, P2 (senior review 2026-08-30); ratio value updated for backlog item 36
         // (senior review 2026-08-30, ratio-guard rewrite): two same-slug candidates tie on
@@ -1676,6 +1972,224 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void exactSlugMatchIsSuppressedForAStaleSameVendorDuplicateThatVersionCoverageContradicts() {
+        // Backlog item 308 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3):
+        // real data confirmed oracle:virtualbox (8 rows, max cataloged major 3, exact-slug match for
+        // query "VirtualBox") outranking the real current entry oracle:vm_virtualbox (270 rows, max
+        // cataloged major 7, NOT an exact-slug match) purely because exactSlugMatch sits ahead of
+        // everything else in rankCpeCandidates's own key chain — even though the current entry's own
+        // version coverage is the only one of the two that actually covers VirtualBox 7.0.14
+        // (7 > 3*VERSION_COVERAGE_IMPLAUSIBILITY_RATIO(2)=6, so the old entry's own versionCoverageRank
+        // is NOT_COVERS). Reproduced here with the real dictionary's own leading-qualifier product
+        // shape ({@code vm_virtualbox}, not a reshaped {@code virtualbox_vm}) and the item's own real
+        // vendor field ("Oracle") — item 345's own pool-relative rescue in plausibleContainmentOnly
+        // is what admits oracle:vm_virtualbox into this ranked pool at all now (a single-token query
+        // "virtualbox" can never align against a leading "vm" token via explainsQuery's own Direction
+        // 1/2, so the strict admission gate rejects it outright; only having oracle:virtualbox already
+        // admitted, as an exact-slug same-CPE-vendor anchor whose own slug is contained in
+        // "vm_virtualbox", rescues it) — so this test now exercises both item 308's ranking fix and
+        // item 345's admission-gate rescue together, exactly as the real VirtualBox data does.
+        CpeDictionaryEntry oracleVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:virtualbox:6.1.38:*:*:*:*:*:*:*", "virtualbox");
+        oracleVirtualbox.setMaxCatalogedMajor(3);
+        CpeDictionaryEntry oracleVmVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:vm_virtualbox:7.0.6:*:*:*:*:*:*:*", "vm_virtualbox");
+        oracleVmVirtualbox.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVirtualbox, oracleVmVirtualbox));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle");
+        item.setVersion("7.0.14");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:oracle:vm_virtualbox:7.0.14:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void poolRelativeRescueNeverFiresWithoutAnExactSlugAnchorInThePool() {
+        // Backlog item 345 negative fixture (a): the same oracle:vm_virtualbox candidate as the test
+        // above, but with no oracle:virtualbox anchor anywhere in the pool this time — the rescue must
+        // never fire on a bare superset-slug/same-vendor guess alone, only when an actual exact-slug
+        // match already earned admission through the strict pass. Without an anchor, oracle:vm_virtualbox
+        // is rejected outright by the strict admission gate (same reasoning as the test above) and the
+        // pool has nothing left to fall back on, so this item correctly stays UNIDENTIFIED.
+        CpeDictionaryEntry oracleVmVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:vm_virtualbox:7.0.6:*:*:*:*:*:*:*", "vm_virtualbox");
+        oracleVmVirtualbox.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVmVirtualbox));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle");
+        item.setVersion("7.0.14");
+
+        assertThat(service(List.of()).identify(item, USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void poolRelativeRescueNeverFiresAcrossADifferentCpeVendor() {
+        // Backlog item 345 negative fixture (b): a superset-slug candidate under a DIFFERENT CPE
+        // vendor ("otherco", not "oracle") must not be rescued just because an exact-slug anchor
+        // happens to exist elsewhere in the same pool — the rescue is same-vendor-scoped, exactly
+        // like item 308's own isOutrankedByCurrentCatalogedSameVendorDuplicate it mirrors. Asserting
+        // cpeCandidateCount (rather than just the final chosen CPE, which the anchor alone would also
+        // win on exact-slug-match priority even if the cross-vendor candidate leaked into the pool)
+        // is what actually proves the cross-vendor candidate was excluded from admission at all.
+        CpeDictionaryEntry oracleVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:virtualbox:6.1.38:*:*:*:*:*:*:*", "virtualbox");
+        oracleVirtualbox.setMaxCatalogedMajor(3);
+        CpeDictionaryEntry otherVendorVmVirtualbox =
+                cpeEntry("cpe:2.3:a:otherco:vm_virtualbox:7.0.6:*:*:*:*:*:*:*", "vm_virtualbox");
+        otherVendorVmVirtualbox.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVirtualbox, otherVendorVmVirtualbox));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle");
+        item.setVersion("7.0.14");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:oracle:virtualbox:7.0.14:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void poolRelativeRescueDoesNotLetASupersetCandidateOutrankAnAnchorWhenCoverageIsntContradicted() {
+        // Backlog item 345 REVISE (senior review 2026-09-05): the same VirtualBox fixture as
+        // exactSlugMatchIsSuppressedForAStaleSameVendorDuplicateThatVersionCoverageContradicts above,
+        // but oracle:virtualbox's own max cataloged major raised from 3 to 7, so item version 7.0.14's
+        // major (7) no longer exceeds 7*VERSION_COVERAGE_IMPLAUSIBILITY_RATIO(2)=14 either way — both
+        // candidates now get versionCoverageRank COVERS, so item 308's own suppression condition 1
+        // (the anchor's version coverage must be contradicted) never fires. This is the safety net for
+        // item 345's own new admission-time rescue: rescuing oracle:vm_virtualbox into the ranked pool
+        // must not, by itself, let it outrank the exact-slug-match anchor in the normal case where
+        // nothing actually contradicts the anchor's own version coverage — exact-slug-match still sits
+        // ahead of everything else in rankCpeCandidates's own key chain. Asserting cpeCandidateCount
+        // alongside the chosen CPE proves the rescue itself still happened (both candidates reached the
+        // ranked pool) even though the ranking outcome didn't change.
+        CpeDictionaryEntry oracleVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:virtualbox:6.1.38:*:*:*:*:*:*:*", "virtualbox");
+        oracleVirtualbox.setMaxCatalogedMajor(7);
+        CpeDictionaryEntry oracleVmVirtualbox =
+                cpeEntry("cpe:2.3:a:oracle:vm_virtualbox:7.0.6:*:*:*:*:*:*:*", "vm_virtualbox");
+        oracleVmVirtualbox.setMaxCatalogedMajor(7);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(oracleVirtualbox, oracleVmVirtualbox));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("VirtualBox");
+        item.setVendor("Oracle");
+        item.setVersion("7.0.14");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:oracle:virtualbox:7.0.14:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+    }
+
+    @Test
+    void prefersAParentProductCandidateOverASiblingDerivedProductWithAnInflatedRowCount() {
+        // Backlog item 299 case 5 (closed-mode golden-300 regression, 2026-09-05): "Microsoft Visual
+        // Studio" 17.10 ties microsoft:visual_studio (correct) and microsoft:visual_studio_code
+        // (wrong, a distinct derived product) on every earlier key — both contain "microsoft"/
+        // "visual"/"studio" in their own product/title text, both vendor-agree, and both cover the
+        // item's own major version 17 (real dictionary data: visual_studio's own max cataloged major
+        // is 2017 via its own "Microsoft Visual Studio 2017" release-name versioning, and
+        // visual_studio_code's is 2021 via a bundled target_sw=python-scoped extension's calendar
+        // versioning) — leaving only K3 (raw catalogued-row-count) to decide, and
+        // visual_studio_code's count is inflated into the thousands by exactly that scoped
+        // extension sharing its vendor:product identity. isDerivedFromSiblingCandidate catches this
+        // before K3 ever gets a chance to pick the contaminated pair: visual_studio_code's own
+        // product-slug tokens ("visual", "studio", "code") start with visual_studio's own tokens
+        // ("visual", "studio") plus one extra trailing word — a sibling still present in the very
+        // same ranked pool — so only visual_studio_code is flagged as derived.
+        CpeDictionaryEntry visualStudio = cpeEntry("cpe:2.3:a:microsoft:visual_studio:6.0:*:*:*:*:*:*:*", "visual_studio");
+        visualStudio.setTitle("Microsoft Visual Studio");
+        visualStudio.setMaxCatalogedMajor(2017);
+        visualStudio.setCatalogedRowCount(36);
+        CpeDictionaryEntry visualStudioCode =
+                cpeEntry("cpe:2.3:a:microsoft:visual_studio_code:1.85.0:*:*:*:*:*:*:*", "visual_studio_code");
+        visualStudioCode.setTitle("Microsoft Visual Studio Code 1.85.0");
+        visualStudioCode.setMaxCatalogedMajor(2021);
+        visualStudioCode.setCatalogedRowCount(4065);
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(visualStudioCode, visualStudio));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Microsoft Visual Studio");
+        item.setVendor("Microsoft");
+        item.setVersion("17.10");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:microsoft:visual_studio:17.10:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void neverPrefersEitherCandidateWhenNeitherProductSlugIsAPrefixOfTheOther() {
+        // Backlog item 299 case 5: two earlier, less pool-relative versions of this fix (a
+        // target_sw-based one, and one that penalized any candidate word absent from the query text)
+        // were each reverted after wrongly introducing a preference between genuinely unrelated,
+        // equally-plausible candidates — e.g. "apache_http_server" vs. "apache_tomcat" for the bare
+        // query "apache" (see ambiguousCpeCandidatesAreDisambiguatedByLlm and its sibling tests,
+        // which deliberately leave that pair as a tie for Tier2 AI, or list order with no AI, to
+        // settle). isDerivedFromSiblingCandidate must stay silent here too: neither
+        // "widget_tool"'s nor "widget_gadget"'s tokens are a prefix of the other's, so this key ties
+        // (false/false) and the pre-existing stable list-order/no-AI-key degrade decides, exactly as
+        // it always has for a genuinely ambiguous pair. Item vendor deliberately left blank (bare
+        // "Widget" query): a non-blank vendor would trip the unrelated backlog item 89 P3 leftover
+        // -vendor-explanation rule for this single-token query, which isn't what this test is about.
+        CpeDictionaryEntry widgetTool = cpeEntry("cpe:2.3:a:acme:widget_tool:1.0.0:*:*:*:*:*:*:*", "widget_tool");
+        CpeDictionaryEntry widgetGadget = cpeEntry("cpe:2.3:a:acme:widget_gadget:1.0.0:*:*:*:*:*:*:*", "widget_gadget");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(widgetTool, widgetGadget));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("Widget"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:widget_tool:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(2);
+    }
+
+    @Test
+    void prefersTheBaseProductCandidateWhenItsOwnTokensAreAStrictPrefixOfASiblingsInTheSamePool() {
+        // Backlog item 299 case 5: a second, independent (non-Visual-Studio) fixture directly
+        // exercising isDerivedFromSiblingCandidate's core rule in isolation, with every earlier key
+        // deliberately tied (query includes the vendor word so exactSlugMatch is false for both, and
+        // both candidates' titles account for every query token so K1 ties at 0 too) — "widget_tool"'s
+        // own tokens ("widget", "tool") are a strict prefix of "widget_tool_pro"'s ("widget", "tool",
+        // "pro"), so only the derived one is demoted, mirroring the real HashiCorp Terraform vs.
+        // Terraform Enterprise shape this same key also happens to resolve correctly.
+        CpeDictionaryEntry widgetTool = cpeEntry("cpe:2.3:a:acme:widget_tool:1.0.0:*:*:*:*:*:*:*", "widget_tool");
+        widgetTool.setTitle("Acme Widget Tool");
+        CpeDictionaryEntry widgetToolPro = cpeEntry("cpe:2.3:a:acme:widget_tool_pro:1.0.0:*:*:*:*:*:*:*", "widget_tool_pro");
+        widgetToolPro.setTitle("Acme Widget Tool Pro");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(widgetToolPro, widgetTool));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("Acme Widget Tool");
+        item.setVendor("Acme");
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:widget_tool:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
     void relaxedContainmentPass2NeverFiresWhenTheStrictPassAlreadyFoundACandidate() {
         // Control for the test above: when the strict pass already admits at least one candidate,
         // the relaxed second pass must never run at all — proven by the ordinary no-Claude-key
@@ -1690,6 +2204,66 @@ class Stage1IdentificationServiceTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().getCpeCandidateVariantDerived()).isFalse();
+    }
+
+    @Test
+    void itemVendorContradictingCpeVendorRejectsAMultiTokenCandidateWithUnexplainedTrailingTokens() {
+        // Backlog item 319 (senior review 2026-09-05): "Visual Studio Code Server" (item vendor
+        // "Coder" -- a real Coder code-server install, not a Microsoft product, per
+        // marketplace-extension-fixture.csv's own row 30) previously resolved to the nonexistent
+        // microsoft:visual_studio_code:4.9.3 -- Direction 2's REVISE item 5 trailing-vendor-
+        // explanation check only ever fired for a single-token candidate, and the 3-token candidate
+        // product "visual_studio_code" matched at the very head of the query with nothing preceding
+        // it, so the leftover trailing query token "server" was never checked against anything.
+        // itemVendorContradicts widens that same trailing check to also fire whenever the item's own
+        // vendor ("Coder") actively contradicts the candidate's CPE vendor (microsoft) -- unlike the
+        // existing single-token gate, this fires regardless of candidate token count. Only one
+        // candidate is stubbed here, so the strict containment pass (requireTrailingVendorExplanation
+        // =true) rejecting it also forces plausibleContainmentOnly's own relaxed second pass to run
+        // against the exact same pool, proving the new signal stays unconditional there too (not
+        // gated behind that flag, which would otherwise let the relaxed pass silently re-admit it —
+        // see explainsQuery's own javadoc for why). This intentionally does not (and cannot, by
+        // static logic alone) resolve to the real coder:code-server -- see
+        // MarketplaceExtensionFixtureRecallTest's own class javadoc and the fixture row's
+        // ground_truth_source note for why the fixture's own expected label stays coder:code-server
+        // (a permanent, known static-pipeline miss) while this test only asserts the previous
+        // misresolution is now gone (UNIDENTIFIED, not a nonexistent CPE).
+        CpeDictionaryEntry visualStudioCode =
+                cpeEntry("cpe:2.3:a:microsoft:visual_studio_code:1.99.3:*:*:*:*:-:*:*", "visual_studio_code");
+        visualStudioCode.setTitle("Microsoft Visual Studio Code 1.99.3");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(visualStudioCode));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        ResearchJobItem item = item("Visual Studio Code Server");
+        item.setVendor("Coder");
+
+        assertThat(service(List.of()).identify(item, USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void explicitJetbrainsItemVendorDoesNotContradictTheJetbrainsCpeVendorAndStillMatches() {
+        // Backlog item 319: proves itemVendorContradicts only ever fires on a genuine vendor
+        // mismatch, never merely because the item happens to have a non-blank vendor at all -- an
+        // explicit item vendor "JetBrains" against jetbrains:intellij_idea's own CPE vendor must
+        // still match via containsEitherWay (case-insensitive, same as
+        // onlyLeadingLeftoverWordsAreHeldAgainstACandidateNotTrailingOnes already proves for a blank
+        // item vendor on this exact same candidate/query pair).
+        CpeDictionaryEntry intellij =
+                cpeEntry("cpe:2.3:a:jetbrains:intellij_idea:2023.1:*:*:*:*:*:*:*", "intellij_idea");
+        intellij.setTitle("JetBrains IntelliJ IDEA 2023.1");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(intellij));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("IntelliJ IDEA Community Edition");
+        item.setVendor("JetBrains");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:jetbrains:intellij_idea:1.0.0:*:*:*:*:*:*:*");
     }
 
     @Test
@@ -1742,5 +2316,155 @@ class Stage1IdentificationServiceTest {
         String normalizedQuery = service(List.of()).normalizeForContainment("Notepad++");
 
         assertThat(normalizedEscaped).isEqualTo(normalizedQuery);
+    }
+
+    @Test
+    void exactVendorProductFallbackFiresWhenNoRegistryMatchAndLocalPoolIsEmpty() {
+        // Item 302: the same shape as the real crowdstrike:falcon case this fallback exists for —
+        // findFuzzyMatches (the pg_trgm path) comes back with nothing at all, and there's no registry
+        // match to gate on, so resolveCpeCandidates's exact (vendor, product) pair fallback finds the
+        // row via the composite index instead.
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        CpeDictionaryEntry falcon = cpeEntry("cpe:2.3:a:crowdstrike:falcon:1.0.0:*:*:*:*:*:*:*", "falcon");
+        falcon.setVendor("crowdstrike");
+        when(cpeDictionaryRepository.findByVendorProductPairs(any(), anyInt())).thenReturn(List.of(falcon));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("CrowdStrike Falcon Sensor");
+        item.setVendor("CrowdStrike");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:crowdstrike:falcon:1.0.0:*:*:*:*:*:*:*");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<VendorProductPair>> pairsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(cpeDictionaryRepository).findByVendorProductPairs(pairsCaptor.capture(), anyInt());
+        // Vendor side limited to the item's own vendor text ("crowdstrike"), product side to the
+        // item's own tokenized product name ("crowdstrike", "falcon", "sensor") — never an unrelated
+        // vendor/product pulled from elsewhere.
+        assertThat(pairsCaptor.getValue()).containsExactlyInAnyOrder(
+                new VendorProductPair("crowdstrike", "crowdstrike"),
+                new VendorProductPair("crowdstrike", "falcon"),
+                new VendorProductPair("crowdstrike", "sensor"));
+    }
+
+    @Test
+    void exactVendorProductFallbackDoesNotFireWhenTheLocalPoolAlreadyHasGatedCandidates() {
+        // The fallback must be a last resort, never a widening of an already-nonempty gated pool —
+        // see resolveCpeCandidates's own javadoc.
+        CpeDictionaryEntry gson = cpeEntry("cpe:2.3:a:google:gson:1.0.0:*:*:*:*:*:*:*", "gson");
+        gson.setVendor("google");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(gson));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("gson");
+        item.setVendor("Google");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        verify(cpeDictionaryRepository, never()).findByVendorProductPairs(any(), anyInt());
+    }
+
+    @Test
+    void exactVendorProductFallbackFiresWhenTheRawLocalPoolIsNonemptyButTheTargetSwGateEmptiesIt() {
+        // Item 302 REVISE (senior review 2026-09-05): after moving the fallback into
+        // resolveCpeCandidates, it fires whenever gatedLocalMatches is empty — a strictly wider
+        // condition than "the raw trigram+containment pool was empty", since a nonempty pool can still
+        // be emptied out by the target_sw gate. This candidate passes containment (exact product-slug
+        // match) but is unconditionally rejected by passesTargetSwGate (target_sw=jenkins), so the raw
+        // pool is nonempty while the gated pool is empty — the fallback must still get a chance to run.
+        CpeDictionaryEntry jenkinsScoped = cpeEntry("cpe:2.3:a:acme:widget:1.0.0:*:*:*:*:*:*:*", "widget");
+        jenkinsScoped.setVendor("acme");
+        jenkinsScoped.setTargetSwValues(java.util.Set.of("jenkins"));
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(jenkinsScoped));
+
+        CpeDictionaryEntry exactMatch = cpeEntry("cpe:2.3:a:acme:widget:2.0.0:*:*:*:*:*:*:*", "widget");
+        exactMatch.setVendor("acme");
+        when(cpeDictionaryRepository.findByVendorProductPairs(any(), anyInt())).thenReturn(List.of(exactMatch));
+        stubSaveReturnsArgument();
+
+        ResearchJobItem item = item("widget");
+        item.setVendor("Acme");
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item, USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:acme:widget:1.0.0:*:*:*:*:*:*:*");
+        verify(cpeDictionaryRepository).findByVendorProductPairs(any(), anyInt());
+    }
+
+    @Test
+    void exactVendorProductFallbackIsNeverCalledWhenARegistryMatchAlreadyCoversTheItem() {
+        // Item 302 REVISE (senior review 2026-09-05): the fallback previously lived inside
+        // localCpeLookup, which runs concurrently with the registry fan-out and fed its result into
+        // resolveCpeCandidates as ordinary local matches — reaching the registryEcosystem.isPresent()
+        // early return only AFTER a candidate had already been produced, which could set chosenCpe in
+        // resolveCandidates and flip trustRegistryMatch from true to false for an unconfirmed-version
+        // registry match purely because this fallback manufactured a new, non-null CPE — a real
+        // regression for the IDENTIFIED_REGISTRY bucket (golden-300's 200-row majority). Moving the
+        // fallback behind that guard in resolveCpeCandidates makes it provably unreachable whenever a
+        // registry match exists, regardless of what findByVendorProductPairs would have returned —
+        // stubbed here to return a plausible-looking candidate specifically to prove it is never even
+        // asked for.
+        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("npm", "cobra", "pkg:npm/cobra@1.7.0", new BigDecimal("0.5"), false));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt())).thenReturn(List.of());
+        CpeDictionaryEntry manufactured = cpeEntry("cpe:2.3:a:cobra:cobra:1.0.0:*:*:*:*:*:*:*", "cobra");
+        manufactured.setVendor("cobra");
+        // lenient(): this stub is expected to be unused — that is the whole point of this test — so
+        // Mockito's strict-stubbing check would otherwise fail it as an "unnecessary stubbing".
+        lenient().when(cpeDictionaryRepository.findByVendorProductPairs(any(), anyInt())).thenReturn(List.of(manufactured));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result = service(List.of(npmLookup)).identify(item("cobra"), USER_ID);
+
+        // Same outcome as unconfirmedVersionRegistryMatchIsStillUsedWhenNoCpeCorroborationExists —
+        // the weak registry match is trusted, no manufactured CPE rides along.
+        assertThat(result).isPresent();
+        assertThat(result.get().getEcosystem()).isEqualTo("npm");
+        assertThat(result.get().getPackageName()).isEqualTo("cobra");
+        assertThat(result.get().getCpe()).isNull();
+        verify(cpeDictionaryRepository, never()).findByVendorProductPairs(any(), anyInt());
+    }
+
+    @Test
+    void exactVendorProductFallbackCapsGeneratedPairsToAnEightByEightCrossProduct() {
+        // Item 302 / MAX_EXACT_MATCH_TOKENS_PER_SIDE: 10 vendor tokens x 10 product tokens would
+        // naively be 100 pairs; only the first 8 of each side may contribute, bounding the
+        // cross-product to 64 pairs and excluding the 9th/10th token on either side entirely.
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findByVendorProductPairs(any(), anyInt())).thenReturn(List.of());
+
+        String tenVendorWords = "v1 v2 v3 v4 v5 v6 v7 v8 v9 v10";
+        String tenProductWords = "p1 p2 p3 p4 p5 p6 p7 p8 p9 p10";
+        ResearchJobItem item = item(tenProductWords);
+        item.setVendor(tenVendorWords);
+
+        service(List.of()).identify(item, USER_ID);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<VendorProductPair>> pairsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(cpeDictionaryRepository).findByVendorProductPairs(pairsCaptor.capture(), anyInt());
+        List<VendorProductPair> pairs = pairsCaptor.getValue();
+
+        assertThat(pairs).hasSizeLessThanOrEqualTo(64);
+        assertThat(pairs).noneMatch(p -> "v9".equals(p.vendor()) || "v10".equals(p.vendor())
+                || "p9".equals(p.product()) || "p10".equals(p.product()));
     }
 }

@@ -15,6 +15,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Controller;
@@ -33,6 +34,7 @@ import org.springframework.web.bind.annotation.PostMapping;
  */
 @Controller
 @RequiredArgsConstructor
+@Slf4j
 public class SecretsController {
 
     // Matches the user_secrets.provider CHECK constraint (V1__init.sql) — validated here too so
@@ -88,11 +90,39 @@ public class SecretsController {
         return "redirect:/settings/secrets?deleted";
     }
 
+    /** Placeholder shown in the provider table cell in place of a masked key when decryption fails
+     *  (task-backlog item 279) — e.g. a key registered before the 2026-08-28 encryption key
+     *  rotation (see task-backlog item 248's own note on the same root cause). Deliberately says
+     *  "re-register" rather than anything more technical: this is the exact screen the affected
+     *  user needs to reach to fix it themselves, by deleting and re-saving the key. */
+    private static final String DECRYPT_FAILED_PLACEHOLDER = "復号できません（再登録してください）";
+
+    /**
+     * Never lets a decrypt failure escape to {@link #list}'s caller (task-backlog item 279,
+     * senior-reviewer REVISE on PR#188): before this, an undecryptable key (e.g. one registered
+     * before the 2026-08-28 encryption key rotation — same root cause as task-backlog item 248's
+     * {@code UserApiKeyService#getNvdApiKey} fix) made {@code GET /settings/secrets} itself throw an
+     * unhandled exception, since {@link #list} calls this once per configured provider (Claude/NVD).
+     * That's the exact screen the affected user needs to open to fix the problem (delete and
+     * re-register the key) — so failing the whole page over it locked them out of their own fix.
+     * Falls back to {@link #DECRYPT_FAILED_PLACEHOLDER} instead, logging the failure at WARN with
+     * only {@code userId}/{@code provider} (never the ciphertext, key material, or exception
+     * message) so an operator can still notice the pattern without any secret material reaching the
+     * logs.
+     */
     private String maskOrNull(UserSecret secret) {
         if (secret == null) {
             return null;
         }
-        String plaintext = secretEncryptionService.decrypt(secret.getEncryptedKey(), secret.getUserId(), secret.getProvider());
+        String plaintext;
+        try {
+            plaintext = secretEncryptionService.decrypt(secret.getEncryptedKey(), secret.getUserId(), secret.getProvider());
+        } catch (Exception e) {
+            log.warn("Failed to decrypt {} secret for userId={} while rendering /settings/secrets "
+                            + "-- showing a re-register placeholder instead of failing the whole page",
+                    secret.getProvider(), secret.getUserId());
+            return DECRYPT_FAILED_PLACEHOLDER;
+        }
         int visibleTail = Math.min(4, plaintext.length());
         return "•".repeat(Math.max(0, plaintext.length() - visibleTail)) + plaintext.substring(plaintext.length() - visibleTail);
     }

@@ -4,6 +4,7 @@ import com.vulncheck.app.entity.CpeDictionaryEntry;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
+import com.vulncheck.app.repository.CpeDictionaryRepositoryCustom;
 import com.vulncheck.app.repository.IdentifiedProductRepository;
 import com.vulncheck.app.service.Stage1AiArbitration.DisambiguateResponse;
 import com.vulncheck.app.service.nvd.CpeNameVariantCache;
@@ -87,6 +88,20 @@ public class Stage1IdentificationService {
      */
     private static final int MAX_NAME_VARIANT_QUERIES_PER_ITEM = 3;
     /**
+     * Item 302: how many of the item's own leading tokenized words (vendor side and product-name
+     * side, each capped independently) feed the exact {@code (vendor, product)} pair fallback in
+     * {@link #localCpeLookup} ({@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryCustom#findByVendorProductPairs}). A naive
+     * full cross-product has no natural bound of its own: {@code product} is {@code VARCHAR(255)},
+     * so a pathological single-character-token-separated string could tokenize into ~128 words on
+     * either side, which would be up to ~16,000 pairs (128 x 125) — one bind parameter pair each — in
+     * the worst case. Capping each side to this many tokens before combining bounds the cross-product
+     * at {@value #MAX_EXACT_MATCH_TOKENS_PER_SIDE}^2 = 64 pairs, comfortably covering every real
+     * product name (which rarely exceeds a handful of words) while keeping the query's bind-parameter
+     * count small regardless of adversarial/malformed CSV input.
+     */
+    private static final int MAX_EXACT_MATCH_TOKENS_PER_SIDE = 8;
+    /**
      * Hard cap on the initialism-expansion anchor search ({@link #expandLeadingInitialism}), a
      * left-anchored regex search against the {@code product} column (see {@link
      * com.vulncheck.app.repository.CpeDictionaryRepositoryCustom#findByLeadingInitialismMatch} for
@@ -140,6 +155,48 @@ public class Stage1IdentificationService {
             "packagist", "php",
             "pub", "dart",
             "nuget", ".net");
+
+    /**
+     * Backlog item 303 (task B, item 297 senior-reviewer design): {@code install_url} marketplace
+     * hostname -&gt; CPE {@code target_sw} value. Unlike {@link #ECOSYSTEM_TO_TARGET_SW} (derived
+     * from a registry match), this is derived straight from the CSV's own {@code install_url}
+     * column — the only signal available at all for the marketplace-extension ecosystems (VS
+     * Code/Chrome/JetBrains/Firefox extensions), which have no package-registry ecosystem to route
+     * through in the first place. Item 297's tester findings: {@code cpe_dictionary} already has
+     * 4,065 VS Code extension / 342 Chrome extension / 286 JetBrains plugin rows, structurally
+     * unreachable under the pre-existing {@link #passesTargetSwGate} design because it hard-rejects
+     * any target_sw-scoped candidate whenever there's no registry match at all.
+     *
+     * <p>Matched by trailing-label host suffix (see {@link #declaredTargetSwFromInstallUrl}), never
+     * substring — a naive substring check would be fooled by a spoofed URL like {@code
+     * https://evil.com/marketplace.visualstudio.com/...}, where the real marketplace hostname lives
+     * in the PATH of an unrelated host, not its actual authority.
+     *
+     * <p>{@code chromewebstore.google.com} is the current (2026) Chrome Web Store hostname; the
+     * older {@code chrome.google.com/webstore} URL shape needs a path-prefix check too (handled
+     * separately in {@link #declaredTargetSwFromInstallUrl}) since {@code chrome.google.com} alone
+     * isn't specific enough to a webstore listing to declare a platform from the host alone.
+     */
+    /** The {@code target_sw} value for a Chrome extension — pulled out as its own constant (senior
+     *  -reviewer REVISE on PR#229) since both {@link #INSTALL_URL_HOST_TO_TARGET_SW}'s current-host
+     *  entry and {@link #declaredTargetSwFromInstallUrl}'s legacy-host-shape handling need to agree
+     *  on the exact same value; a literal string in both places would be a silent-drift risk. */
+    private static final String CHROME_TARGET_SW = "chrome";
+
+    private static final java.util.Map<String, String> INSTALL_URL_HOST_TO_TARGET_SW = java.util.Map.of(
+            "marketplace.visualstudio.com", "visual_studio_code",
+            "chromewebstore.google.com", CHROME_TARGET_SW,
+            "plugins.jetbrains.com", "jetbrains",
+            "addons.mozilla.org", "firefox");
+
+    /** Legacy Chrome Web Store host — see {@link #INSTALL_URL_HOST_TO_TARGET_SW}'s own javadoc for
+     *  why this needs a path-prefix check too, rather than a bare host-suffix map entry. */
+    private static final String CHROME_WEBSTORE_LEGACY_HOST = "chrome.google.com";
+    /** Compared against the URI path with segment-boundary awareness (see {@link
+     *  #declaredTargetSwFromInstallUrl}'s own use of this) — never a bare {@code startsWith}, which
+     *  would also match an unrelated path like {@code /webstoreEVIL/x} or {@code /webstore-foo}
+     *  (senior-reviewer REVISE on PR#229, measured live). */
+    private static final String CHROME_WEBSTORE_LEGACY_PATH_PREFIX = "/webstore";
 
     /**
      * REVISE item 2 (senior review, job 37 root-cause): {@code target_sw} values that scope a CPE to
@@ -210,7 +267,7 @@ public class Stage1IdentificationService {
         Optional<String> registryEcosystem = registryResolution.match().map(RegistryMatch::ecosystem);
         Optional<String> registryPackageName = registryResolution.match().map(RegistryMatch::packageName);
         CpeCandidateResult cpeCandidateResult = resolveCpeCandidates(item.getVendor(), item.getProductName(), userId,
-                registryEcosystem, registryPackageName, localCpeMatches, item.getVersion());
+                registryEcosystem, registryPackageName, localCpeMatches, item.getVersion(), item.getInstallUrl());
 
         Optional<IdentifiedProduct> result = (registryResolution.match().isEmpty() && cpeCandidateResult.candidates().isEmpty())
                 ? aiArbitration.tryTier3(item, userId, this::fuzzyMatchCpe, this::resolveCandidates)
@@ -428,7 +485,10 @@ public class Stage1IdentificationService {
             // itself is being discarded as untrustworthy, that ecosystem context goes with it, so the
             // CPE must be re-checked against a bare no-registry-context gate before it's allowed to
             // survive on its own.
-            if (chosenCpe != null && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), ""))) {
+            // installUrl deliberately omitted (null) here too — this re-check exists purely to
+            // strip the now-distrusted registry match's own ecosystem context (Round-5 fix's own
+            // scope), not to touch any other declared-platform source.
+            if (chosenCpe != null && !passesTargetSwGate(chosenCpe, TargetSwContext.from(Optional.empty(), "", null))) {
                 log.info("Dropping CPE {} for item {} — it only passed the target_sw gate via the "
                         + "now-distrusted registry match's ecosystem context, so it cannot stand on its own",
                         chosenCpe.getCpeString(), item.getId());
@@ -551,7 +611,7 @@ public class Stage1IdentificationService {
             ResearchJobItem item, Long userId, String vendorForCpeRescue, String productNameForCpeRescue) {
         CpeCandidateResult rescueResult =
                 fuzzyMatchCpe(vendorForCpeRescue, productNameForCpeRescue, userId, Optional.empty(), Optional.empty(),
-                        item.getVersion());
+                        item.getVersion(), item.getInstallUrl());
         List<CpeDictionaryEntry> rescueCandidates = rescueResult.candidates();
         if (rescueCandidates.isEmpty()) {
             return null;
@@ -652,7 +712,9 @@ public class Stage1IdentificationService {
      */
     private CpeDictionaryEntry selectFallbackCpeCandidateAfterRegistryDistrust(
             CpeDictionaryEntry discardedCpe, List<CpeDictionaryEntry> cpeCandidates) {
-        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "");
+        // installUrl deliberately omitted (null) — same "bare (no-ecosystem-context) gate" scope as
+        // this method's own javadoc, item 176's fix, unrelated to item 303's install_url signal.
+        TargetSwContext bareContext = TargetSwContext.from(Optional.empty(), "", null);
         for (CpeDictionaryEntry candidate : cpeCandidates) {
             if (candidate == discardedCpe) {
                 continue;
@@ -780,9 +842,10 @@ public class Stage1IdentificationService {
      * ranking preference — likewise empty whenever there's no registry match to draw one from.
      */
     private CpeCandidateResult fuzzyMatchCpe(String vendor, String productName, Long userId,
-            Optional<String> registryEcosystem, Optional<String> registryPackageName, String itemVersion) {
+            Optional<String> registryEcosystem, Optional<String> registryPackageName, String itemVersion,
+            String installUrl) {
         return resolveCpeCandidates(vendor, productName, userId, registryEcosystem, registryPackageName,
-                localCpeLookup(vendor, productName, itemVersion), itemVersion);
+                localCpeLookup(vendor, productName, itemVersion), itemVersion, installUrl);
     }
 
     /** Just the local-dictionary half of {@link #fuzzyMatchCpe} — DB-only, no network, literal
@@ -821,6 +884,57 @@ public class Stage1IdentificationService {
         List<CpeDictionaryEntry> ranked = rankCpeCandidates(
                 vendor, productName, containment.candidates(), Optional.empty(), CPE_CANDIDATE_POOL, itemVersion);
         return new LocalCpeMatches(ranked, containment.usedRelaxedPass());
+    }
+
+    /**
+     * Item 302 fallback: generates {@code (vendor, product)} pairs from the plain cross-product of
+     * the item's own tokenized vendor text and tokenized product-name text, then looks them up via
+     * the {@code (vendor, product)} composite index ({@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryCustom#findByVendorProductPairs}'s own
+     * javadoc has the full exact-vs-similarity rationale).
+     *
+     * <p>Vendor side is deliberately limited to tokens drawn from this item's own text (vendor field
+     * only) — not, say, every vendor the dictionary happens to know about — because pairing an
+     * unrelated vendor with a real product token would let this fallback manufacture candidates with
+     * no connection to the item at all (e.g. an unrelated vendor whose own product catalog happens to
+     * contain one of this item's product-name words). Both sides are capped to {@value
+     * #MAX_EXACT_MATCH_TOKENS_PER_SIDE} tokens (see that constant's javadoc for the worst-case
+     * combinatorics this guards against) before combining, bounding the cross-product to at most
+     * {@value #MAX_EXACT_MATCH_TOKENS_PER_SIDE}^2 = 64 pairs.
+     *
+     * <p>Called from {@link #resolveCpeCandidates} — deliberately NOT from {@link #localCpeLookup}
+     * (REVISE, senior review 2026-09-05): {@code localCpeLookup} runs concurrently with the registry
+     * fan-out, before {@code registryEcosystem} is known, and its own contract (see its javadoc) is
+     * "literal matches only, DB-only, no network" — every other last-resort search (live NVD,
+     * name-variant) already lives in {@code resolveCpeCandidates} specifically so it sits behind that
+     * method's {@code registryEcosystem.isPresent()} guard, which skips the live/last-resort searches
+     * entirely once a registry match already covers the item. An earlier revision of this fallback
+     * lived inside {@code localCpeLookup} itself and bypassed that guard, which could flip {@code
+     * trustRegistryMatch} (see {@code identify}'s own comment on that flag) from true to false for an
+     * already-identified, version-unconfirmed {@code IDENTIFIED_REGISTRY} item purely because this
+     * fallback manufactured a new, non-null {@code chosenCpe} for it — a real regression risk for
+     * exactly the registry-matched bucket. Calling this only from {@code resolveCpeCandidates}, after
+     * its own registry-ecosystem guard, makes that class of regression structurally unreachable: this
+     * method is simply never called at all whenever a registry match exists.
+     */
+    private List<CpeDictionaryEntry> exactVendorProductMatches(String vendor, String productName) {
+        List<String> vendorTokens = tokenize(normalizeForContainment(vendor));
+        List<String> productTokens = tokenize(normalizeForContainment(productName));
+        if (vendorTokens.isEmpty() || productTokens.isEmpty()) {
+            return List.of();
+        }
+        List<String> cappedVendorTokens =
+                vendorTokens.subList(0, Math.min(vendorTokens.size(), MAX_EXACT_MATCH_TOKENS_PER_SIDE));
+        List<String> cappedProductTokens =
+                productTokens.subList(0, Math.min(productTokens.size(), MAX_EXACT_MATCH_TOKENS_PER_SIDE));
+
+        java.util.LinkedHashSet<CpeDictionaryRepositoryCustom.VendorProductPair> pairs = new java.util.LinkedHashSet<>();
+        for (String vendorToken : cappedVendorTokens) {
+            for (String productToken : cappedProductTokens) {
+                pairs.add(new CpeDictionaryRepositoryCustom.VendorProductPair(vendorToken, productToken));
+            }
+        }
+        return cpeDictionaryRepository.findByVendorProductPairs(List.copyOf(pairs), CPE_CANDIDATE_POOL);
     }
 
     /** Backlog item 89 P2: pairs {@link #localCpeLookup}'s ranked candidate list with whether {@link
@@ -1142,11 +1256,46 @@ public class Stage1IdentificationService {
      *       vendorAgrees} is true for both), leaving only which pair NVD has actually catalogued 80
      *       rows for versus 1 to break the tie — a real coin-flip on {@code id} otherwise.</li>
      * </ul>
+     *
+     * <p>Backlog item 299 case 5 (closed-mode golden-300 regression, 2026-09-05): one more key,
+     * {@link #isDerivedFromSiblingCandidate} (ascending, base-product-first), inserted immediately
+     * before K3 — see that method's own javadoc for the "Microsoft Visual Studio" vs. {@code
+     * visual_studio_code} parent-product/derived-product mixup this closes (every earlier key ties,
+     * so K3's raw catalog-volume tie-break alone decided it wrongly) and for why two earlier, less
+     * pool-relative versions of this fix were each tried and reverted after measuring real
+     * regressions against the real dev DB's golden-300 recall. Sitting right before K3 means it only
+     * ever overrides a tie K3 would otherwise settle for the wrong reason — every earlier key
+     * (exact-slug, target_sw match, K1, K2, vendorAgrees) still decides first when it can, exactly
+     * like K3 always has.
      * Performance (required by the same backlog item): every key above is now computed exactly once
      * per candidate, into a {@link RankedCandidate} record, before sorting — not recomputed inside
      * the {@link java.util.Comparator} on every one of the O(n log n) comparisons the way the
      * pre-existing keys always were. K1 in particular re-tokenizes text, so leaving it comparator-side
      * would have made the existing re-normalization cost newly visible at this candidate-pool size.
+     * {@link #isDerivedFromSiblingCandidate}'s own O(n²) pairwise scan (REVISE, senior review, PR
+     * #215) is held to this exact same "computed exactly once per candidate" invariant even though it
+     * inherently needs every candidate's product-slug tokens, not just its own: {@code
+     * rankCpeCandidates} itself tokenizes each candidate's product slug exactly once into {@code
+     * poolTokens} *before* the pairwise scan runs, so the O(n²) part of that method's own cost is pure
+     * list lookups and token-list comparisons, never re-tokenization — see that method's own javadoc
+     * for the measured 298μs-vs-27μs-per-call gap this precomputation closes.
+     *
+     * <p>Backlog item 308 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3): the
+     * exact-slug-match key itself (the very first one above) is left in its own unconditional top
+     * spot, but is now narrowed by {@link #isOutrankedByCurrentCatalogedSameVendorDuplicate} for one
+     * specific shape — a candidate whose own version coverage is concretely contradicted (K2's own
+     * NOT_COVERS(2), never merely "no evidence") while a *same-CPE-vendor* sibling elsewhere in this
+     * very pool both covers the item's version (K2's COVERS(0)) and is a longer slug this candidate's
+     * own slug is contained in. That is exactly "NVD cataloged the same real product twice, once under
+     * an old short slug and once under a current long slug" ({@code oracle:virtualbox}, 8 rows, max
+     * cataloged major 3, versus {@code oracle:vm_virtualbox}, 270 rows, max cataloged major 7 —
+     * backlog item 346's outlier guard corrects this from a raw 71, which traces to a single broken
+     * NVD version string "71.6" among those 270 rows, not a real major-71 release — for VirtualBox
+     * 7.0.14) — narrow enough that it can only ever fire for a genuine same-vendor
+     * duplicate-cataloging pair, never for an ordinary exact-slug tie like Pillow's own regression test
+     * ({@code exactProductSlugMatchOutranksATargetSwMatchingButDifferentlyNamedCandidate}), where
+     * neither candidate ever reaches K2's NOT_COVERS(2) in the first place. See that method's own
+     * javadoc for the full four-condition test.
      */
     private List<CpeDictionaryEntry> rankCpeCandidates(String vendor, String exactMatchQuery,
             List<CpeDictionaryEntry> candidates, Optional<String> mappedTargetSw, int limit, String itemVersion) {
@@ -1181,16 +1330,46 @@ public class Stage1IdentificationService {
 
         String normalizedVendor = normalizeForContainment(vendor);
         String normalizedExactMatchQuery = normalizeForContainment(exactMatchQuery);
-        List<RankedCandidate> ranked = bestPerProduct.values().stream()
-                .map(entry -> new RankedCandidate(
-                        entry,
-                        exactProductSlugMatch(normalizedExactMatchQuery, entry),
-                        targetSwMatchesEcosystem(entry, mappedTargetSw),
-                        unexplainedQueryTokenCount(normalizedExactMatchQuery, entry),
-                        versionCoverageRank(entry, itemVersion),
-                        versionCoverageIsPlausible(entry, itemVersion),
-                        vendorAgrees(normalizedVendor, entry),
-                        catalogedRowCount(entry)))
+        // REVISE (senior review, PR #215, backlog item 89's own "computed exactly once per candidate"
+        // invariant): poolTokens is built here — once per candidate, not once per pairwise comparison
+        // — so isDerivedFromSiblingCandidate below never re-tokenizes anything; see that method's own
+        // javadoc for why this precomputation, not the pairwise scan itself, is what the invariant is
+        // actually about.
+        List<CpeDictionaryEntry> poolList = List.copyOf(bestPerProduct.values());
+        List<List<String>> poolTokens = poolList.stream()
+                .map(entry -> tokenize(normalizeForContainment(entry.getProduct())))
+                .toList();
+        // Backlog item 308: precomputed once per candidate, same "computed exactly once" invariant as
+        // poolTokens above — reused only by isOutrankedByCurrentCatalogedSameVendorDuplicate's own
+        // pairwise scan below, never recomputed inside it. versionCoverageRank in particular used to
+        // be computed inline per-RankedCandidate below; hoisting it here lets the suppression check
+        // see every candidate's rank before any RankedCandidate exists.
+        List<String> poolNormalizedProductSlugs = poolList.stream()
+                .map(entry -> normalizeForContainment(entry.getProduct()))
+                .toList();
+        List<String> poolCpeVendors = poolList.stream()
+                .map(entry -> normalizeForContainment(cpeVendorOf(entry)))
+                .toList();
+        List<Integer> poolVersionCoverageRanks = poolList.stream()
+                .map(entry -> versionCoverageRank(entry, itemVersion))
+                .toList();
+        List<RankedCandidate> ranked = java.util.stream.IntStream.range(0, poolList.size())
+                .mapToObj(i -> {
+                    CpeDictionaryEntry entry = poolList.get(i);
+                    boolean exactSlugMatch = exactProductSlugMatch(normalizedExactMatchQuery, entry)
+                            && !isOutrankedByCurrentCatalogedSameVendorDuplicate(
+                                    i, poolNormalizedProductSlugs, poolCpeVendors, poolVersionCoverageRanks);
+                    return new RankedCandidate(
+                            entry,
+                            exactSlugMatch,
+                            targetSwMatchesEcosystem(entry, mappedTargetSw),
+                            unexplainedQueryTokenCount(normalizedExactMatchQuery, entry),
+                            poolVersionCoverageRanks.get(i),
+                            versionCoverageIsPlausible(entry, itemVersion),
+                            vendorAgrees(normalizedVendor, entry),
+                            isDerivedFromSiblingCandidate(poolTokens.get(i), poolTokens, i),
+                            catalogedRowCount(entry));
+                })
                 .toList();
         // Stable sort: preserves the underlying trigram ranking within each group (RankedCandidate
         // is built directly off bestPerProduct.values()'s own already-ordered stream), so this only
@@ -1210,6 +1389,7 @@ public class Stage1IdentificationService {
                         // out of scope for this fix.
                         .thenComparing(c -> c.versionPlausible() ? 0 : 1)
                         .thenComparing(c -> c.vendorAgrees() ? 0 : 1)
+                        .thenComparing(c -> c.derivedFromSiblingCandidate() ? 1 : 0)
                         .thenComparing(java.util.Comparator.comparingInt(RankedCandidate::catalogedRowCount).reversed()))
                 .limit(limit)
                 .map(RankedCandidate::entry)
@@ -1228,6 +1408,7 @@ public class Stage1IdentificationService {
             int versionCoverageRank,
             boolean versionPlausible,
             boolean vendorAgrees,
+            boolean derivedFromSiblingCandidate,
             int catalogedRowCount) {
     }
 
@@ -1266,6 +1447,15 @@ public class Stage1IdentificationService {
      * trails a few majors behind is exactly the common, innocent case this ratio guard exists to
      * keep plausible, reserving an actual demotion for when the item's version is implausibly far
      * beyond anything ever catalogued for that (vendor, product) pair.
+     *
+     * <p>Backlog item 346: {@code maxCatalogedMajor} itself is already outlier-guarded by the
+     * repository before it ever reaches here, regardless of which repository method found the
+     * candidate — see {@link com.vulncheck.app.repository.CpeDictionaryRepositoryImpl
+     * #outlierGuardedAggregateSql}'s own javadoc for the two rules that keep a single broken NVD
+     * version string (or a minority date-formatted one) from inflating it, applied identically by
+     * both {@code collect} (the fuzzy-match path) and {@code findByVendorProductPairs} (the item 302
+     * exact-match fallback). This method has no additional outlier handling of its own to do; it
+     * trusts {@code maxCatalogedMajor} as already being the credible highest cataloged major.
      */
     private boolean versionCoverageIsPlausible(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
@@ -1416,6 +1606,12 @@ public class Stage1IdentificationService {
      * competitor with zero catalog history) is ranked {@code NOT_COVERS(2)}; "no evidence" and
      * "trails but plausible" both share {@code UNKNOWN(1)}, exactly like {@code
      * versionCoverageIsPlausible} itself treats them.
+     *
+     * <p>Backlog item 346: {@code maxCatalogedMajor} is already outlier-guarded by the repository
+     * before it ever reaches here, regardless of which repository method found the candidate — see
+     * {@link #versionCoverageIsPlausible}'s own javadoc and {@link
+     * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#outlierGuardedAggregateSql}'s javadoc
+     * for the details.
      */
     private int versionCoverageRank(CpeDictionaryEntry entry, String itemVersion) {
         Integer maxCatalogedMajor = entry.getMaxCatalogedMajor();
@@ -1444,6 +1640,139 @@ public class Stage1IdentificationService {
     private int catalogedRowCount(CpeDictionaryEntry entry) {
         Integer count = entry.getCatalogedRowCount();
         return count == null ? 0 : count;
+    }
+
+    /**
+     * Backlog item 299 case 5 (closed-mode golden-300 regression, 2026-09-05): whether some *other*
+     * candidate still in the same ranked {@code pool} is a parent product of {@code entry} — i.e.
+     * {@code entry}'s own normalized product-slug tokens start with that other candidate's tokens,
+     * plus at least one extra trailing word. Every earlier key ties for the real case this exists to
+     * fix — "Microsoft Visual Studio" 17.10 against {@code microsoft:visual_studio} (correct) and
+     * {@code microsoft:visual_studio_code} (wrong, a derived product bundled under the same
+     * vendor:product identity as one of its own extensions): both contain "visual"/"studio" so K1 is
+     * 0 for both, and both happen to cover the item's own major version 17 in their cataloged history
+     * (confirmed live: {@code visual_studio_code}'s own rows include a target_sw=python-scoped
+     * bundled extension catalogued under a "2020.x"/"2021.x" calendar version scheme that numerically
+     * covers 17) — leaving K3's raw catalogued-row-count to decide it wrongly, since {@code
+     * visual_studio_code}'s count is inflated into the thousands by exactly that same scoped
+     * extension. {@code visual_studio}'s own tokens ({@code ["visual", "studio"]}) are a strict
+     * prefix of {@code visual_studio_code}'s ({@code ["visual", "studio", "code"]}), so this method
+     * returns {@code true} only for the derived one, letting it be demoted immediately before K3.
+     *
+     * <p>Deliberately a *pairwise, pool-relative* check rather than a per-candidate comparison
+     * against the query text — two earlier, non-relative versions of this fix were each measured
+     * against the real dev DB's golden-300 recall and reverted for introducing new regressions on
+     * genuinely unrelated ties: (1) a {@code target_sw}-set-based version treated legitimate
+     * deployment/platform tags ({@code rt} for Windows RT, {@code aws}, {@code
+     * pivotal_cloud_foundry}) as evidence of a bundled sub-product, wrongly demoting Microsoft Office,
+     * HashiCorp Terraform and Pivotal RabbitMQ; (2) a version that penalized any candidate with a
+     * product-slug word absent from the query text wrongly introduced a preference between {@code
+     * apache_http_server} and {@code apache_tomcat} for the bare query "apache" — two genuinely
+     * different, unrelated products (neither's tokens are a prefix of the other's) that {@code
+     * ambiguousCpeCandidatesAreDisambiguatedByLlm} and its sibling tests deliberately leave as a tie
+     * for Tier2 AI (or list-order, with no AI) to break, not this key. Restricting to an actual
+     * token-prefix relationship *within the same candidate pool* only ever fires for the specific
+     * parent-product/derived-product shape this backlog item is about, leaving every other tie
+     * (including genuinely unrelated same-vendor products, and identical-slug pairs like RabbitMQ's
+     * {@code pivotal_software}/{@code vmware} renaming) to whichever later key already decided them.
+     *
+     * <p>REVISE (senior review, PR #215): takes each candidate's own already-tokenized product slug
+     * ({@code ownTokens}) plus the whole pool's own precomputed token lists ({@code poolTokens},
+     * built once by {@link #rankCpeCandidates} before this method is ever called) and this
+     * candidate's own index into that list ({@code ownIndex}, used only to skip comparing a
+     * candidate against itself) rather than re-tokenizing every candidate's product slug on every one
+     * of the O(n²) pairwise comparisons this method's own scan requires — measured live (PR #215
+     * review): re-tokenizing per comparison cost ~298μs/call against a 40-candidate pool versus
+     * ~27μs/call precomputed, and the gap is quadratic in {@value #CPE_CANDIDATE_POOL} (a precision
+     * -tuning knob, not a constant this method can assume stays small). Index-based self-exclusion
+     * also removes the previous reference-identity ({@code other == entry}) dependency.
+     */
+    private boolean isDerivedFromSiblingCandidate(List<String> ownTokens, List<List<String>> poolTokens, int ownIndex) {
+        for (int i = 0; i < poolTokens.size(); i++) {
+            if (i == ownIndex) {
+                continue;
+            }
+            if (isStrictPrefix(poolTokens.get(i), ownTokens)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code prefix} is a non-empty, strictly shorter leading run of {@code whole} — used
+     *  only by {@link #isDerivedFromSiblingCandidate} to detect a genuine parent-product/derived
+     *  -product token relationship, never a mere substring or reordering. */
+    private boolean isStrictPrefix(List<String> prefix, List<String> whole) {
+        return !prefix.isEmpty() && prefix.size() < whole.size() && whole.subList(0, prefix.size()).equals(prefix);
+    }
+
+    /**
+     * Backlog item 308 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3): whether
+     * {@code ownIndex}'s own exact-slug-match win should be suppressed because a same-CPE-vendor
+     * sibling elsewhere in the same pool already covers the item's version under a longer slug this
+     * candidate's own slug is contained in. Deliberately does NOT touch {@link #rankCpeCandidates}'s
+     * own key ORDER — exact-slug-match priority stays exactly where it's always been — this only
+     * narrows what counts as an exact-slug match for candidates matching all four of the following:
+     *
+     * <ol>
+     *   <li>{@code ownIndex}'s own {@link #versionCoverageRank} is 2 (NOT_COVERS) — concrete numeric
+     *       evidence beyond {@link #VERSION_COVERAGE_IMPLAUSIBILITY_RATIO}'s own guard, never merely
+     *       "no evidence" (that stays UNKNOWN(1), untouched by this method).</li>
+     *   <li>some other candidate still in {@code poolVersionCoverageRanks} has rank 0 (COVERS).</li>
+     *   <li>that other candidate's CPE vendor (already normalized in {@code poolCpeVendors}) equals
+     *       {@code ownIndex}'s own CPE vendor exactly — narrow enough that this can only ever match a
+     *       genuine same-vendor duplicate-cataloging case, never an unrelated vendor that merely
+     *       happens to score a stronger version match.</li>
+     *   <li>{@code ownIndex}'s own normalized product slug ({@code poolNormalizedProductSlugs}) is
+     *       contained in that other candidate's normalized slug — see {@link
+     *       #isSlugContainedInOtherSlug} for the exact substring-or-token-subset test.</li>
+     * </ol>
+     *
+     * <p>Every input list is precomputed once per candidate by {@link #rankCpeCandidates} itself
+     * before this pairwise scan runs (same "computed exactly once per candidate" invariant {@link
+     * #isDerivedFromSiblingCandidate}'s own {@code poolTokens} already follows), so this method's own
+     * O(n²) cost is pure list lookups and string comparisons, never re-normalization.
+     */
+    private boolean isOutrankedByCurrentCatalogedSameVendorDuplicate(int ownIndex,
+            List<String> poolNormalizedProductSlugs, List<String> poolCpeVendors, List<Integer> poolVersionCoverageRanks) {
+        if (poolVersionCoverageRanks.get(ownIndex) != 2) {
+            return false;
+        }
+        String ownVendor = poolCpeVendors.get(ownIndex);
+        if (ownVendor.isBlank()) {
+            return false;
+        }
+        String ownSlug = poolNormalizedProductSlugs.get(ownIndex);
+        for (int i = 0; i < poolVersionCoverageRanks.size(); i++) {
+            if (i == ownIndex || poolVersionCoverageRanks.get(i) != 0) {
+                continue;
+            }
+            if (!ownVendor.equals(poolCpeVendors.get(i))) {
+                continue;
+            }
+            if (isSlugContainedInOtherSlug(ownSlug, poolNormalizedProductSlugs.get(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Backlog item 308: whether {@code narrowerSlug} (already run through {@link
+     *  #normalizeForContainment}) is contained in {@code widerSlug} — either as a plain substring, or,
+     *  when underscore-to-space normalization has split it into separate words, as a token subset
+     *  (every one of {@code narrowerSlug}'s own tokens present among {@code widerSlug}'s) — reusing
+     *  {@link #tokenize} rather than inventing a new normalization for this. Directional (unlike
+     *  {@link #containsEitherWay}): only ever asks whether the shorter, stale-cataloged slug is inside
+     *  the longer, currently-cataloged one, never the reverse. */
+    private boolean isSlugContainedInOtherSlug(String narrowerSlug, String widerSlug) {
+        if (narrowerSlug.isBlank() || widerSlug.isBlank()) {
+            return false;
+        }
+        if (widerSlug.contains(narrowerSlug)) {
+            return true;
+        }
+        List<String> narrowerTokens = tokenize(narrowerSlug);
+        return !narrowerTokens.isEmpty() && tokenize(widerSlug).containsAll(narrowerTokens);
     }
 
     private boolean vendorAgrees(String normalizedVendor, CpeDictionaryEntry entry) {
@@ -1479,10 +1808,19 @@ public class Stage1IdentificationService {
      * belong to (see {@link #passesTargetSwGate}). A rejection empties out whichever branch produced
      * it, which naturally falls through to the next fallback stage exactly like "found nothing" did
      * before this fix — never a silent drop to a lower-ranked candidate within the same branch.
+     *
+     * <p>Item 302 (REVISE, senior review 2026-09-05): the {@code (vendor, product)} exact-match
+     * fallback (see the block right after the {@code registryEcosystem.isPresent()} early return
+     * below) fires whenever {@code gatedLocalMatches} above comes out empty — which is a strictly
+     * wider condition than "the trigram+containment pool was empty": it also fires when that pool was
+     * nonempty but every candidate in it failed the {@code target_sw} gate. This matches {@link
+     * #findByNameVariants}'s own existing firing condition one branch down (also gated on {@code
+     * gatedLocalMatches} being empty, not on {@code localMatches.candidates()} being empty) rather
+     * than introducing a third, narrower notion of "empty" — deliberate, not an oversight.
      */
     private CpeCandidateResult resolveCpeCandidates(String vendor, String productName, Long userId,
             Optional<String> registryEcosystem, Optional<String> registryPackageName,
-            LocalCpeMatches localMatches, String itemVersion) {
+            LocalCpeMatches localMatches, String itemVersion, String installUrl) {
         // REVISE item 1: a registry-sourced item's own resolved package name — reduced to its one
         // meaningful segment the same way Fix 5's cpeCorroboratesRegistryPackage already does for a
         // Maven groupId:artifactId coordinate or a Go module path — is a strictly more precise exact
@@ -1490,7 +1828,9 @@ public class Stage1IdentificationService {
         // name rather than whatever free text the inventory happened to record. Falls back to
         // productName whenever there's no registry match to draw on.
         String exactMatchQuery = registryPackageName.map(this::lastMeaningfulPackageSegment).orElse(productName);
-        TargetSwContext targetSwContext = TargetSwContext.from(registryEcosystem, exactMatchQuery);
+        // Item 303 (task B): installUrl feeds TargetSwContext's own second declared-platform source
+        // — see that record's javadoc for how it combines with registryEcosystem.
+        TargetSwContext targetSwContext = TargetSwContext.from(registryEcosystem, exactMatchQuery, installUrl);
 
         List<CpeDictionaryEntry> gatedLocalMatches = rankAndGate(vendor, localMatches.candidates(), targetSwContext, itemVersion);
         if (!gatedLocalMatches.isEmpty()) {
@@ -1506,6 +1846,46 @@ public class Stage1IdentificationService {
                     + "the name-variant search since a registry match already covers this item",
                     vendor, productName);
             return new CpeCandidateResult(List.of(), false, false);
+        }
+
+        // Item 302 (REVISE, senior review 2026-09-05): the (vendor, product) exact-match fallback
+        // used to live inside localCpeLookup itself, but that meant its output reached this method as
+        // ordinary localMatches.candidates() — before the registryEcosystem.isPresent() guard just
+        // above ever got a chance to run, unlike every other fallback source here (name-variant). A
+        // registry match with an unconfirmed version relies on chosenCpe staying null to keep
+        // trustRegistryMatch true (see the resolveCandidates-level comment on that flag); this
+        // fallback manufacturing a non-null chosenCpe for such an item flipped trustRegistryMatch to
+        // false, discarding the registry match's ecosystem/package/purl and re-gating on a bare
+        // passesTargetSwGate call that a previously-working IDENTIFIED_REGISTRY item might not survive
+        // — a real regression risk for exactly the golden-300 bucket the original PR's own regression
+        // test excluded. Moving it here (after the registry-ecosystem guard, so it is provably
+        // unreachable whenever a registry match exists) fixes that, and also means it now has the real
+        // targetSwContext to rank/gate against, unlike localCpeLookup's concurrent Optional.empty()
+        // placeholder. On master this ran before a live, rate-limited NVD keyword search; closed-mode
+        // has no such live fallback (backlog item 273 already removed it), so this simply runs
+        // directly before the name-variant last resort below.
+        //
+        // Same pg_trgm-similarity-structurally-disadvantages-a-short-slug rationale as before (see
+        // findByVendorProductPairs's own javadoc): "CrowdStrike Falcon Sensor" against
+        // crowdstrike:falcon scores 0.269/0.51, under the 0.3/0.6 thresholds, so this candidate never
+        // enters the trigram-ranked pool localCpeLookup already tried above.
+        //
+        // Provenance: assigned exactly like the local-dictionary branch above (usedRelaxedPass feeds
+        // both variantDerived and relaxedContainmentDerived), NOT the name-variant branch's
+        // unconditional variantDerived=true — a strict-containment exact-match hit is exactly as
+        // trustworthy as a strict-containment literal-query hit, and forcing AI verification on it
+        // (as variantDerived=true would via resolveSingleCpeCandidate) would silently drop the single
+        // candidate in a no-Claude-key environment, undoing this fallback's own motivating fix
+        // (CrowdStrike Falcon Sensor) in exactly the environment it was measured in.
+        List<CpeDictionaryEntry> exactPool = exactVendorProductMatches(vendor, productName);
+        if (!exactPool.isEmpty()) {
+            ContainmentResult exactContainment = plausibleContainmentOnly(vendor, productName, exactPool);
+            List<CpeDictionaryEntry> gatedExactMatches =
+                    rankAndGate(vendor, exactContainment.candidates(), targetSwContext, itemVersion);
+            if (!gatedExactMatches.isEmpty()) {
+                return new CpeCandidateResult(
+                        gatedExactMatches, exactContainment.usedRelaxedPass(), exactContainment.usedRelaxedPass());
+            }
         }
 
         // Genuine local-only last resort (closed-mode backlog item 273: no live NVD fallback to try
@@ -1532,7 +1912,7 @@ public class Stage1IdentificationService {
      *  that would have rejected the other 2 finalists (and kept {@code hyper}) ever got to run. */
     private List<CpeDictionaryEntry> rankAndGate(
             String vendor, List<CpeDictionaryEntry> candidates, TargetSwContext ctx, String itemVersion) {
-        return rankCpeCandidates(vendor, ctx.exactMatchQuery(), candidates, ctx.mappedTargetSw(), CPE_CANDIDATE_POOL, itemVersion)
+        return rankCpeCandidates(vendor, ctx.exactMatchQuery(), candidates, ctx.declaredTargetSw(), CPE_CANDIDATE_POOL, itemVersion)
                 .stream()
                 .filter(entry -> passesTargetSwGate(entry, ctx))
                 .limit(CPE_CANDIDATE_LIMIT)
@@ -1541,7 +1921,8 @@ public class Stage1IdentificationService {
 
     /**
      * Gating/ranking context for target_sw-aware CPE matching (REVISE items 1/3, senior review
-     * 2026-08-26 / job 36 root-cause). {@code hasRegistryMatch} distinguishes two cases {@link
+     * 2026-08-26 / job 36 root-cause; generalized by backlog item 303/task B, item 297 senior
+     * -reviewer design). {@code hasRegistryMatch} distinguishes two cases {@link
      * #passesTargetSwGate} treats differently: "no registry match at all" (desktop software with no
      * ecosystem to map, e.g. Slack/Atom/OWASP ZAP/Camtasia — the stricter "reject anything entirely
      * platform-scoped" gate) versus "a registry matched, but its ecosystem has no target_sw mapping"
@@ -1549,17 +1930,117 @@ public class Stage1IdentificationService {
      * own javadoc and REVISE item 8, which leaves hex's "tesla" alone entirely). {@code
      * mappedTargetSw} is therefore only ever present when there IS a registry match AND its
      * ecosystem is one of the eight mapped ones.
+     *
+     * <p>Item 303 (task B): {@code installUrlDeclaredTargetSw} is a second, independent source for
+     * the exact same kind of platform declaration — the item's own {@code install_url} column,
+     * resolved via {@link #INSTALL_URL_HOST_TO_TARGET_SW} (see {@link
+     * #declaredTargetSwFromInstallUrl}) — for items with no registry ecosystem to draw a mapping
+     * from at all (the marketplace-extension case {@link #ECOSYSTEM_TO_TARGET_SW} was never able to
+     * cover). {@link #declaredTargetSw} is the single value both {@link #passesTargetSwGate} and
+     * the ranking preference ({@link #targetSwMatchesEcosystem}) actually consult; the two
+     * underlying fields are kept separate rather than merged into one at construction time so {@code
+     * hasRegistryMatch} can still distinguish the hex/maven "registry matched but no mapping" case
+     * from "no registry match at all" (see {@link #passesTargetSwGate}'s own logic for exactly where
+     * that distinction still matters).
      */
-    private record TargetSwContext(boolean hasRegistryMatch, Optional<String> mappedTargetSw, String exactMatchQuery) {
-        static TargetSwContext from(Optional<String> registryEcosystem, String exactMatchQuery) {
+    private record TargetSwContext(boolean hasRegistryMatch, Optional<String> mappedTargetSw, String exactMatchQuery,
+            Optional<String> installUrlDeclaredTargetSw) {
+        static TargetSwContext from(Optional<String> registryEcosystem, String exactMatchQuery, String installUrl) {
+            Optional<String> installUrlDeclaredTargetSw = declaredTargetSwFromInstallUrl(installUrl);
             return registryEcosystem.isEmpty()
-                    ? new TargetSwContext(false, Optional.empty(), exactMatchQuery)
-                    : new TargetSwContext(true, mapEcosystemToTargetSw(registryEcosystem.get()), exactMatchQuery);
+                    ? new TargetSwContext(false, Optional.empty(), exactMatchQuery, installUrlDeclaredTargetSw)
+                    : new TargetSwContext(true, mapEcosystemToTargetSw(registryEcosystem.get()), exactMatchQuery,
+                            installUrlDeclaredTargetSw);
+        }
+
+        /** Item 303: the one declared-platform value gating/ranking actually consult, regardless of
+         *  which of the two independent sources produced it. {@code install_url} wins when both
+         *  happen to be present — a real registry match for the item's own package AND an
+         *  install_url marketplace declaration on the same row isn't a realistic combination in
+         *  practice, but install_url is the more direct, item-specific signal of the two, so this
+         *  keeps the priority explicit rather than accidental. */
+        Optional<String> declaredTargetSw() {
+            return installUrlDeclaredTargetSw.isPresent() ? installUrlDeclaredTargetSw : mappedTargetSw;
         }
     }
 
     private static Optional<String> mapEcosystemToTargetSw(String ecosystem) {
         return Optional.ofNullable(ecosystem).map(ECOSYSTEM_TO_TARGET_SW::get);
+    }
+
+    /** Matches a URI scheme prefix (e.g. {@code https://}, {@code http://}) — used only to detect
+     *  whether {@link #declaredTargetSwFromInstallUrl} needs to supply one itself (see that
+     *  method's own javadoc for why). */
+    private static final java.util.regex.Pattern URL_SCHEME_PATTERN =
+            java.util.regex.Pattern.compile("^[a-zA-Z][a-zA-Z0-9+.-]*://");
+
+    /**
+     * Backlog item 303 (task B): resolves {@code installUrl}'s host to a declared {@code target_sw}
+     * value via {@link #INSTALL_URL_HOST_TO_TARGET_SW}, matching by trailing-label host suffix
+     * (never substring — see that map's own javadoc for why) so a spoofed URL whose path merely
+     * contains a marketplace hostname can't be mistaken for the real thing. Returns empty for a
+     * blank/unparseable {@code installUrl} or a host with no mapping.
+     *
+     * <p>Senior-reviewer REVISE (PR#229): a scheme-less {@code install_url} (e.g. a non-engineer
+     * pasting {@code marketplace.visualstudio.com/items?itemName=x} without {@code https://})
+     * would otherwise parse as a relative URI with no authority component at all — {@link
+     * java.net.URI#getHost()} returns {@code null} for that, silently disabling this whole feature
+     * for exactly the CSV shape {@code jobs/new.html}'s own {@code vulncheckGetUrlHost} already
+     * tolerates for this same {@code install_url} column (see that function's own comment). This
+     * prepends {@code https://} ONLY when {@link #URL_SCHEME_PATTERN} finds no scheme already
+     * present, so every already-schemed URL (the common case) is parsed byte-for-byte unchanged.
+     * Spoof resistance is unaffected either way — {@link java.net.URI} still does the real
+     * authority/path parsing after the prefix is (maybe) added, so a path-embedded or
+     * suffix-embedded spoof is rejected exactly as before regardless of which branch supplied the
+     * scheme (verified by this class's own spoof tests, both schemed and scheme-less).
+     */
+    private static Optional<String> declaredTargetSwFromInstallUrl(String installUrl) {
+        if (installUrl == null || installUrl.isBlank()) {
+            return Optional.empty();
+        }
+        String stripped = installUrl.strip();
+        String withScheme = URL_SCHEME_PATTERN.matcher(stripped).find() ? stripped : "https://" + stripped;
+        java.net.URI uri;
+        try {
+            uri = new java.net.URI(withScheme);
+        } catch (java.net.URISyntaxException e) {
+            return Optional.empty();
+        }
+        String host = uri.getHost();
+        if (host == null) {
+            return Optional.empty();
+        }
+        String normalizedHost = host.toLowerCase(java.util.Locale.ROOT);
+        for (java.util.Map.Entry<String, String> entry : INSTALL_URL_HOST_TO_TARGET_SW.entrySet()) {
+            if (isHostOrTrailingLabelMatch(normalizedHost, entry.getKey())) {
+                return Optional.of(entry.getValue());
+            }
+        }
+        // Legacy Chrome Web Store shape (chrome.google.com/webstore/...) — chrome.google.com alone
+        // isn't specific enough to a webstore listing to declare a platform from the host alone (it
+        // hosts plenty of non-extension pages too), so this also requires the legacy path prefix,
+        // with a segment boundary (equals, or followed by "/") rather than a bare startsWith —
+        // senior-reviewer REVISE on PR#229, measured live: a bare startsWith also matched an
+        // unrelated path like /webstoreEVIL/x or /webstore-foo, neither of which is the real
+        // /webstore/... shape.
+        if (isHostOrTrailingLabelMatch(normalizedHost, CHROME_WEBSTORE_LEGACY_HOST)) {
+            String path = uri.getPath();
+            if (path != null && (path.equals(CHROME_WEBSTORE_LEGACY_PATH_PREFIX)
+                    || path.startsWith(CHROME_WEBSTORE_LEGACY_PATH_PREFIX + "/"))) {
+                return Optional.of(CHROME_TARGET_SW);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** Whether {@code host} equals {@code candidateSuffix}, or ends with it as a whole trailing
+     *  label (i.e. immediately preceded by a {@code .}) — never a bare substring match. This is what
+     *  keeps {@code evil.com} from matching {@code marketplace.visualstudio.com} (no relation at
+     *  all) while still matching a real subdomain like {@code www.marketplace.visualstudio.com}, and
+     *  what keeps a spoofed host like {@code marketplace.visualstudio.com.evil.com} from matching
+     *  either (it ends with {@code .evil.com}, not {@code .marketplace.visualstudio.com}). */
+    private static boolean isHostOrTrailingLabelMatch(String host, String candidateSuffix) {
+        return host.equals(candidateSuffix) || host.endsWith("." + candidateSuffix);
     }
 
     /**
@@ -1572,6 +2053,25 @@ public class Stage1IdentificationService {
      * com.vulncheck.app.repository.CpeDictionaryRepositoryImpl#findFuzzyMatches} ever get one
      * populated at all (see {@link CpeDictionaryEntry#getTargetSwValues}) — means there's no signal
      * to gate on at all, so it always passes rather than being treated as evidence of anything.
+     *
+     * <p>Item 303 (task B): the previous unconditional "no registry match at all -&gt; reject" rule
+     * is generalized to "no <em>declared platform</em> at all -&gt; reject" — {@link
+     * TargetSwContext#declaredTargetSw} now also covers an {@code install_url}-derived declaration,
+     * so an item with no registry ecosystem but a recognized marketplace {@code install_url} (e.g.
+     * a VS Code extension) can still pass this gate against a target_sw-scoped candidate, exactly
+     * the same way a registry-sourced item always could.
+     *
+     * <p>Senior-reviewer REVISE (PR#229): the hex/maven "registry matched but its ecosystem has no
+     * mapping" default-allow below is narrower than it may look — it only remains reachable when
+     * <em>both</em> sources decline to declare a platform (no install_url declaration AND no mapped
+     * registry ecosystem). Whenever an {@code install_url} declaration IS present, {@link
+     * TargetSwContext#declaredTargetSw} returns it regardless of whether the item's registry
+     * ecosystem happens to be one of the two unmapped ones (hex/maven) — so a hex/maven-registry
+     * item whose {@code install_url} also happens to resolve to, say, {@code jetbrains} is held to
+     * the same strict equality check as any other declared-platform item, not the default-allow.
+     * This is a deliberate behavior change from the pre-item-303 gate (which had no install_url
+     * signal to consult at all), judged correct on review: install_url is the more specific,
+     * item-level signal whenever it's present.
      */
     private boolean passesTargetSwGate(CpeDictionaryEntry entry, TargetSwContext ctx) {
         java.util.Set<String> targetSwValues = entry.getTargetSwValues();
@@ -1591,18 +2091,19 @@ public class Stage1IdentificationService {
         if (isWildcardOrNotApplicableOrNonScoping) {
             return true;
         }
-        if (!ctx.hasRegistryMatch()) {
-            // No registry match at all, so no ecosystem of the item's own to compare against — a
-            // CPE scoped only to being a component of *some* other platform can never be this
-            // standalone item's identity.
+        if (ctx.declaredTargetSw().isEmpty() && !ctx.hasRegistryMatch()) {
+            // No declared platform at all — neither a registry ecosystem mapping nor an install_url
+            // marketplace declaration — so no ecosystem/platform of the item's own to compare
+            // against. A CPE scoped only to being a component of *some* other platform can never be
+            // this standalone item's identity.
             return false;
         }
-        if (ctx.mappedTargetSw().isPresent()) {
-            return targetSwValues.contains(ctx.mappedTargetSw().get());
+        if (ctx.declaredTargetSw().isPresent()) {
+            return targetSwValues.contains(ctx.declaredTargetSw().get());
         }
-        // A registry match exists but its ecosystem has no target_sw mapping (hex/maven) reaches
-        // here — default-allow (see ECOSYSTEM_TO_TARGET_SW's own javadoc for why guessing a mapping
-        // for those two would be worse than having none).
+        // A registry match exists but its ecosystem has no target_sw mapping (hex/maven), and no
+        // install_url declaration either, reaches here — default-allow (see ECOSYSTEM_TO_TARGET_SW's
+        // own javadoc for why guessing a mapping for those two would be worse than having none).
         return true;
     }
 
@@ -1668,13 +2169,82 @@ public class Stage1IdentificationService {
                         || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, true))
                 .toList();
         if (!strict.isEmpty()) {
-            return new ContainmentResult(strict, false);
+            return new ContainmentResult(
+                    rescuePoolRelativeSameVendorSupersetCandidates(normalizedQuery, candidates, strict), false);
         }
         List<CpeDictionaryEntry> relaxed = candidates.stream()
                 .filter(entry -> explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getProduct(), false, false)
                         || explainsQuery(normalizedItemVendor, normalizedQuery, entry, entry.getTitle(), true, false))
                 .toList();
         return new ContainmentResult(relaxed, !relaxed.isEmpty());
+    }
+
+    /**
+     * Backlog item 345 (senior review 2026-09-05, VirtualBox root cause from item 299 case 3): a
+     * pool-relative rescue applied only when the strict pass above already admitted at least one
+     * candidate — never a general relaxation of {@link #plausibleContainmentOnly}'s own admission
+     * gate, only a narrow recovery for a candidate whose strict-pass rejection is fully explained by
+     * a same-CPE-vendor sibling the strict pass already admitted under a superset slug.
+     *
+     * <p>Root cause (item 308's own tester findings): a single-token query like "VirtualBox" against
+     * a candidate whose product slug is itself multi-token ({@code oracle:vm_virtualbox}, tokens
+     * {@code ["vm", "virtualbox"]}) fails {@link #explainsQuery}'s Direction 1 ({@link #alignPrefix}
+     * anchors on the leading token "vm", not "virtualbox"), Direction 1's {@link
+     * #alignPrefixAtAnyBoundary} fallback (requires {@code queryTokens.size() >= 2}), and Direction 2
+     * ({@link java.util.Collections#indexOfSubList} needs the candidate's own token count to fit
+     * inside the query's, impossible once the candidate has more tokens than a single-token query) —
+     * so it never reaches {@link #rankCpeCandidates} at all, meaning item 308's own same-vendor
+     * -duplicate ranking fix ({@link #isOutrankedByCurrentCatalogedSameVendorDuplicate}) never gets a
+     * chance to run for it. {@code explainsQuery}/{@code alignPrefix}/{@code
+     * alignPrefixAtAnyBoundary}/{@code indexOfSubList} themselves are left untouched — this rescues
+     * the candidate into the pool {@code rankCpeCandidates} sees, rather than loosening any of those.
+     *
+     * <p>Anchored on the strict pass's own result, never a bare product-slug guess: a rejected
+     * candidate is rescued only if some strict-admitted candidate's own normalized product slug
+     * exactly equals {@code normalizedQuery} (the same "NVD really does catalogue this exact product
+     * under this exact slug" signal {@link #exactProductSlugMatch} uses elsewhere) AND (a) the
+     * rejected candidate shares that anchor's own CPE vendor, and (b) the anchor's own slug is
+     * contained in the rejected candidate's own (wider) slug — reusing {@link
+     * #isSlugContainedInOtherSlug} exactly as item 308's own {@link
+     * #isOutrankedByCurrentCatalogedSameVendorDuplicate} already does, just evaluated here at
+     * admission time instead of at ranking time. Both conditions are required together, same as that
+     * method: a same-vendor candidate with an unrelated slug must not be rescued merely because some
+     * exact-slug anchor happens to exist in the pool, and a superset-slug candidate under a different
+     * CPE vendor must not be rescued either.
+     *
+     * <p>Filters {@code candidates} (the original, still-trigram-ordered pool) by {@code strictMatch
+     * || rescued} rather than concatenating the strict and rescued lists — {@link #rankCpeCandidates}
+     * relies on the incoming list's own trigram order to break ties within each ranking key, so
+     * appending rescued candidates after strict ones would silently give every rescued candidate a
+     * worse trigram-order tie-break than every strict one, regardless of its real similarity score.
+     *
+     * <p>Backlog item 345 REVISE (senior review 2026-09-05): {@code exactProductSlugMatch}'s own
+     * definition means every anchor's normalized product slug is necessarily equal to {@code
+     * normalizedQuery} itself, so the containment check below is evaluated once against {@code
+     * normalizedQuery} rather than once per anchor — an O(candidates + anchors) pass instead of the
+     * previous O(candidates &times; anchors) one.
+     */
+    private List<CpeDictionaryEntry> rescuePoolRelativeSameVendorSupersetCandidates(
+            String normalizedQuery, List<CpeDictionaryEntry> candidates, List<CpeDictionaryEntry> strict) {
+        if (strict.size() == candidates.size()) {
+            return strict;
+        }
+        java.util.Set<String> anchorVendors = strict.stream()
+                .filter(entry -> exactProductSlugMatch(normalizedQuery, entry))
+                .map(entry -> normalizeForContainment(cpeVendorOf(entry)))
+                .filter(vendor -> !vendor.isBlank())
+                .collect(java.util.stream.Collectors.toSet());
+        if (anchorVendors.isEmpty()) {
+            return strict;
+        }
+        java.util.Set<CpeDictionaryEntry> strictSet =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        strictSet.addAll(strict);
+        return candidates.stream()
+                .filter(entry -> strictSet.contains(entry)
+                        || (anchorVendors.contains(normalizeForContainment(cpeVendorOf(entry)))
+                                && isSlugContainedInOtherSlug(normalizedQuery, normalizeForContainment(entry.getProduct()))))
+                .toList();
     }
 
     /** Backlog item 89 P2: outcome of {@link #plausibleContainmentOnly}. {@code usedRelaxedPass} is
@@ -1866,11 +2436,60 @@ public class Stage1IdentificationService {
         // Backlog item 89 P2: this specific rule is what plausibleContainmentOnly's relaxed second
         // pass exists to lift (requireTrailingVendorExplanation=false) — see this method's own
         // javadoc for why only this rule, not the whole method, is relaxable.
-        if (requireTrailingVendorExplanation && start == 0 && candidateTokens.size() == 1) {
+        //
+        // Backlog item 319 (senior review 2026-09-05): the candidateTokens.size() == 1 gate above
+        // exempts every multi-token candidate slug from this trailing check entirely, which is
+        // exactly how "Visual Studio Code Server" (item vendor "Coder") reached the nonexistent
+        // microsoft:visual_studio_code:4.9.3 — the 3-token candidate product "visual_studio_code"
+        // matched at start == 0, so the leftover trailing query token "server" was never checked
+        // against anything, since the size-1 gate never applied to a 3-token candidate. Adding an
+        // itemVendorContradicts(...) OR widens the trailing check to also fire whenever the item's
+        // own vendor field actively contradicts the candidate's CPE vendor (Coder vs microsoft),
+        // regardless of how many tokens the candidate slug has — deliberately an OR onto the existing
+        // condition, not a replacement, so the existing single-token trailing check (Metasploit
+        // Framework, item vendor blank or agreeing) keeps working exactly as before. Kept OUTSIDE the
+        // requireTrailingVendorExplanation flag on purpose: gating it on that flag would let
+        // plausibleContainmentOnly's relaxed second pass (which sets
+        // requireTrailingVendorExplanation=false specifically to admit Metasploit Framework back in)
+        // silently re-admit the same vendor-contradicting candidate this exists to reject.
+        boolean vendorContradicts = start == 0 && itemVendorContradicts(normalizedItemVendor, cpeVendor);
+        if ((requireTrailingVendorExplanation && start == 0 && candidateTokens.size() == 1) || vendorContradicts) {
             for (int i = start + candidateTokens.size(); i < queryTokens.size(); i++) {
                 if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
                     return false;
                 }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Backlog item 319: whether the item's own vendor field actively contradicts {@code entry}'s CPE
+     * vendor — as opposed to merely not confirming it. Conservative by design ("no evidence means
+     * permissive", the same default this class uses everywhere else — see {@link #versionCoverageIsPlausible}
+     * and the Direction 1 P3 check above): returns {@code false} (not a contradiction) whenever either
+     * vendor string is blank, whenever {@link #containsEitherWay} finds a raw substring overlap, or
+     * whenever {@link #vendorExplains} succeeds in either direction (an item vendor token explained by
+     * the CPE vendor, or a CPE vendor token explained by the item vendor) — only when none of those
+     * give any evidence of agreement is this {@code true}. "Coder" vs {@code microsoft} hits none of
+     * them (a real contradiction); "JetBrains" vs {@code jetbrains} and "Rapid7" vs {@code rapid7} both
+     * hit {@link #containsEitherWay} (not a contradiction).
+     */
+    private boolean itemVendorContradicts(String normalizedItemVendor, String normalizedCpeVendor) {
+        if (normalizedItemVendor.isBlank() || normalizedCpeVendor.isBlank()) {
+            return false;
+        }
+        if (containsEitherWay(normalizedItemVendor, normalizedCpeVendor)) {
+            return false;
+        }
+        for (String token : tokenize(normalizedItemVendor)) {
+            if (vendorExplains(normalizedCpeVendor, token)) {
+                return false;
+            }
+        }
+        for (String token : tokenize(normalizedCpeVendor)) {
+            if (vendorExplains(normalizedItemVendor, token)) {
+                return false;
             }
         }
         return true;

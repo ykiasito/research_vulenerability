@@ -75,8 +75,19 @@ app:
   # 0 or negative disables the cleanup entirely.
   job-retention-days: ${JOB_RETENTION_DAYS:30}
   # One-shot full NVD CPE Dictionary mirror (~1.8M entries) on startup. Off by default: it runs for
-  # hours and only needs to happen once per environment. See CpeDictionaryBootstrapSync.
+  # hours. Safe to leave on across restarts once the weekly delta chain (see
+  # cpe-scheduled-resync-enabled below) is running -- the freshness gate below skips this whenever
+  # the mirror is already up to date, so it no longer means "runs unconditionally on every boot".
+  # See CpeDictionaryBootstrapSync.
   cpe-full-sync-on-startup: ${CPE_FULL_SYNC_ON_STARTUP:false}
+  # Closed-mode backlog item 330: CpeDictionaryBootstrapSync skips the startup full sync above
+  # entirely when the mirror's last unfiltered sync (full or delta, cpe_dictionary_sync_state.
+  # last_synced_at) is within this many days -- the weekly delta chain is structurally gap-free, so
+  # re-running a ~103-minute full sync against an already-fresh mirror is pure loss. 0 or negative
+  # disables this gate (every enabled startup always runs the full sync, the pre-item-330
+  # behavior). Does not apply to the admin-triggered /admin/cpe-dictionary/sync-all button, which
+  # always runs on demand regardless of freshness.
+  cpe-full-sync-max-age-days: ${CPE_FULL_SYNC_MAX_AGE_DAYS:30}
   # Weekly automatic full re-sync of the same mirror (Sunday 01:30 UTC by default), so it doesn't
   # just go stale forever after the one-shot startup sync. Off by default (safety-first, same
   # rationale as the startup flag above) — see CpeDictionaryScheduledResync and
@@ -155,6 +166,17 @@ app:
     # (docs/spec/closed-mode-plan.md §4-2-3) finishes in roughly 4-5 daily runs.
     max-requests-per-run: ${NVD_CVE_BACKFILL_MAX_REQUESTS_PER_RUN:60}
     max-duration-minutes: ${NVD_CVE_BACKFILL_MAX_DURATION_MINUTES:60}
+  # NVD CVE API delta sync (closed-mode backlog item 284): only meaningful once the above backfill
+  # has finished (nvd_cve_sync_state.baseline_completed) -- NvdCveDeltaScheduledRunner checks that
+  # itself before ever touching NvdCveSyncService's shared run guard. Off by default, same
+  # deliberate opt-in convention as nvd-cve-backfill above.
+  nvd-cve-delta:
+    enabled: ${NVD_CVE_DELTA_ENABLED:false}
+    # 06:30 UTC daily by default -- see NvdCveDeltaScheduledRunner#runDeltaScheduledTick's javadoc
+    # for why this slot was chosen relative to the backfill's own 06:00 UTC slot.
+    cron: ${NVD_CVE_DELTA_CRON:0 30 6 * * *}
+    max-requests-per-run: ${NVD_CVE_DELTA_MAX_REQUESTS_PER_RUN:60}
+    max-duration-minutes: ${NVD_CVE_DELTA_MAX_DURATION_MINUTES:60}
 
 server:
   port: 8080
