@@ -390,6 +390,7 @@ public class NvdCpeSyncService {
             RestClient restClient, OffsetDateTime lastModStart, OffsetDateTime lastModEnd) {
         // keyword is the CSV-supplied product name (see AdminController's syncByKeyword), so a
         // product cell like
+        // "foo&resultsPerPage=1" would otherwise inject an unencoded "&" into the query string and
         // let CSV input override resultsPerPage/startIndex above -- same class of bug as
         // NvdVulnerabilitySource's cpeName case (PR#163).
         //

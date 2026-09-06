@@ -86,6 +86,13 @@ public class OsvSyncService {
     /** Plan §8-3(c): ~5x the measured real size (48.9MB) as of this writing. */
     private static final long MAX_MODIFIED_CSV_BYTES = 256L * 1024 * 1024;
     private static final int MAX_REDIRECTS = 3;
+    /** Finite, not {@code 0}/unbounded (backlog items 378/381) — {@link URLConnection#setReadTimeout}
+     *  is a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long
+     *  a genuinely-streaming multi-hundred-MB zip/CSV download can take; it only kills a connection
+     *  that goes fully idle for this long. 30s is the intended common value across the three
+     *  sibling sync services; {@code CveOrgSyncService#download} still uses an unbounded read
+     *  timeout as of this change and is aligned by item 378's companion fix. */
+    private static final int DOWNLOAD_READ_TIMEOUT_MILLIS = 30_000;
 
     /** Plan §8-3(b): loose length/charset validation (OSV ids have no single fixed shape across
      *  sources, unlike GHSA's {@code GHSA-xxxx-xxxx-xxxx}) — {@code {0,39}} after the mandatory
@@ -112,9 +119,10 @@ public class OsvSyncService {
     }
 
     /** Test seam for the 10 per-ecosystem baseline zip downloads — production always goes through
-     *  {@link #openZipStreamUnchecked}, a plain streaming {@link URLConnection} (same rationale as
-     *  {@code GhsaSyncService#openStream}: a multi-hundred-MB body needs an unbounded read timeout).
-     *  {@code MockRestServiceServer} can't intercept a raw {@link URLConnection}. */
+     *  {@link #openZipStreamUnchecked}, a plain streaming {@link URLConnection} with a finite read
+     *  timeout (same rationale as {@code GhsaSyncService#openStream} — see {@link
+     *  #DOWNLOAD_READ_TIMEOUT_MILLIS}'s javadoc for why a finite value doesn't cap a multi-hundred-MB
+     *  streaming body). {@code MockRestServiceServer} can't intercept a raw {@link URLConnection}. */
     private final Function<String, StreamWithHeaders> zipStreamOpener;
     /** Test seam for the {@code modified_id.csv} download — same rationale as {@link #zipStreamOpener}. */
     private final Function<String, InputStream> csvStreamOpener;
@@ -651,7 +659,11 @@ public class OsvSyncService {
         }
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(10_000);
-        connection.setReadTimeout(0); // multi-hundred-MB body, same rationale as GhsaSyncService#openStream
+        // Finite read timeout (backlog items 378/381), not 0/unbounded — see
+        // DOWNLOAD_READ_TIMEOUT_MILLIS's javadoc for why that's safe for this multi-hundred-MB
+        // streaming body; the old unbounded value risked hanging this sync's sole worker thread
+        // forever on a connection that stalls without cleanly closing.
+        connection.setReadTimeout(DOWNLOAD_READ_TIMEOUT_MILLIS);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (osv sync)");
         InputStream stream = connection.getInputStream();
         return new StreamWithHeaders(stream, connection.getHeaderField("last-modified"), connection.getHeaderField("x-goog-generation"));
@@ -672,7 +684,9 @@ public class OsvSyncService {
         }
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(10_000);
-        connection.setReadTimeout(0);
+        // Finite read timeout (backlog items 378/381) — same rationale as openZipStream's own
+        // DOWNLOAD_READ_TIMEOUT_MILLIS comment above.
+        connection.setReadTimeout(DOWNLOAD_READ_TIMEOUT_MILLIS);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (osv sync)");
         return connection.getInputStream();
     }
