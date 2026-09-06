@@ -62,6 +62,33 @@ import org.springframework.transaction.annotation.Transactional;
  * by row for all 20). Tracked for further investigation as backlog item 367; do not cite the
  * removed claim above as settled fact until that lands.
  *
+ * <p><b>Backlog item 367 fix landed, re-measured 2026-09-06:</b> the follow-up investigation
+ * confirmed the correction paragraph above row by row — 14 of the 20 rows really do enter the
+ * candidate pool and get rejected downstream, 6 (lombok, mockito-core, HikariCP, micrometer-core,
+ * plus kafka-clients/log4j-core which fail the pg_trgm threshold itself) are genuinely
+ * unidentifiable with the current dictionary. Of those 14, 9 shared one root cause: {@link
+ * Stage1IdentificationService#explainsQuery}'s Direction 2 leading-token loop required every query
+ * token ahead of a match to be explained by the candidate's own CPE vendor, but a Maven {@code
+ * groupId}'s leading reverse-DNS segment ({@code com}/{@code org}/{@code io}/{@code ch}, ...) is
+ * essentially never itself a CPE vendor slug. The fix (a small {@code
+ * REVERSE_DNS_PACKAGE_PREFIXES} allowlist consulted only for that leading-token check) recovered
+ * <b>6 of the 9</b> rows sharing this root cause — {@code com.google.guava:guava}, {@code
+ * com.fasterxml.jackson.core:jackson-databind} (resolves to the sibling {@code
+ * fasterxml:jackson-core} CPE rather than {@code jackson-databind} itself — a ranking nuance,
+ * out of this fix's scope), {@code org.slf4j:slf4j-api}, {@code com.squareup.okhttp3:okhttp},
+ * {@code io.netty:netty-all}, and {@code ch.qos.logback:logback-classic}. The remaining 3 of the 9
+ * ({@code com.squareup.retrofit2:retrofit}, {@code org.apache.httpcomponents:httpclient}, {@code
+ * org.springframework.boot:spring-boot-starter-web}) are still {@code UNIDENTIFIED}: each has a
+ * second unexplained token between the reverse-DNS prefix and the actual match ({@code retrofit2},
+ * {@code httpcomponents}, {@code boot}) that this narrowly-scoped fix deliberately does not touch.
+ * The other 5 of the 14-row gap ({@code spring-core}, {@code commons-lang3}, {@code gson}, {@code
+ * hibernate-core}, {@code junit}) have their own distinct root causes (see backlog item 367's own
+ * write-up) and are unaffected by this fix, as expected. Net result: {@code
+ * expected_ecosystem=maven} recall went from 0/20 to 6/20. {@link
+ * CpeVendorProductGolden300RecallTest} and {@link Backlog299CpeRankingGolden300RecallTest} were
+ * both re-run after this fix landed and stayed at 64/68 — no regression for non-Maven
+ * identification.
+ *
  * <p>This is an analysis tool, not a regression gate — no assertions, same convention as the
  * sibling {@link ChocolateyRemovalGolden300RecallTest}: it prints a per-row breakdown plus a
  * summary for a human to read.
@@ -79,15 +106,19 @@ import org.springframework.transaction.annotation.Transactional;
         // same as every other real-dev-DB test in this package.
         "spring.datasource.password=${POSTGRES_PASSWORD}"
 })
-@Disabled("Run once by hand against the real dev DB (2026-09-05, backlog item 296 gap analysis, "
-        + "post golden-300.csv sync -- item300) -- all 20/20 golden-300 expected_ecosystem=maven "
-        + "rows still come back UNIDENTIFIED (no live NVD fallback exists on this branch to "
-        + "consider either) -- confirms docs/spec/closed-mode-plan.md's own scenario C assumption "
-        + "is exact, not just a plausible projection. See class javadoc's correction paragraph "
-        + "(2026-09-06) -- this is NOT because the CPE dictionary lacks matching entries or "
-        + "because pg_trgm search finds nothing; the exact rejection stage is still under "
-        + "investigation (item 367). Re-confirmed 2026-09-06 (public accuracy write-up "
-        + "measurement) with the identical 0/20 result. Left disabled so it can never re-fire on a "
+@Disabled("Re-measured 2026-09-06 after backlog item 367's Stage1IdentificationService#explainsQuery "
+        + "Direction 2 leading-token fix landed -- expected_ecosystem=maven recall is now 6/20 (up "
+        + "from the pre-fix 0/20 baseline confirmed 2026-09-05/2026-09-06, see class javadoc's "
+        + "earlier paragraphs). 6 of the 9 rows sharing item 367's dominant root cause are now "
+        + "identified: com.google.guava:guava, com.fasterxml.jackson.core:jackson-databind (as "
+        + "fasterxml:jackson-core), org.slf4j:slf4j-api, com.squareup.okhttp3:okhttp, "
+        + "io.netty:netty-all, ch.qos.logback:logback-classic. 3 of that same 9 remain UNIDENTIFIED "
+        + "(com.squareup.retrofit2:retrofit, org.apache.httpcomponents:httpclient, "
+        + "org.springframework.boot:spring-boot-starter-web -- each has an additional unexplained "
+        + "token beyond item 367's narrow scope). The other 14 rows are unchanged: 6 genuinely "
+        + "unidentifiable (no dictionary entry or below the pg_trgm threshold) and 5 rejected for "
+        + "distinct, item-367-unrelated reasons. See class javadoc's own \"backlog item 367 fix "
+        + "landed\" paragraph for the full breakdown. Left disabled so it can never re-fire on a "
         + "routine mvn test run.")
 class MavenCentralRemovalGolden300RecallTest {
 

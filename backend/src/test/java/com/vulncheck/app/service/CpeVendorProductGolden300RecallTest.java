@@ -60,7 +60,11 @@ import org.springframework.transaction.annotation.Transactional;
         + "correctly thanks to master's outlier-guard/sibling-derivation-suppression logic landing via "
         + "the item360 Step2 sync merge. 4 mismatches remain, unchanged in kind from before: Metasploit "
         + "Framework unidentified; Notepad++/Zoom/Kibana resolve to an aliased vendor name. See class "
-        + "javadoc. Left disabled so it can never re-fire on a routine mvn test run.")
+        + "javadoc. Left disabled so it can never re-fire on a routine mvn test run. Re-confirmed "
+        + "2026-09-06 after backlog item 367's Direction 2 leading-token fix (Stage1"
+        + "IdentificationService#explainsQuery) landed -- still 64/68 = 0.9412, unchanged: item 367 "
+        + "only touches Maven-coordinate-shaped queries and this metric's 68-row IDENTIFIED_CPE "
+        + "denominator is unaffected.")
 class CpeVendorProductGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;

@@ -58,7 +58,10 @@ import org.springframework.transaction.annotation.Transactional;
         + "typo, not a real major version 71 release) -- backlog item 346's outlier guard now "
         + "corrects this to 7 (the real highest cataloged major), which is still <= VirtualBox "
         + "7.0.14's own major, so versionCoverageRank's outcome for this row is unchanged by item "
-        + "346.")
+        + "346. Re-confirmed 2026-09-06 after backlog item 367's Direction 2 leading-token fix "
+        + "(Stage1IdentificationService#explainsQuery) landed -- still 64/68 = 0.9412, unchanged: "
+        + "item 367 only touches Maven-coordinate-shaped queries and this metric's 68-row "
+        + "IDENTIFIED_CPE denominator is unaffected.")
 class Backlog299CpeRankingGolden300RecallTest {
 
     private static final Long REAL_USER_ID = 5L;
