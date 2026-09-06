@@ -2,6 +2,7 @@ package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
 import java.util.ArrayList;
@@ -127,15 +128,15 @@ public class NuGetMirrorSyncService {
             }
             if (versions.isEmpty()) {
                 log.warn("NuGet flat-container index returned a body with no parseable version "
-                        + "entries for id={}", packageId);
+                        + "entries for id={}", LogSanitizer.sanitize(packageId));
                 return Optional.empty();
             }
             return Optional.of(versions);
         } catch (HttpClientErrorException.NotFound e) {
-            log.debug("NuGet flat-container index has no entry for id={}", packageId);
+            log.debug("NuGet flat-container index has no entry for id={}", LogSanitizer.sanitize(packageId));
             return Optional.empty();
         } catch (Exception e) {
-            log.warn("NuGet flat-container index fetch failed for id={}", packageId, e);
+            log.warn("NuGet flat-container index fetch failed for id={}", LogSanitizer.sanitize(packageId), e);
             return Optional.empty();
         }
     }

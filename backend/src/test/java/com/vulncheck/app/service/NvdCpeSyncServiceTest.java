@@ -2,22 +2,32 @@ package com.vulncheck.app.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.queryParam;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
+import com.vulncheck.app.entity.CpeDictionarySyncState;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
+import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.service.NvdCpeSyncService.SyncOutcome;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Optional;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
@@ -35,6 +45,7 @@ class NvdCpeSyncServiceTest {
 
     private MockRestServiceServer syncServer;
     private CpeDictionaryRepository cpeDictionaryRepository;
+    private CpeDictionarySyncStateRepository cpeDictionarySyncStateRepository;
     private NvdCpeSyncService service;
 
     @BeforeEach
@@ -42,8 +53,9 @@ class NvdCpeSyncServiceTest {
         RestClient.Builder syncClientBuilder = RestClient.builder();
         syncServer = MockRestServiceServer.bindTo(syncClientBuilder).build();
         cpeDictionaryRepository = mock(CpeDictionaryRepository.class);
+        cpeDictionarySyncStateRepository = mock(CpeDictionarySyncStateRepository.class);
         service = new NvdCpeSyncService(syncClientBuilder.build(), cpeDictionaryRepository,
-                new NvdRateLimiter());
+                new NvdRateLimiter(), cpeDictionarySyncStateRepository);
     }
 
     @Test
@@ -124,65 +136,12 @@ class NvdCpeSyncServiceTest {
         syncServer.verify();
     }
 
-    @Test
-    void balancedBraceKeywordIsPercentEncodedInsteadOfThrowing() {
-        // Backlog item 254 (senior review of PR#166, 2026-09-03): the item-253 fix above switched
-        // fetchPage() to builder.encode(), which is URI *template* encoding -- "{"/"}" are left
-        // alone as template-variable delimiters, not percent-encoded. A keyword with a balanced
-        // brace pair (e.g. an MSI ProductCode GUID like "{90160000-008C}", which shows up verbatim
-        // in Windows installed-software listings) then survives .encode() untouched and trips the
-        // single-arg java.net.URI constructor inside build().toUri() with "Illegal character in
-        // query", silently discarding the whole Stage1 identification for that item. Confirms the
-        // expand-then-encode fix instead percent-encodes the literal braces and completes normally.
-        syncServer.expect(method(HttpMethod.GET))
-                .andExpect(requestTo(Matchers.containsString("%7B")))
-                .andExpect(requestTo(Matchers.containsString("%7D")))
-                .andExpect(queryParam("resultsPerPage", "10000"))
-                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
-
-        int upserted = service.syncByKeyword("Office {90160000-008C}", Optional.empty());
-
-        assertThat(upserted).isZero();
-        syncServer.verify();
-    }
-
-    @Test
-    void unbalancedBraceKeywordIsPercentEncodedInsteadOfThrowing() {
-        // Closed-mode backlog item 259 (senior review, 2026-09-03, PR#166 final review): the
-        // balanced-brace test above ("{90160000-008C}") only fixes the pair. A keyword can just as
-        // easily carry an unbalanced brace on its own (e.g. "Office {90160000", a truncated MSI
-        // ProductCode GUID column) -- expand() substitutes the whole keyword value for the
-        // "{keywordSearch}" template placeholder in one shot, so the value's own internal braces
-        // never need to be balanced for that substitution to work; encode() then percent-encodes
-        // whatever literal "{" survived, same as the balanced case.
-        syncServer.expect(method(HttpMethod.GET))
-                .andExpect(requestTo(Matchers.containsString("%7B")))
-                .andExpect(requestTo(Matchers.not(Matchers.containsString("{"))))
-                .andExpect(queryParam("resultsPerPage", "10000"))
-                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
-
-        int upserted = service.syncByKeyword("Office {90160000", Optional.empty());
-
-        assertThat(upserted).isZero();
-        syncServer.verify();
-    }
-
-    @Test
-    void literalPercentSignKeywordIsPercentEncodedInsteadOfThrowing() {
-        // Closed-mode backlog item 259: a keyword can contain a literal "%" (e.g. a free-text
-        // product cell like "Foo 50% Off Edition") -- since expand-then-encode runs encode() on the
-        // fully-substituted value, "%" itself gets percent-encoded like any other reserved character
-        // (to "%25") rather than being misread as the start of an existing percent-escape.
-        syncServer.expect(method(HttpMethod.GET))
-                .andExpect(requestTo(Matchers.containsString("%25")))
-                .andExpect(queryParam("resultsPerPage", "10000"))
-                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
-
-        int upserted = service.syncByKeyword("Foo 50%", Optional.empty());
-
-        assertThat(upserted).isZero();
-        syncServer.verify();
-    }
+    // Balanced-brace/unbalanced-brace/literal-"%"/literal-"+" encoding edge cases used to be
+    // duplicated here (and in NvdVulnerabilitySourceTest/NvdKeywordVulnerabilitySourceTest) --
+    // exactly the maintenance problem task-backlog item 254 exists to fix. They now live once,
+    // generically, in NvdUriBuilderTest; the ampersand-injection test above stays here as this call
+    // site's own end-to-end smoke test that the shared builder is actually wired in and reaches the
+    // real MockRestServiceServer request.
 
     @Test
     void syncReportsIncompleteWhenAPageFetchFailsPartWayThrough() {
@@ -196,5 +155,315 @@ class NvdCpeSyncServiceTest {
 
         assertThat(outcome.completed()).isFalse();
         syncServer.verify();
+    }
+
+    @Test
+    void syncReportsIncompleteWhenAPageReportsResultsButReturnsNoProducts() {
+        // Regression test for senior-reviewer REVISE (PR #207 round 1): NVD returning a 2xx
+        // response whose totalResults says there's more to fetch, but whose products array is
+        // empty, used to be treated identically to a legitimate "no more pages" signal (fetched ==
+        // 0) -- silently recording this partial dictionary as a clean finish and, for an unfiltered
+        // sync, advancing cpe_dictionary_sync_state past a window that was never actually ingested.
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":500,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isFalse();
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+        syncServer.verify();
+    }
+
+    // --- closed-mode backlog item 330 (B): a missing/contradictory totalResults must never be
+    // recorded as a clean finish -----------------------------------------------------------------
+
+    @Test
+    void syncReportsIncompleteWhenTotalResultsIsMissingButProductsIsNonEmpty() {
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"products\":[{\"cpe\":{\"cpeName\":"
+                                + "\"cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*\",\"titles\":[]}}]}",
+                        MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isFalse();
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+        syncServer.verify();
+    }
+
+    @Test
+    void syncReportsIncompleteWhenTotalResultsIsZeroButProductsIsNonEmpty() {
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"totalResults\":0,\"products\":[{\"cpe\":{\"cpeName\":"
+                                + "\"cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*\",\"titles\":[]}}]}",
+                        MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isFalse();
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+        syncServer.verify();
+    }
+
+    @Test
+    void syncAllAndReleaseRecordsInitialSyncCompletedWhenTotalResultsAndProductsAreBothLegitimatelyZero() {
+        // Regression guard: a legitimate no-change delta/full page (totalResults:0, products:[])
+        // must keep reporting a clean finish -- the item 330 (B) contradiction check above must
+        // only fire when totalResults is missing/non-numeric or self-contradictory, never for this
+        // ordinary "nothing to sync" case.
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncAllAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isTrue();
+        verify(cpeDictionarySyncStateRepository).save(any());
+        syncServer.verify();
+    }
+
+    // --- closed-mode backlog item 283: delta sync -------------------------------------------
+
+    @Test
+    void hasCompletedInitialSyncReflectsPersistedState() {
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.empty());
+        assertThat(service.hasCompletedInitialSync()).isFalse();
+
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.hasCompletedInitialSync()).isTrue();
+    }
+
+    // --- closed-mode backlog item 330 (C): freshness gate for CpeDictionaryBootstrapSync --------
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenNoStateRowExists() {
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.empty());
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenInitialSyncNeverCompleted() {
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(false);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenLastSyncedAtIsNullDespiteInitialSyncCompleted() {
+        // Defensive case: same one resolveDeltaCursor already guards against (both fields are set
+        // together in practice, so this should not happen, but must not throw or misreport fresh).
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(null);
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void isMirrorFresherThanIsTrueWhenLastSyncedAtIsWithinTheWindow() {
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC).minusDays(5));
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isTrue();
+    }
+
+    @Test
+    void isMirrorFresherThanIsFalseWhenLastSyncedAtIsOlderThanTheWindow() {
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC).minusDays(45));
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        assertThat(service.isMirrorFresherThan(Duration.ofDays(30))).isFalse();
+    }
+
+    @Test
+    void syncAllAndReleaseRecordsInitialSyncCompletedOnCleanFinish() {
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        service.syncAllAndRelease(Optional.empty());
+
+        ArgumentCaptor<CpeDictionarySyncState> captor = ArgumentCaptor.forClass(CpeDictionarySyncState.class);
+        verify(cpeDictionarySyncStateRepository).save(captor.capture());
+        assertThat(captor.getValue().isInitialSyncCompleted()).isTrue();
+        assertThat(captor.getValue().getLastSyncedAt()).isNotNull();
+        syncServer.verify();
+    }
+
+    @Test
+    void syncAllAndReleaseDoesNotRecordStateOnEarlyAbort() {
+        // An aborted-early full sync must not flip hasCompletedInitialSync() true -- the
+        // dictionary is only partially synced, so the next scheduled run must still retry a full
+        // sync, not switch to delta against an incomplete baseline.
+        syncServer.expect(method(HttpMethod.GET)).andRespond(withServerError());
+
+        service.syncAllAndRelease(Optional.empty());
+
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+    }
+
+    @Test
+    void syncByKeywordDoesNotRecordSyncState() {
+        // A keyword-filtered sync only ever touches a subset of the dictionary -- it must never be
+        // mistaken for "the whole dictionary is now this fresh".
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        service.syncByKeyword("apache", Optional.empty());
+
+        verify(cpeDictionarySyncStateRepository, never()).save(any());
+    }
+
+    @Test
+    void syncDeltaAndReleaseIncludesLastModDateRangeQueryParams() {
+        OffsetDateTime cursor = OffsetDateTime.now(ZoneOffset.UTC).minusDays(3);
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(cursor);
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        syncServer.expect(method(HttpMethod.GET))
+                .andExpect(requestTo(Matchers.containsString("lastModStartDate=")))
+                .andExpect(requestTo(Matchers.containsString("lastModEndDate=")))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncDeltaAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isTrue();
+        syncServer.verify();
+    }
+
+    @Test
+    void syncDeltaAndReleaseRecordsTheRequestedWindowEndAsTheNewCursorNotWallClockNow() {
+        // Regression guard for the "chunk's own window_end, not now" rule NvdCveSyncService's
+        // delta side follows: if the recorded cursor were wall-clock "now" instead of the actual
+        // requested lastModEndDate, a clamped/partial window's untraveled tail would be silently
+        // skipped on the next tick.
+        OffsetDateTime cursor = OffsetDateTime.now(ZoneOffset.UTC).minusDays(3);
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(cursor);
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        service.syncDeltaAndRelease(Optional.empty());
+
+        ArgumentCaptor<CpeDictionarySyncState> captor = ArgumentCaptor.forClass(CpeDictionarySyncState.class);
+        verify(cpeDictionarySyncStateRepository).save(captor.capture());
+        OffsetDateTime recordedCursor = captor.getValue().getLastSyncedAt();
+        // windowEnd == now here (uncapped, since cursor is only 3 days old) -- assert it lands
+        // close to "now", not exactly equal to the pre-call cursor (i.e. it actually advanced).
+        assertThat(recordedCursor).isAfter(cursor);
+        assertThat(Duration.between(recordedCursor, OffsetDateTime.now(ZoneOffset.UTC)).abs())
+                .isLessThan(Duration.ofMinutes(1));
+    }
+
+    @Test
+    void syncDeltaAndReleaseClampsTheWindowToNvdsMaximumSpanWhenTheCursorIsVeryStale() {
+        // NVD's documented lastModStartDate/lastModEndDate max span is 120 days -- a cursor far
+        // older than that (e.g. the scheduler was disabled for months) must not produce an
+        // out-of-range request; the recorded cursor should advance by roughly 120 days, not jump
+        // straight to "now".
+        OffsetDateTime cursor = OffsetDateTime.now(ZoneOffset.UTC).minusDays(200);
+        CpeDictionarySyncState state = new CpeDictionarySyncState();
+        state.setInitialSyncCompleted(true);
+        state.setLastSyncedAt(cursor);
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        service.syncDeltaAndRelease(Optional.empty());
+
+        ArgumentCaptor<CpeDictionarySyncState> captor = ArgumentCaptor.forClass(CpeDictionarySyncState.class);
+        verify(cpeDictionarySyncStateRepository).save(captor.capture());
+        OffsetDateTime recordedCursor = captor.getValue().getLastSyncedAt();
+        assertThat(recordedCursor).isBefore(OffsetDateTime.now(ZoneOffset.UTC).minusDays(50));
+        assertThat(Duration.between(cursor, recordedCursor)).isLessThanOrEqualTo(Duration.ofDays(121));
+    }
+
+    @Test
+    void syncDeltaAndReleaseFallsBackToLastWeekWhenNoCursorIsRecorded() {
+        // Defensive fallback: hasCompletedInitialSync() true but last_synced_at somehow still null
+        // must not throw or silently sync nothing -- it should still page through a bounded window.
+        when(cpeDictionarySyncStateRepository.findById((short) 1)).thenReturn(Optional.empty());
+
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        SyncOutcome outcome = service.syncDeltaAndRelease(Optional.empty());
+
+        assertThat(outcome.completed()).isTrue();
+        syncServer.verify();
+    }
+
+    @Test
+    void syncDeltaAndReleaseFreesTheGuardSlotOnCompletion() {
+        assertThat(service.tryBeginFullSync()).isTrue();
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalResults\":0,\"products\":[]}", MediaType.APPLICATION_JSON));
+
+        service.syncDeltaAndRelease(Optional.empty());
+
+        assertThat(service.tryBeginFullSync())
+                .as("the slot must be free again after a normal delta completion")
+                .isTrue();
+    }
+
+    // --- closed-mode backlog item 330 (A): blank keyword must never fall through to an unfiltered
+    // full sync ---------------------------------------------------------------------------------
+
+    @Test
+    void syncByKeywordRejectsNullKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncByKeyword(null, Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
+    @Test
+    void syncByKeywordRejectsEmptyKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncByKeyword("", Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
+    @Test
+    void syncByKeywordRejectsWhitespaceOnlyKeywordWithoutMakingAnyRequest() {
+        assertThatThrownBy(() -> service.syncByKeyword("   ", Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        syncServer.verify();
+    }
+
+    @Test
+    void syncDeltaAndReleaseFreesTheGuardSlotEvenWhenTheSyncThrows() {
+        assertThat(service.tryBeginFullSync()).isTrue();
+        syncServer.expect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"totalResults\":1,\"products\":[{\"cpe\":{\"cpeName\":"
+                                + "\"cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*\",\"titles\":[]}}]}",
+                        MediaType.APPLICATION_JSON));
+        doThrow(new RuntimeException("db down")).when(cpeDictionaryRepository).upsertBatch(anyList());
+
+        assertThatThrownBy(() -> service.syncDeltaAndRelease(Optional.empty()))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("db down");
+
+        assertThat(service.tryBeginFullSync())
+                .as("the slot must be free again even when the delta sync itself throws")
+                .isTrue();
     }
 }

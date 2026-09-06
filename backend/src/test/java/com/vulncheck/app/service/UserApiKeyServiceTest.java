@@ -6,12 +6,18 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.vulncheck.app.entity.User;
 import com.vulncheck.app.entity.UserSecret;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.repository.UserSecretRepository;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -19,8 +25,10 @@ import org.springframework.test.util.ReflectionTestUtils;
  * Unit coverage for {@link UserApiKeyService#getAdminNvdApiKey()} (task-backlog item 142) — the
  * three ways it must fall back to {@link Optional#empty()} without throwing (matching the
  * existing "works fine unkeyed, just slower" design), plus the happy path where an admin NVD key
- * is actually resolved. {@link #getNvdApiKey(Long)} itself is exercised indirectly through {@code
- * getAdminNvdApiKey()}; it has no other test coverage to duplicate here.
+ * is actually resolved. Also covers {@link UserApiKeyService#getNvdApiKey(Long)}'s own fail-soft
+ * decrypt behavior (including its WARN-log dedup, task-backlog item 274) directly. {@code
+ * getClaudeApiKey} has no equivalent coverage here — closed-mode B2 removed it along with every
+ * Claude call site (see {@link UserApiKeyService}'s own class javadoc).
  */
 class UserApiKeyServiceTest {
 
@@ -157,5 +165,120 @@ class UserApiKeyServiceTest {
                 .thenReturn("decrypted-nvd-key");
 
         assertThat(service.getAdminNvdApiKey()).contains("decrypted-nvd-key");
+    }
+
+    @Test
+    void getNvdApiKeyReturnsEmptyWhenDecryptThrows() {
+        // Regression test for task-backlog item 248: a decrypt failure (e.g. AEADBadTagException
+        // from a key registered before the 2026-08-28 encryption key rotation) must degrade to
+        // Optional.empty() rather than propagate — the NVD key is only a rate-limit optimization,
+        // and before this fix the exception aborted the entire pipeline (Stage1IdentificationService
+        // / NvdVulnerabilitySource / NvdKeywordVulnerabilitySource / AdminController).
+        UserSecret secret = new UserSecret(1L, 7L, UserSecret.PROVIDER_NVD, "encrypted-blob", null);
+        when(userSecretRepository.findByUserIdAndProvider(7L, UserSecret.PROVIDER_NVD))
+                .thenReturn(Optional.of(secret));
+        when(secretEncryptionService.decrypt("encrypted-blob", 7L, UserSecret.PROVIDER_NVD))
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"));
+
+        assertThat(service.getNvdApiKey(7L)).isEmpty();
+    }
+
+    @Test
+    void getNvdApiKeyLogsAtWarnOnlyOnceThenDowngradesToDebugForTheSameUser() {
+        // Task-backlog item 274: getNvdApiKey is called once per job item -- up to twice per item
+        // across its several callers (Stage1IdentificationService's live CPE fallback,
+        // NvdVulnerabilitySource's live CVE lookup) -- so a permanently-failing decrypt (e.g. a key
+        // registered before the 2026-08-28 encryption key rotation, item 248) would otherwise log
+        // the exact same WARN line up to 2,000 times for a single 1,000-item job. Confirms the
+        // first failure for a given userId logs at WARN and every later one for that same userId
+        // logs at DEBUG instead.
+        UserSecret secret = new UserSecret(1L, 7L, UserSecret.PROVIDER_NVD, "encrypted-blob", null);
+        when(userSecretRepository.findByUserIdAndProvider(7L, UserSecret.PROVIDER_NVD))
+                .thenReturn(Optional.of(secret));
+        when(secretEncryptionService.decrypt("encrypted-blob", 7L, UserSecret.PROVIDER_NVD))
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"));
+
+        List<ILoggingEvent> events = captureLogEvents(() -> {
+            assertThat(service.getNvdApiKey(7L)).isEmpty();
+            assertThat(service.getNvdApiKey(7L)).isEmpty();
+            assertThat(service.getNvdApiKey(7L)).isEmpty();
+        });
+
+        assertThat(events).hasSize(3);
+        assertThat(events.get(0).getLevel()).isEqualTo(Level.WARN);
+        assertThat(events.get(1).getLevel()).isEqualTo(Level.DEBUG);
+        assertThat(events.get(2).getLevel()).isEqualTo(Level.DEBUG);
+    }
+
+    @Test
+    void getNvdApiKeyTracksTheWarnedFlagPerUserIdIndependently() {
+        // A different user's own first decrypt failure must still log at WARN even after another
+        // user has already been warned -- the dedup is per-userId, not a single process-wide switch
+        // that would silently hide a second, unrelated user's own first-time failure.
+        UserSecret secretUserA = new UserSecret(1L, 7L, UserSecret.PROVIDER_NVD, "encrypted-blob-a", null);
+        UserSecret secretUserB = new UserSecret(2L, 8L, UserSecret.PROVIDER_NVD, "encrypted-blob-b", null);
+        when(userSecretRepository.findByUserIdAndProvider(7L, UserSecret.PROVIDER_NVD))
+                .thenReturn(Optional.of(secretUserA));
+        when(userSecretRepository.findByUserIdAndProvider(8L, UserSecret.PROVIDER_NVD))
+                .thenReturn(Optional.of(secretUserB));
+        when(secretEncryptionService.decrypt("encrypted-blob-a", 7L, UserSecret.PROVIDER_NVD))
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"));
+        when(secretEncryptionService.decrypt("encrypted-blob-b", 8L, UserSecret.PROVIDER_NVD))
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"));
+
+        List<ILoggingEvent> events = captureLogEvents(() -> {
+            assertThat(service.getNvdApiKey(7L)).isEmpty();
+            assertThat(service.getNvdApiKey(8L)).isEmpty();
+        });
+
+        assertThat(events).hasSize(2);
+        assertThat(events).allSatisfy(event -> assertThat(event.getLevel()).isEqualTo(Level.WARN));
+    }
+
+    @Test
+    void getNvdApiKeyLogsAtWarnAgainAfterAnInterveningSuccessClearsTheDedupFlag() {
+        // REVISE round 2 (senior-reviewer 2026-09-04, PR#188): the catch block in getNvdApiKey
+        // covers both a permanent decrypt failure AND a transient repository-layer exception, so
+        // the dedup must only suppress repeats of the SAME ongoing failure episode -- not every
+        // future failure for that user -- or a single transient blip that later resolves itself
+        // would permanently downgrade a later, genuinely new (and actionable) decrypt failure to
+        // DEBUG for the rest of the process's lifetime. Confirms a success between two failures
+        // clears the flag, so the second failure logs at WARN again rather than DEBUG.
+        UserSecret secret = new UserSecret(1L, 7L, UserSecret.PROVIDER_NVD, "encrypted-blob", null);
+        when(userSecretRepository.findByUserIdAndProvider(7L, UserSecret.PROVIDER_NVD))
+                .thenReturn(Optional.of(secret));
+        when(secretEncryptionService.decrypt("encrypted-blob", 7L, UserSecret.PROVIDER_NVD))
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"))
+                .thenReturn("decrypted-nvd-key")
+                .thenThrow(new IllegalStateException("Failed to decrypt secret"));
+
+        List<ILoggingEvent> events = captureLogEvents(() -> {
+            assertThat(service.getNvdApiKey(7L)).isEmpty();
+            assertThat(service.getNvdApiKey(7L)).contains("decrypted-nvd-key");
+            assertThat(service.getNvdApiKey(7L)).isEmpty();
+        });
+
+        assertThat(events).hasSize(2);
+        assertThat(events).allSatisfy(event -> assertThat(event.getLevel()).isEqualTo(Level.WARN));
+    }
+
+    /** Captures every log event {@code UserApiKeyService}'s own logger emits while {@code action}
+     *  runs, temporarily lowering the logger to DEBUG (Spring Boot's default root level is INFO,
+     *  which would otherwise silently drop the DEBUG-level events these tests need to see) and
+     *  restoring both the original level and appender list afterward regardless of outcome. */
+    private List<ILoggingEvent> captureLogEvents(Runnable action) {
+        Logger logger = (Logger) LoggerFactory.getLogger(UserApiKeyService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        Level originalLevel = logger.getLevel();
+        logger.setLevel(Level.DEBUG);
+        try {
+            action.run();
+        } finally {
+            logger.detachAppender(appender);
+            logger.setLevel(originalLevel);
+        }
+        return appender.list;
     }
 }

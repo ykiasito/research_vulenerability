@@ -25,6 +25,26 @@
     <span style="color: #999;">⚪ 未特定</span> = 特定できず。結果を鵜呑みにせず、特に🔴🟡は必要に応じてご自身でも確認してください。
 </p>
 
+<!-- closed-mode backlog item 267: item-list pagination -- ITEMS_PAGE_SIZE items per page (see
+     JobController's own javadoc for why). Shown above and below the table so a long page doesn't
+     force scrolling back up just to move to the next page. -->
+<p th:if="${totalPages > 1}">
+    <a th:if="${currentPage > 0}" th:href="@{/jobs/{id}(id=${job.id}, page=${currentPage - 1})}">← 前のページ</a>
+    <span th:text="${currentPage + 1} + ' / ' + ${totalPages} + ' ページ（全' + ${totalItems} + '件）'"></span>
+    <a th:if="${currentPage + 1 < totalPages}" th:href="@{/jobs/{id}(id=${job.id}, page=${currentPage + 1})}">次のページ →</a>
+    <!-- closed-mode backlog item 275: abbreviated page-number links ("1 2 3 … 20") -- see
+         JobController#computeVisiblePageNumbers's own javadoc. A null entry renders as "…"; page 1
+         and the last page are always present, serving as the 先頭/末尾へのジャンプ links. -->
+    <span th:each="p : ${visiblePageNumbers}" style="margin-left: 0.4em;">
+        <span th:if="${p == null}">…</span>
+        <th:block th:if="${p != null}">
+            <strong th:if="${p == currentPage + 1}" th:text="${p}"></strong>
+            <a th:unless="${p == currentPage + 1}"
+               th:href="@{/jobs/{id}(id=${job.id}, page=${p - 1})}" th:text="${p}"></a>
+        </th:block>
+    </span>
+</p>
+
 <table border="1" cellpadding="4">
     <thead>
     <tr>
@@ -185,6 +205,23 @@
     </tbody>
 </table>
 
+<p th:if="${totalPages > 1}">
+    <a th:if="${currentPage > 0}" th:href="@{/jobs/{id}(id=${job.id}, page=${currentPage - 1})}">← 前のページ</a>
+    <span th:text="${currentPage + 1} + ' / ' + ${totalPages} + ' ページ（全' + ${totalItems} + '件）'"></span>
+    <a th:if="${currentPage + 1 < totalPages}" th:href="@{/jobs/{id}(id=${job.id}, page=${currentPage + 1})}">次のページ →</a>
+    <!-- closed-mode backlog item 275: abbreviated page-number links ("1 2 3 … 20") -- see
+         JobController#computeVisiblePageNumbers's own javadoc. A null entry renders as "…"; page 1
+         and the last page are always present, serving as the 先頭/末尾へのジャンプ links. -->
+    <span th:each="p : ${visiblePageNumbers}" style="margin-left: 0.4em;">
+        <span th:if="${p == null}">…</span>
+        <th:block th:if="${p != null}">
+            <strong th:if="${p == currentPage + 1}" th:text="${p}"></strong>
+            <a th:unless="${p == currentPage + 1}"
+               th:href="@{/jobs/{id}(id=${job.id}, page=${p - 1})}" th:text="${p}"></a>
+        </th:block>
+    </span>
+</p>
+
 <p style="font-size: 0.9em; color: #555;">
     <strong>CSVエクスポートの research_incomplete_reason 列</strong>について:
     空欄 = 調査済み（脆弱性なし、または実際に見つかった脆弱性あり） /
@@ -200,6 +237,7 @@
 <p>
     <a th:unless="${job.status == 'PENDING' || job.status == 'PROCESSING'}"
        th:href="@{/jobs/{id}/export.csv(id=${job.id})}">CSVエクスポート</a>
+    <span th:if="${totalPages > 1}" style="font-size: 0.85em; color: #555;">（画面表示はページ分割していますが、CSVは常に全アイテムを含みます）</span>
     <a th:href="@{/jobs}">ジョブ一覧に戻る</a>
 </p>
 </body>

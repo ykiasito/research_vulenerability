@@ -2,6 +2,7 @@ package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
 import java.util.ArrayList;
@@ -119,15 +120,15 @@ public class NpmMirrorSyncService {
             versionKeys.forEachRemaining(versions::add);
             if (versions.isEmpty()) {
                 log.warn("npm registry returned a package body with no parseable version keys for "
-                        + "package={}", packageName);
+                        + "package={}", LogSanitizer.sanitize(packageName));
                 return Optional.empty();
             }
             return Optional.of(versions);
         } catch (HttpClientErrorException.NotFound e) {
-            log.debug("npm registry has no entry for package={}", packageName);
+            log.debug("npm registry has no entry for package={}", LogSanitizer.sanitize(packageName));
             return Optional.empty();
         } catch (Exception e) {
-            log.warn("npm registry package fetch failed for package={}", packageName, e);
+            log.warn("npm registry package fetch failed for package={}", LogSanitizer.sanitize(packageName), e);
             return Optional.empty();
         }
     }

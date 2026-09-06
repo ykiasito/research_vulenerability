@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.vulncheck.app.config.SecurityConfig;
+import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
@@ -83,6 +84,8 @@ class AdminControllerSecurityTest {
     private NvdCveSyncService nvdCveSyncService;
     @MockBean
     private NvdCveSyncStateRepository nvdCveSyncStateRepository;
+    @MockBean
+    private CpeDictionarySyncStateRepository cpeDictionarySyncStateRepository;
 
     @Test
     void unauthenticatedRequestIsRedirectedToLogin() throws Exception {

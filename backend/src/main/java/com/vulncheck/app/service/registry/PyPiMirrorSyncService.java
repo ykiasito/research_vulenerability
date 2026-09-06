@@ -2,6 +2,7 @@ package com.vulncheck.app.service.registry;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.vulncheck.app.repository.RegistryPackageMirrorRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import com.vulncheck.app.service.vuln.OsvPackageNameNormalizer;
 import java.net.URI;
@@ -154,15 +155,15 @@ public class PyPiMirrorSyncService {
             }
             if (versions.isEmpty()) {
                 log.warn("PyPI simple index returned a body with no parseable version entries for "
-                        + "package={}", packageName);
+                        + "package={}", LogSanitizer.sanitize(packageName));
                 return Optional.empty();
             }
             return Optional.of(versions);
         } catch (HttpClientErrorException.NotFound e) {
-            log.debug("PyPI simple index has no entry for package={}", packageName);
+            log.debug("PyPI simple index has no entry for package={}", LogSanitizer.sanitize(packageName));
             return Optional.empty();
         } catch (Exception e) {
-            log.warn("PyPI simple index fetch failed for package={}", packageName, e);
+            log.warn("PyPI simple index fetch failed for package={}", LogSanitizer.sanitize(packageName), e);
             return Optional.empty();
         }
     }

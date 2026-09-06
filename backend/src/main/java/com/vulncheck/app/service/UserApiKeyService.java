@@ -6,6 +6,8 @@ import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.repository.UserSecretRepository;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -36,13 +38,75 @@ public class UserApiKeyService {
     @Value("${app.admin-email:}")
     private String adminEmail;
 
-    /** NVD keys are free (no billing) and only unlock a higher client-side rate limit, so unlike
-     *  the Claude key there's no cost reason to gate this — it's simply "does this user have one
-     *  registered", used by whichever job/admin action happens to be running as them. */
+    /**
+     * Task-backlog item 274: {@link #getNvdApiKey(Long)} is called once per job item (up to twice
+     * — {@code Stage1IdentificationService}'s live CPE fallback and {@code
+     * NvdVulnerabilitySource}'s live CVE lookup each call it independently for the same item), so a
+     * user whose NVD key permanently fails to decrypt (e.g. registered before the 2026-08-28
+     * encryption key rotation — item 248) would otherwise log the exact same WARN line up to 2,000
+     * times for a single 1,000-item job. Tracks which {@code userId}s currently have an
+     * unacknowledged failure already logged at WARN, process-wide (not per-job — simpler). {@link
+     * #getNvdApiKey(Long)} itself removes a {@code userId} from this set the moment it next
+     * succeeds (REVISE round 2, senior-reviewer 2026-09-04, PR#188), so membership here means "this
+     * user's current, still-ongoing failure episode was already logged at WARN once" — not "this
+     * user has ever failed" — and a later, genuinely new failure for the same user (after an
+     * intervening success) logs at WARN again rather than staying suppressed for the rest of the
+     * process's lifetime. See {@link #getNvdApiKey(Long)}'s own javadoc for why that distinction
+     * matters. {@link ConcurrentHashMap#newKeySet()} rather than a plain {@code HashSet} since
+     * {@link #getNvdApiKey(Long)} runs concurrently across {@code itemProcessingExecutor}'s threads
+     * within one job (and potentially across concurrently-running jobs, since this service is a
+     * singleton).
+     */
+    private final Set<Long> nvdKeyDecryptFailureWarnedUserIds = ConcurrentHashMap.newKeySet();
+
+    /**
+     * NVD keys are free (no billing) and only unlock a higher client-side rate limit, so unlike
+     * the Claude key there's no cost reason to gate this — it's simply "does this user have one
+     * registered", used by whichever job/admin action happens to be running as them.
+     *
+     * <p>Also falls back to {@link Optional#empty()} (logging a warning with only {@code userId},
+     * never the ciphertext/key/exception detail, to avoid leaking secret material into logs) if
+     * decryption itself fails — e.g. a key rotation, AAD mismatch, or row corruption, matching
+     * {@link #getAdminNvdApiKey()}'s existing fail-soft design below. Before this fix, a decrypt
+     * failure here propagated all the way up through {@code Stage1IdentificationService},
+     * {@code NvdVulnerabilitySource}, {@code NvdKeywordVulnerabilitySource}, and
+     * {@code AdminController}, aborting the entire pipeline over what is only a rate-limit
+     * optimization — confirmed in practice via an {@code AEADBadTagException} on keys registered
+     * before the 2026-08-28 encryption key rotation (task-backlog item 248).
+     *
+     * <p>Only the first failure of an ongoing episode for a given {@code userId} logs at WARN —
+     * every later one (this method is called once per job item, up to twice per item across its
+     * different callers) downgrades to DEBUG, since repeating the same WARN up to 2,000 times for
+     * one 1,000-item job added nothing but noise (task-backlog item 274). The {@code catch} below
+     * covers both a permanent decrypt failure (key rotation, AAD mismatch, row corruption) AND a
+     * transient failure from {@link UserSecretRepository#findByUserIdAndProvider} itself (e.g. a
+     * {@code DataAccessResourceFailureException} from a connection blip or pool exhaustion) — both
+     * degrade to unkeyed the same way for this one call. A success — whether it resolves an actual
+     * key or simply finds none registered — clears the {@code userId} from {@link
+     * #nvdKeyDecryptFailureWarnedUserIds} before returning, so the dedup above only ever suppresses
+     * repeats of the SAME ongoing failure episode, never every future failure for that user (REVISE
+     * round 2, senior-reviewer 2026-09-04, PR#188): the first version of this dedup never cleared
+     * the flag, so a single transient repository blip that happened to resolve itself could
+     * permanently downgrade a later, genuinely new, actionable decrypt failure (e.g. from key
+     * rotation) to DEBUG for the rest of the process's lifetime — exactly the failure this dedup
+     * exists to surface. See {@link #nvdKeyDecryptFailureWarnedUserIds}'s own javadoc.
+     */
     public Optional<String> getNvdApiKey(Long userId) {
-        return userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_NVD)
-                .map(secret -> secretEncryptionService.decrypt(
-                        secret.getEncryptedKey(), userId, UserSecret.PROVIDER_NVD));
+        try {
+            Optional<String> key = userSecretRepository.findByUserIdAndProvider(userId, UserSecret.PROVIDER_NVD)
+                    .map(secret -> secretEncryptionService.decrypt(
+                            secret.getEncryptedKey(), userId, UserSecret.PROVIDER_NVD));
+            nvdKeyDecryptFailureWarnedUserIds.remove(userId);
+            return key;
+        } catch (Exception e) {
+            if (nvdKeyDecryptFailureWarnedUserIds.add(userId)) {
+                log.warn("Failed to decrypt NVD API key for userId={} — falling back to unkeyed", userId);
+            } else {
+                log.debug("Failed to decrypt NVD API key for userId={} — falling back to unkeyed "
+                        + "(already logged at WARN for this user)", userId);
+            }
+            return Optional.empty();
+        }
     }
 
     /**

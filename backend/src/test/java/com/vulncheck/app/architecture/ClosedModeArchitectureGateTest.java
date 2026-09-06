@@ -464,7 +464,8 @@ class ClosedModeArchitectureGateTest {
             "V38__registry_mirror_seed_name.sql",
             "V39__nvd_cve_mirror.sql",
             "V40__vulnerabilities_cvss_score_and_max_fixed_version.sql",
-            "V41__backfill_max_fixed_version.sql");
+            "V41__backfill_max_fixed_version.sql",
+            "V42__cpe_dictionary_sync_state.sql");
 
     /**
      * SHA-256 (hex-encoded) of every file in {@link #MASTER_MIGRATION_BASELINE}, taken from the
@@ -604,6 +605,12 @@ class ClosedModeArchitectureGateTest {
         MASTER_MIGRATION_CONTENT_SHA256.put(
                 "V41__backfill_max_fixed_version.sql",
                 "df81fc55149557542c9f903f33def2ee8d24dc917ddcf25da4b45d667ad34699");
+        // Closed-mode backlog item 360 Step2 (2026-09-06): refreshed together with
+        // MASTER_MIGRATION_BASELINE in the same commit as this master-sync merge, which brought
+        // V42 in (item 283/330's CPE dictionary delta-sync state tracking).
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V42__cpe_dictionary_sync_state.sql",
+                "67e04b21978bad12c4b8088b649e550d9738bbd7734b3c27184f3f3087c425e7");
     }
 
     private static final Pattern VERSIONED_MIGRATION = Pattern.compile("V\\d+__.*\\.sql");
