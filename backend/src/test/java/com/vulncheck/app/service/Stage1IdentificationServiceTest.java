@@ -1638,6 +1638,70 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void mavenArtifactTokenVariantFindsCandidateAndIsAcceptedWhenAiConfirmsIt() {
+        // Backlog item 388: "org.apache.logging.log4j:log4j-core" fed verbatim into pg_trgm scores
+        // only 0.222 against the dictionary's real apache:log4j entry — under the 0.3 threshold, so
+        // the literal query finds nothing at all. The suffix-stripped artifactId token ("log4j") is
+        // tried as an extra variant and finds it; same "never auto-trust a mechanically-derived
+        // guess" AI-confirmation gate as a name-variant match.
+        CpeDictionaryEntry log4j = cpeEntry("cpe:2.3:a:apache:log4j:2.17.0:*:*:*:*:*:*:*", "log4j");
+        when(cpeDictionaryRepository.findFuzzyMatches(eq("org.apache.logging.log4j:log4j-core"), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findFuzzyMatches(eq("log4j"), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(log4j));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.of("sk-ant-test"));
+        when(llmServiceClient.disambiguate(eq("sk-ant-test"), isA(ResearchJobItem.class), any(), any()))
+                .thenReturn(Optional.of(new DisambiguateResponse(true, 0, 0.8, "usage text matches Log4j", TEST_USAGE)));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.apache.logging.log4j:log4j-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:log4j:1.0.0:*:*:*:*:*:*:*");
+        assertThat(result.get().getCpeCandidateVariantDerived()).isTrue();
+        assertThat(result.get().getCpeCandidateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void mavenArtifactTokenVariantCandidateIsDroppedRatherThanAutoAcceptedWithNoApiKey() {
+        // Same setup as the AI-confirmed case above, but with no Claude key configured — a
+        // mechanically-derived artifactId-token guess must never be auto-trusted, same as any other
+        // variant-derived candidate (resolveSingleCpeCandidate's own forced-AI-check javadoc).
+        CpeDictionaryEntry kafka = cpeEntry("cpe:2.3:a:apache:kafka:3.6.0:*:*:*:*:*:*:*", "kafka");
+        when(cpeDictionaryRepository.findFuzzyMatches(eq("org.apache.kafka:kafka-clients"), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        when(cpeDictionaryRepository.findFuzzyMatches(eq("kafka"), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(kafka));
+        when(userApiKeyService.getClaudeApiKey(USER_ID)).thenReturn(Optional.empty());
+
+        Optional<IdentifiedProduct> result = service(List.of()).identify(item("org.apache.kafka:kafka-clients"), USER_ID);
+
+        assertThat(result).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
+    void mavenArtifactTokenVariantFallbackNeverFiresWhenTheLiteralCoordinateAlreadyMatches() {
+        // The variant fallback is strictly additive — a productName that already matches literally
+        // must never trigger the extra artifactId-token search at all. Product deliberately set to
+        // the exact literal query text so the strict containment pass unambiguously accepts it
+        // regardless of tokenization details, keeping this test's only concern the call count below.
+        CpeDictionaryEntry log4jCore = cpeEntry(
+                "cpe:2.3:a:apache:log4j-core:2.17.0:*:*:*:*:*:*:*", "org.apache.logging.log4j:log4j-core");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(log4jCore));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.apache.logging.log4j:log4j-core"), USER_ID);
+
+        assertThat(result).isPresent();
+        verify(cpeDictionaryRepository, org.mockito.Mockito.times(1))
+                .findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt());
+    }
+
+    @Test
     void acronymContractionNeverMatchesAnUnrelatedShortSlugForAnimalSnifferAnnotations() {
         // Measured false positive (senior review, 2026-08-25): the acronym/contraction direction
         // routed through plausibleContainmentOnly's unanchored substring check, which is unsafe for
