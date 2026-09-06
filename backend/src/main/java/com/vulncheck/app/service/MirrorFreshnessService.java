@@ -48,6 +48,30 @@ import org.springframework.stereotype.Service;
  *   <li>the last successful sync is older than this mirror's own freshness threshold.
  * </ol>
  *
+ * <p><b>The raw {@code last_sync_error} text is never shown here</b> (senior review on PR #274,
+ * round 2 — a real finding, not a hardening suggestion): {@link #staleMirrorWarnings()} is rendered
+ * on {@code jobs/detail.html}, which any authenticated user can reach ({@code
+ * .anyRequest().authenticated()} — see {@code SecurityConfig}), whereas {@code last_sync_error}
+ * itself was previously visible only behind {@code /admin/**}'s {@code ROLE_ADMIN} gate. Both
+ * {@code GhsaSyncService} and {@code OsvSyncService} store the raw {@code
+ * Exception#getMessage()}/transport-error text in that column, which can carry internal detail
+ * (host names, JDBC error text, file paths) never meant for a non-admin audience. {@link
+ * #checkGhsa}/{@link #checkOsv} therefore show only a fixed, non-leaking sentence pointing the
+ * reader at the relevant {@code /admin/*} page for the real detail — the {@code admin/ghsa.html}/
+ * {@code admin/osv.html} pages themselves are unaffected and keep showing the raw text, since that
+ * surface was already admin-only.
+ *
+ * <p><b>{@link #staleMirrorWarnings()}'s result is cached for {@link #CACHE_TTL_MILLIS}</b> (senior
+ * review on PR #274, round 2): {@code jobs/detail.html} auto-refreshes every 5 seconds
+ * while a job is running (see its {@code http-equiv="refresh"}), and {@link
+ * RegistryPackageMirrorRepository#maxLastSyncedAt} runs an unindexed {@code MAX(last_synced_at)}
+ * over the whole {@code registry_package_mirror} table on every call — adding an index is exactly
+ * the kind of schema change the closed-mode architecture gate forbids on this branch (see this
+ * class's own CVE.org note above), so a cache is the only closed-mode-legal fix. 5 minutes is far
+ * shorter than every mirror's own staleness threshold (2 or 9 days below), so it can never change
+ * which side of "stale" a mirror falls on — it only bounds how long a just-fixed sync can take to
+ * stop showing the banner.
+ *
  * <p><b>CVE.org (closed-mode backlog item 379) is deliberately age-only for now</b> — {@code
  * CveOrgSyncService} does not yet advance {@code cve_org_sync_state} on a failed attempt at all
  * (unlike GHSA/OSV above), so a continuously-failing CVE.org sync simply leaves {@code
@@ -76,6 +100,10 @@ public class MirrorFreshnessService {
     private static final Duration DAILY_MIRROR_STALE_AFTER = Duration.ofDays(2);
     private static final Duration WEEKLY_MIRROR_STALE_AFTER = Duration.ofDays(9);
 
+    /** See this class's own javadoc ("{@code staleMirrorWarnings()}'s result is cached...") for
+     *  why this exists and why 5 minutes is safe. */
+    private static final long CACHE_TTL_MILLIS = 5 * 60 * 1000L;
+
     private final CveOrgSyncStateRepository cveOrgSyncStateRepository;
     private final GhsaSyncStateRepository ghsaSyncStateRepository;
     private final OsvSyncStateRepository osvSyncStateRepository;
@@ -84,12 +112,32 @@ public class MirrorFreshnessService {
     private final RegistryPackageMirrorRepository registryPackageMirrorRepository;
 
     /**
+     * Plain {@code volatile} snapshot + expiry timestamp (same shape as {@code
+     * RegistryLookupCache}/{@code CpeNameVariantCache}'s entry records, simplified since this
+     * method takes no parameters — there is nothing to key on) rather than a full {@code
+     * ConcurrentHashMap}-based cache or Spring's {@code @EnableCaching} (unused anywhere in this
+     * codebase). Two threads racing past a stale/absent cache both recomputing and redundantly
+     * overwriting each other's result is harmless (the same tolerance {@code RegistryLookupCache}
+     * documents for its own equivalent race) — this is a read-only, side-effect-free query, so a
+     * lost update here is at most one extra set of DB round trips, never a correctness issue.
+     */
+    private volatile List<String> cachedWarnings;
+    private volatile long cacheExpiresAtMillis;
+
+    /**
      * @return one human-readable (Japanese) warning per mirror currently judged stale —
      *     deliberately not a single boolean, so a caller (currently only {@code JobController}) can
      *     show which specific mirror(s) are the problem rather than just "something, somewhere is
-     *     stale". Empty when every mirror looks healthy.
+     *     stale". Empty when every mirror looks healthy. Cached for {@link #CACHE_TTL_MILLIS} — see
+     *     this class's own javadoc.
      */
     public List<String> staleMirrorWarnings() {
+        long now = System.currentTimeMillis();
+        List<String> cached = cachedWarnings;
+        if (cached != null && now < cacheExpiresAtMillis) {
+            return cached;
+        }
+
         List<String> warnings = new ArrayList<>();
         checkCveOrg(warnings);
         checkGhsa(warnings);
@@ -98,6 +146,9 @@ public class MirrorFreshnessService {
         checkCsaf(warnings, SiemensCsafSyncService.VENDOR, "CSAF（Siemens）");
         checkCsaf(warnings, RedHatCsafSyncService.VENDOR, "CSAF（Red Hat）");
         checkRegistry(warnings);
+
+        cachedWarnings = warnings;
+        cacheExpiresAtMillis = now + CACHE_TTL_MILLIS;
         return warnings;
     }
 
@@ -119,7 +170,9 @@ public class MirrorFreshnessService {
             return;
         }
         if (state.getLastSyncError() != null) {
-            warnings.add("GHSA: 直近の同期が失敗しています（" + state.getLastSyncError() + "）。");
+            // Deliberately not state.getLastSyncError() itself — see this class's own javadoc
+            // ("The raw last_sync_error text is never shown here").
+            warnings.add("GHSA: 直近の同期が失敗しています。管理者に/admin/ghsaで詳細を確認してください。");
             return;
         }
         addIfStale(warnings, "GHSA", toInstant(state.getLastSyncedAt()), DAILY_MIRROR_STALE_AFTER);
@@ -132,7 +185,9 @@ public class MirrorFreshnessService {
             return;
         }
         if (state.getLastSyncError() != null) {
-            warnings.add("OSV: 直近の同期が失敗しています（" + state.getLastSyncError() + "）。");
+            // Deliberately not state.getLastSyncError() itself — see this class's own javadoc
+            // ("The raw last_sync_error text is never shown here").
+            warnings.add("OSV: 直近の同期が失敗しています。管理者に/admin/osvで詳細を確認してください。");
             return;
         }
         addIfStale(warnings, "OSV", toInstant(state.getLastSyncedAt()), DAILY_MIRROR_STALE_AFTER);
