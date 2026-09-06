@@ -1,5 +1,6 @@
 package com.vulncheck.app.service.registry;
 
+import com.vulncheck.app.service.LogSanitizer;
 import java.util.Optional;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -29,7 +30,7 @@ public class MavenCentralRegistryClient implements PackageRegistryLookup {
     @Override
     public Optional<RegistryMatch> lookup(String productName, String version) {
         log.debug("Maven Central lookup skipped for productName={}: no closed-mode mirror exists for "
-                + "this registry (docs/spec/closed-mode-plan.md §5-4)", productName);
+                + "this registry (docs/spec/closed-mode-plan.md §5-4)", LogSanitizer.sanitize(productName));
         return Optional.empty();
     }
 
