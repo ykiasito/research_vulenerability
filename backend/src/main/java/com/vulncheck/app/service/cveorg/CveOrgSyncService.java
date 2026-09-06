@@ -324,14 +324,24 @@ public class CveOrgSyncService {
         if (current == null) {
             throw new IOException("Rejected non-allowlisted download URL: " + sanitizedForLogging(url));
         }
-        for (int hop = 0; hop < MAX_REDIRECTS; hop++) {
+        // redirectsRemaining counts down exactly like GhsaSyncService.fetchBounded's own
+        // redirectsRemaining parameter (3 -> 2 -> 1 -> 0): a chain of up to MAX_REDIRECTS actual
+        // redirect hops is tolerated, and only an attempted (MAX_REDIRECTS + 1)th redirect fails.
+        // (An earlier version of this loop checked-and-followed a hop in the same iteration, which
+        // required the loop's *final* iteration to observe a non-redirect to succeed — one hop
+        // stricter than intended; peer review caught the mismatch with the claimed convention.)
+        int redirectsRemaining = MAX_REDIRECTS;
+        while (true) {
             URI next = resolveRedirectTarget(current);
             if (next.equals(current)) {
                 return openConnection(current).getInputStream();
             }
+            if (redirectsRemaining <= 0) {
+                throw new IOException("CVE.org sync: too many redirects resolving download URL (max " + MAX_REDIRECTS + ")");
+            }
+            redirectsRemaining--;
             current = next;
         }
-        throw new IOException("CVE.org sync: too many redirects resolving download URL (max " + MAX_REDIRECTS + ")");
     }
 
     /**
@@ -404,9 +414,22 @@ public class CveOrgSyncService {
                 return validatedTarget;
             });
         } catch (IllegalStateException e) {
+            // e's own message was already built through sanitizedForLogging above, so it's safe to
+            // chain as cause.
             throw new IOException(e.getMessage(), e);
         } catch (Exception e) {
-            throw new IOException("CVE.org sync: transport error resolving redirect for " + sanitizedForLogging(uri), e);
+            // Deliberately does NOT chain e as this exception's cause, and does NOT embed
+            // e.getMessage() — unlike the IllegalStateException branch above, e here is whatever
+            // cveOrgSyncRestClient's transport threw (typically Spring's ResourceAccessException on
+            // a connect timeout/reset/TLS failure), and that exception's own message embeds the
+            // full, un-sanitized request URI ("I/O error on GET request for \"<uri>\": ..."). On a
+            // second+ redirect hop, uri here already carries a previously-resolved sig=/jwt=
+            // credential (see sanitizedForLogging's javadoc) — chaining e as cause would let
+            // syncBaseline/syncDelta's log.error("...", e) print that credential into the log via
+            // the "Caused by:" line, defeating the whole point of sanitizing this method's own
+            // message. Only e's class name is safe to surface.
+            throw new IOException("CVE.org sync: transport error (" + e.getClass().getSimpleName()
+                    + ") resolving redirect for " + sanitizedForLogging(uri));
         }
     }
 
