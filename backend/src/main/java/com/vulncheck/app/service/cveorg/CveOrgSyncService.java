@@ -80,11 +80,14 @@ public class CveOrgSyncService {
      *  redirect-following loop so a misbehaving/compromised host can't cause an infinite loop. */
     private static final int MAX_REDIRECTS = 3;
     private static final int DOWNLOAD_CONNECT_TIMEOUT_MILLIS = 10_000;
-    /** Finite, not {@code 0}/unbounded (backlog item 362) — {@link URLConnection#setReadTimeout} is
-     *  a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long
+    /** Finite, not {@code 0}/unbounded (backlog items 362/398) — {@link URLConnection#setReadTimeout}
+     *  is a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long
      *  a genuinely-streaming multi-GB download can take; it only kills a connection that goes fully
      *  idle for this long, matching {@code cveOrgSyncRestClient}'s own read timeout (see {@code
-     *  RestClientConfig#cveOrgSyncRestClient}) for consistency. */
+     *  RestClientConfig#cveOrgSyncRestClient}) for consistency, and the sibling sync services'
+     *  timeout (backlog items 378/381 for {@code GhsaSyncService}/{@code OsvSyncService}). Without a
+     *  finite value, a peer that keeps the connection open but stops sending bytes would hang this
+     *  thread forever, without ever reaching {@link #recordSyncFailure}. */
     private static final int DOWNLOAD_READ_TIMEOUT_MILLIS = 30_000;
 
     private final RestClient cveOrgSyncRestClient;
@@ -115,7 +118,9 @@ public class CveOrgSyncService {
     public int syncBaseline() {
         GitHubRelease release = fetchLatestRelease();
         if (release == null || release.baselineZipUrl() == null) {
-            log.error("CVE.org baseline sync aborted: could not resolve the latest release's baseline asset");
+            String message = "Could not resolve the latest cvelistV5 release's baseline asset";
+            log.error("CVE.org baseline sync aborted: {}", message);
+            recordSyncFailure(message);
             return 0;
         }
         log.info("CVE.org baseline sync starting from release {} ({})", release.tag(), release.baselineZipUrl());
@@ -145,6 +150,12 @@ public class CveOrgSyncService {
             }
         } catch (IOException e) {
             log.error("CVE.org baseline sync failed after upserting {} records", upserted, e);
+            // Closed-mode backlog item 379: record the failure (rather than silently returning) so
+            // /admin/cve-org has a signal a continuously-failing baseline sync used to leave
+            // nowhere — deliberately e.getClass().getSimpleName(), not e.getMessage(), since a
+            // download IOException could in principle still be wrapping part of the request URL.
+            recordSyncFailure("baseline sync failed after upserting " + upserted + " records ("
+                    + e.getClass().getSimpleName() + ")");
             return upserted;
         }
 
@@ -157,7 +168,9 @@ public class CveOrgSyncService {
     public int syncDelta() {
         GitHubRelease release = fetchLatestRelease();
         if (release == null || release.deltaZipUrl() == null) {
-            log.warn("CVE.org delta sync skipped: could not resolve the latest release's delta asset");
+            String message = "Could not resolve the latest cvelistV5 release's delta asset";
+            log.warn("CVE.org delta sync skipped: {}", message);
+            recordSyncFailure(message);
             return 0;
         }
         log.info("CVE.org delta sync starting from release {} ({})", release.tag(), release.deltaZipUrl());
@@ -173,6 +186,10 @@ public class CveOrgSyncService {
             }
         } catch (IOException e) {
             log.error("CVE.org delta sync failed after upserting {} records", upserted, e);
+            // See syncBaseline's matching catch block for why this is e.getClass().getSimpleName(),
+            // not e.getMessage() (closed-mode backlog item 379).
+            recordSyncFailure("delta sync failed after upserting " + upserted + " records ("
+                    + e.getClass().getSimpleName() + ")");
             return upserted;
         }
 
@@ -284,14 +301,35 @@ public class CveOrgSyncService {
     }
 
     private void markSynced(String releaseTag, boolean baselineLoaded) {
-        CveOrgSyncState state = cveOrgSyncStateRepository.findById((short) 1).orElseGet(CveOrgSyncState::new);
-        state.setId((short) 1);
+        CveOrgSyncState state = loadState();
         state.setLastReleaseTag(releaseTag);
         state.setLastSyncedAt(OffsetDateTime.now());
+        state.setLastSyncError(null);
         if (baselineLoaded) {
             state.setBaselineLoaded(true);
         }
         cveOrgSyncStateRepository.save(state);
+    }
+
+    /** Closed-mode backlog item 379: records a failed sync attempt (baseline or delta) so the
+     *  failure is visible on /admin/cve-org instead of vanishing into the log alone. Deliberately
+     *  still advances {@code last_synced_at} to "now" — matching {@code
+     *  GhsaSyncService#failSync}'s convention — so this state's last_synced_at means "the last time
+     *  a sync was attempted", not "the last time one succeeded"; {@code last_sync_error} being
+     *  non-null is what actually distinguishes the two. Never touches {@code baseline_loaded}/
+     *  {@code last_release_tag} — a failed attempt must not make a previously-completed baseline
+     *  look un-loaded, nor overwrite a known-good release tag with nothing. */
+    private void recordSyncFailure(String message) {
+        CveOrgSyncState state = loadState();
+        state.setLastSyncedAt(OffsetDateTime.now());
+        state.setLastSyncError(message);
+        cveOrgSyncStateRepository.save(state);
+    }
+
+    private CveOrgSyncState loadState() {
+        CveOrgSyncState state = cveOrgSyncStateRepository.findById((short) 1).orElseGet(CveOrgSyncState::new);
+        state.setId((short) 1);
+        return state;
     }
 
     private GitHubRelease fetchLatestRelease() {

@@ -13,6 +13,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.vulncheck.app.entity.CveOrgSyncState;
 import com.vulncheck.app.repository.CpeDictionaryRepository;
 import com.vulncheck.app.repository.CpeDictionarySyncStateRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
@@ -533,5 +534,65 @@ class AdminControllerTest {
 
         assertThat(view).isEqualTo("admin/cpe-dictionary");
         assertThat(model.getAttribute("syncState")).isSameAs(state);
+    }
+
+    // --- closed-mode backlog item 379 follow-up (senior review on PR #278): /admin/cve-org must
+    // actually surface CveOrgSyncState (including last_sync_error), or item 379's own point --
+    // making a silently-stuck CVE.org sync visible -- is not actually achieved -----------------
+
+    /** Same syncState-exposure pattern as {@link #nvdCveFormExposesTheSyncStateToTheModel}. */
+    @Test
+    void cveOrgFormExposesTheSyncStateToTheModel() {
+        CveOrgSyncState state = new CveOrgSyncState();
+        when(cveOrgSyncStateRepository.findById((short) 1)).thenReturn(Optional.of(state));
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.cveOrgForm(model);
+
+        assertThat(view).isEqualTo("admin/cve-org");
+        assertThat(model.getAttribute("syncState")).isSameAs(state);
+    }
+
+    /**
+     * The whole point of item 379: a failed sync (however many records it upserted before failing)
+     * must never look like a plain green success on this page. {@link
+     * CveOrgSyncService#syncDelta} itself returns a plain {@code int}, so the controller cannot
+     * tell success from failure from that return value alone -- it must re-read the state {@code
+     * CveOrgSyncService} just wrote.
+     */
+    @Test
+    void cveOrgSyncDeltaShowsTheFailureInsteadOfAMisleadingSuccessMessage() {
+        when(cveOrgSyncService.syncDelta()).thenReturn(0);
+        CveOrgSyncState failedState = new CveOrgSyncState();
+        failedState.setLastSyncError("delta sync failed after upserting 0 records (IOException)");
+        when(cveOrgSyncStateRepository.findById((short) 1)).thenReturn(Optional.of(failedState));
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.cveOrgSyncDelta(model);
+
+        assertThat(view).isEqualTo("admin/cve-org");
+        assertThat(model.getAttribute("result")).isNull();
+        assertThat(model.getAttribute("syncFailureMessage")).asString()
+                .contains("失敗").contains("delta sync failed after upserting 0 records");
+        assertThat(model.getAttribute("syncState")).isSameAs(failedState);
+    }
+
+    /** A genuinely successful (even if zero-upsert, e.g. "nothing new today") run must still show
+     *  the plain green success message, not the failure branch. */
+    @Test
+    void cveOrgSyncDeltaShowsTheSuccessMessageWhenThereIsNoError() {
+        when(cveOrgSyncService.syncDelta()).thenReturn(0);
+        CveOrgSyncState healthyState = new CveOrgSyncState();
+        when(cveOrgSyncStateRepository.findById((short) 1)).thenReturn(Optional.of(healthyState));
+        AdminController controller = newController();
+        Model model = new ExtendedModelMap();
+
+        String view = controller.cveOrgSyncDelta(model);
+
+        assertThat(view).isEqualTo("admin/cve-org");
+        assertThat(model.getAttribute("result")).asString().contains("差分同期しました");
+        assertThat(model.getAttribute("syncFailureMessage")).isNull();
     }
 }

@@ -465,7 +465,9 @@ class ClosedModeArchitectureGateTest {
             "V39__nvd_cve_mirror.sql",
             "V40__vulnerabilities_cvss_score_and_max_fixed_version.sql",
             "V41__backfill_max_fixed_version.sql",
-            "V42__cpe_dictionary_sync_state.sql");
+            "V42__cpe_dictionary_sync_state.sql",
+            "V43__cve_org_sync_state_last_sync_error.sql",
+            "V44__registry_package_mirror_last_synced_at_index.sql");
 
     /**
      * SHA-256 (hex-encoded) of every file in {@link #MASTER_MIGRATION_BASELINE}, taken from the
@@ -611,6 +613,15 @@ class ClosedModeArchitectureGateTest {
         MASTER_MIGRATION_CONTENT_SHA256.put(
                 "V42__cpe_dictionary_sync_state.sql",
                 "67e04b21978bad12c4b8088b649e550d9738bbd7734b3c27184f3f3087c425e7");
+        // Closed-mode master-sync (2026-09-07): refreshed together with MASTER_MIGRATION_BASELINE
+        // in the same commit as this master-sync merge, which brought V43/V44 in (item 379's
+        // cve_org_sync_state.last_sync_error column + item 395's registry_package_mirror index).
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V43__cve_org_sync_state_last_sync_error.sql",
+                "b566ce41e0066204a026410c8fdb8c0bc237ff8b1eceabb805b45636227ddfb2");
+        MASTER_MIGRATION_CONTENT_SHA256.put(
+                "V44__registry_package_mirror_last_synced_at_index.sql",
+                "2feeb144678095d643106d03f0ad778b7c6e5dcab0c6ef6e04461ffcd448da97");
     }
 
     private static final Pattern VERSIONED_MIGRATION = Pattern.compile("V\\d+__.*\\.sql");
