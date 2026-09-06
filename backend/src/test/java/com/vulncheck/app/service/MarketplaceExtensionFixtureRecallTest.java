@@ -119,7 +119,12 @@ import org.springframework.transaction.annotation.Transactional;
         + "extension mismatches: Python (resolves to python:python instead of "
         + "microsoft:python_extension, same unrelated static-path issue noted above), ESLint and Live "
         + "Share (both come back UNIDENTIFIED rather than their expected microsoft:eslint / "
-        + "microsoft:visual_studio_live_share). The sole control mismatch is the same pre-existing "
+        + "microsoft:visual_studio_live_share). Relative to the post-item-303 measurement recorded "
+        + "directly above: Continue and Grammarly now resolve correctly (no longer among the "
+        + "mismatches), but ESLint has regressed from correctly-resolving to UNIDENTIFIED -- so this "
+        + "19/23->20/23 change is a composition change (two rows newly fixed, one newly regressed), "
+        + "not a uniform improvement. The ESLint regression is untriaged and out of this item's scope; "
+        + "tracked as backlog item 377. The sole control mismatch is the same pre-existing "
         + "item 319 case: 'Visual Studio Code Server' now correctly resolves to UNIDENTIFIED (not a "
         + "wrong-CPE miss, matching the fix already documented above), not coder:code-server.")
 class MarketplaceExtensionFixtureRecallTest {
