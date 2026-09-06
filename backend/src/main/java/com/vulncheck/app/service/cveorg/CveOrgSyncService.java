@@ -6,17 +6,22 @@ import com.vulncheck.app.entity.CveOrgSyncState;
 import com.vulncheck.app.repository.CveOrgAffectedProductRepository;
 import com.vulncheck.app.repository.CveOrgRecordRepository;
 import com.vulncheck.app.repository.CveOrgSyncStateRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URLConnection;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
+import java.util.Set;
+import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
@@ -47,6 +52,27 @@ public class CveOrgSyncService {
     private static final String LATEST_RELEASE_API = "https://api.github.com/repos/CVEProject/cvelistV5/releases/latest";
     private static final String BASELINE_ASSET_SUFFIX = "_all_CVEs_at_midnight.zip.zip";
     private static final String DELTA_ASSET_INFIX = "_delta_CVEs_at_";
+
+    /** Backlog item 416 (SSRF hardening): hosts {@link #download}'s {@code url} — parsed from
+     *  GitHub's {@code browser_download_url}, not a hardcoded constant — is allowed to connect to,
+     *  matching the allowlist discipline {@code OsvSyncService}/{@code GhsaSyncService}/both CSAF
+     *  sync services already apply to their own outbound fetches. {@code github.com} covers the
+     *  asset URL as first resolved from the releases API response; the three
+     *  {@code *.githubusercontent.com} hosts cover the redirect this project's release assets
+     *  actually land on (GitHub serves large release assets from a separate storage CDN rather than
+     *  {@code github.com} itself) — kept as a small set of known asset-CDN hostnames rather than a
+     *  {@code *.githubusercontent.com} wildcard, which would also admit unrelated hosts such as
+     *  {@code raw.}/{@code camo.githubusercontent.com}. */
+    private static final Set<String> DEFAULT_ALLOWED_HOSTS = Set.of(
+            "github.com",
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+            "github-releases.githubusercontent.com");
+    /** Bounds {@link #download}'s manual redirect-following loop so a misbehaving or compromised
+     *  host can never cause it to loop forever — same 3-hop budget {@code
+     *  GhsaSyncService}'s own bounded fetch uses. */
+    private static final int MAX_REDIRECTS = 3;
+    private static final int DOWNLOAD_CONNECT_TIMEOUT_MILLIS = 10_000;
     /** Finite, not {@code 0}/unbounded (backlog item 398) — {@link URLConnection#setReadTimeout} is
      *  a per-read (socket-idle) timeout, not a whole-download budget, so this doesn't cap how long a
      *  genuinely-streaming multi-GB baseline download can take; it only kills a connection that goes
@@ -61,6 +87,15 @@ public class CveOrgSyncService {
     private final CveOrgAffectedProductRepository cveOrgAffectedProductRepository;
     private final CveOrgSyncStateRepository cveOrgSyncStateRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    /** The real scheme/host check (backlog item 416): {@code https} plus a host in {@link
+     *  #DEFAULT_ALLOWED_HOSTS}. An inline-initialized field (same technique as {@link #objectMapper}
+     *  above), so it's excluded from the {@code @RequiredArgsConstructor}-generated constructor and
+     *  can never differ in production. Package-private and overridable via reflection purely so
+     *  {@code CveOrgSyncServiceTest} can point {@link #download}'s redirect-following loop at a local
+     *  {@code com.sun.net.httpserver.HttpServer} (reachable only at {@code http://localhost:<port>})
+     *  without ever loosening this predicate in production. */
+    private final Predicate<URI> urlAllowed = uri ->
+            "https".equalsIgnoreCase(uri.getScheme()) && uri.getHost() != null && DEFAULT_ALLOWED_HOSTS.contains(uri.getHost());
 
     /** Full baseline load — ~380k records, ~1.1GB download. Not scheduled; see class javadoc. */
     public int syncBaseline() {
@@ -309,15 +344,131 @@ public class CveOrgSyncService {
         }
     }
 
-    /** Plain {@link URLConnection}, not the {@code cveOrgSyncRestClient} bean — that client's 30s
-     *  read timeout happens to match {@link #DOWNLOAD_READ_TIMEOUT_MILLIS} used here, but the bean
-     *  itself isn't reused because it isn't wired for streaming a multi-GB response body. */
-    private InputStream download(String url) throws IOException {
-        URLConnection connection = URI.create(url).toURL().openConnection();
-        connection.setConnectTimeout(10_000);
+    /** Backlog item 416: drives the download through a bounded, manually-followed redirect loop
+     *  instead of handing {@code url} straight to {@link URLConnection#openConnection()} with
+     *  automatic redirect-following left on. {@code url} is GitHub-supplied (parsed from {@code
+     *  browser_download_url}), not a hardcoded constant, so both it and every redirect hop it leads
+     *  to are validated against {@link #DEFAULT_ALLOWED_HOSTS} (via {@link #validatedUri}) before
+     *  ever connecting — mirroring the allowlist discipline the sibling sync services already apply.
+     *  Exactly one HTTP connection is opened per hop; only the terminal (non-redirect) response's
+     *  body is ever read, so a redirect never causes a byte of the asset to be downloaded twice.
+     *
+     *  <p>Package-private so {@code CveOrgSyncServiceTest} can exercise the loop end-to-end against a
+     *  local {@code com.sun.net.httpserver.HttpServer}. */
+    InputStream download(String url) throws IOException {
+        URI current = validatedUri(url);
+        if (current == null) {
+            throw new IOException("CVE.org sync: rejected non-allowlisted download URL " + sanitizedForLogging(url));
+        }
+        int redirectsRemaining = MAX_REDIRECTS;
+        while (true) {
+            HttpURLConnection connection = openConnection(current);
+            int responseCode = responseCodeOf(connection, current);
+            if (responseCode >= 200 && responseCode < 300) {
+                return connection.getInputStream();
+            }
+            if (responseCode >= 300 && responseCode < 400) {
+                String location = connection.getHeaderField(HttpHeaders.LOCATION);
+                connection.disconnect();
+                if (location == null) {
+                    throw new IOException(
+                            "CVE.org sync: redirect response had no Location header for " + sanitizedForLogging(current));
+                }
+                if (redirectsRemaining <= 0) {
+                    throw new IOException("CVE.org sync: too many redirects resolving download URL (max " + MAX_REDIRECTS + ")");
+                }
+                URI target = current.resolve(location);
+                URI next = validatedUri(target.toString());
+                if (next == null) {
+                    throw new IOException(
+                            "CVE.org sync: rejected non-allowlisted redirect target " + sanitizedForLogging(target));
+                }
+                redirectsRemaining--;
+                current = next;
+                continue;
+            }
+            connection.disconnect();
+            throw new IOException("CVE.org sync: unexpected HTTP " + responseCode + " opening " + sanitizedForLogging(current));
+        }
+    }
+
+    /** Wraps {@link HttpURLConnection#getResponseCode()} so a transport-level failure (connect
+     *  timeout, connection reset, TLS error) can never leak {@code uri} — which, past the first hop,
+     *  may already carry a redirect-signed query string — through an unsanitized cause or message.
+     *  Package-private purely so the unit test can force a deterministic transport failure via a
+     *  stubbed {@link HttpURLConnection}. */
+    int responseCodeOf(HttpURLConnection connection, URI uri) throws IOException {
+        try {
+            return connection.getResponseCode();
+        } catch (IOException e) {
+            throw new IOException("CVE.org sync: transport error (" + e.getClass().getSimpleName()
+                    + ") connecting to " + sanitizedForLogging(uri));
+        }
+    }
+
+    /** Validates {@code url} is {@code https} and its host is one of {@link #DEFAULT_ALLOWED_HOSTS}
+     *  before ever connecting (backlog item 416) — {@code url} ultimately comes from GitHub's parsed
+     *  {@code browser_download_url}, not a hardcoded constant, so a compromised/spoofed release
+     *  response could otherwise redirect this sync job at an arbitrary host. Package-private so the
+     *  unit test can call it directly. */
+    URI validatedUri(String url) {
+        URI uri;
+        try {
+            uri = URI.create(url);
+        } catch (IllegalArgumentException e) {
+            log.warn("CVE.org sync: rejecting an unparseable download URL");
+            return null;
+        }
+        if (!urlAllowed.test(uri)) {
+            log.warn("CVE.org sync: rejecting fetch of {} — not https or not an allowlisted host", sanitizedForLogging(uri));
+            return null;
+        }
+        return uri;
+    }
+
+    /** Opens the raw {@link HttpURLConnection} for {@code uri} with the same finite connect/read
+     *  timeouts the previous plain-{@link URLConnection} version used, plus {@link
+     *  HttpURLConnection}'s own automatic redirect-following disabled — {@link #download}'s loop is
+     *  what decides whether to follow a redirect (after re-validating its target), not this
+     *  connection itself. Deliberately does not inspect the response code — {@link #download} needs
+     *  the {@code Location} header off a 3xx response before deciding whether to follow it, so
+     *  response-code interpretation stays entirely {@link #download}'s responsibility. Package-private
+     *  so the unit test can assert the concrete timeout/redirect-following values directly. */
+    HttpURLConnection openConnection(URI uri) throws IOException {
+        URLConnection connection = uri.toURL().openConnection();
+        connection.setConnectTimeout(DOWNLOAD_CONNECT_TIMEOUT_MILLIS);
         connection.setReadTimeout(DOWNLOAD_READ_TIMEOUT_MILLIS);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (cve.org sync)");
-        return connection.getInputStream();
+        if (!(connection instanceof HttpURLConnection httpConnection)) {
+            // Unreachable in practice — validatedUri only ever admits https URIs, whose
+            // URLConnection is always an HttpsURLConnection (an HttpURLConnection subtype) — but kept
+            // as a defensive, sanitized failure rather than a raw ClassCastException.
+            throw new IOException("CVE.org sync: expected an HTTP(S) connection opening " + sanitizedForLogging(uri));
+        }
+        httpConnection.setInstanceFollowRedirects(false);
+        return httpConnection;
+    }
+
+    /** Redacts everything except scheme/host/path before a URL reaches a log line or exception
+     *  message (backlog item 416) — this service's redirect target carries request-signing
+     *  credentials ({@code sig=}/{@code jwt=} query parameters on the asset-CDN hosts in {@link
+     *  #DEFAULT_ALLOWED_HOSTS}), which must never be logged verbatim. Uses {@link URI#getRawPath()}
+     *  (not the decoding {@link URI#getPath()}) so a maliciously crafted redirect {@code Location}
+     *  can't smuggle a decoded control character into the sanitized result; {@link
+     *  LogSanitizer#sanitize} is applied on top as this codebase's standard defense against exactly
+     *  that class of log-injection risk for any other externally-derived log value. */
+    private static String sanitizedForLogging(URI uri) {
+        return LogSanitizer.sanitize(uri.getScheme() + "://" + uri.getHost() + uri.getRawPath());
+    }
+
+    /** {@link #sanitizedForLogging(URI)} for a raw, not-yet-parsed URL string — falls back to a fixed
+     *  placeholder if {@code url} isn't even a parseable URI. */
+    private static String sanitizedForLogging(String url) {
+        try {
+            return sanitizedForLogging(URI.create(url));
+        } catch (IllegalArgumentException e) {
+            return "(unparseable URL)";
+        }
     }
 
     private record GitHubRelease(String tag, String baselineZipUrl, String deltaZipUrl) {
