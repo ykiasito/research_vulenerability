@@ -13,7 +13,7 @@
 
 ## 認証・セッション
 
-Spring Security によるフォームベースセッション認証。パスワードはBCryptハッシュ化。認証必須（`/register` `/login` `/css/**` `/js/**` のみ`permitAll`）。管理者ロール（`ROLE_ADMIN`）は実装済み——`ADMIN_EMAIL`環境変数に設定した1メールアドレス（複数指定は未対応）でログインしたユーザーにのみ、ログインのたびに動的付与される（DBに永続化されるフラグではない、`AppUserDetailsService`）。`ADMIN_EMAIL`はSpring起動時に一度だけ読み込まれるため、設定変更にはバックエンドの再起動が必要。`ROLE_ADMIN`保持者のみ`/admin/**`（CPE辞書・CVE.org・CSAF・GHSA/OSVミラーの手動同期画面）へアクセス可能。
+Spring Security によるフォームベースセッション認証。パスワードはBCryptハッシュ化。認証必須（`/register` `/login` `/css/**` `/js/**` のみ`permitAll`）。管理者ロール（`ROLE_ADMIN`）は実装済み——`ADMIN_EMAIL`環境変数に設定した1メールアドレス（複数指定は未対応）でログインしたユーザーにのみ、ログインのたびに動的付与される（DBに永続化されるフラグではない、`AppUserDetailsService`）。`ADMIN_EMAIL`はSpring起動時に一度だけ読み込まれるため、設定変更にはバックエンドの再起動が必要。`ROLE_ADMIN`保持者のみ`/admin/**`（CPE辞書・CVE.org・CSAF・GHSA/OSVミラー・レジストリミラー・NVD CVEミラーの手動同期画面）へアクセス可能。
 
 ## ルーティング一覧
 
@@ -36,8 +36,10 @@ Spring Security によるフォームベースセッション認証。パスワ�
 | GET | `/admin/csaf-redhat` | Red Hat CSAFアドバイザリー同期画面 |
 | GET | `/admin/ghsa` | GHSAミラー同期画面 |
 | GET | `/admin/osv` | OSVミラー同期画面 |
+| GET | `/admin/registry-mirror` | レジストリミラー（9エコシステム）同期画面 |
+| GET | `/admin/nvd-cve` | NVD CVEミラー同期画面 |
 
-管理者ロールの詳細は上記「認証・セッション」節を参照（2026-08-30訂正、旧「管理者専用ロールは未実装」という記述は陳腐化していたため削除）。`/admin/cve-org`・`/admin/csaf-siemens`・`/admin/csaf-redhat`・`/admin/ghsa`・`/admin/osv`（CVE.org/CSAF/GHSA/OSVミラー同期画面）も同様に`ROLE_ADMIN`必須だが、本表には未掲載——ルーティング一覧自体の更新は別途必要。
+管理者ロールの詳細は上記「認証・セッション」節を参照（2026-08-30訂正、旧「管理者専用ロールは未実装」という記述は陳腐化していたため削除）。`/admin/cve-org`・`/admin/csaf-siemens`・`/admin/csaf-redhat`・`/admin/ghsa`・`/admin/osv`・`/admin/registry-mirror`・`/admin/nvd-cve`はいずれも同様に`ROLE_ADMIN`必須。
 
 ## 非同期処理
 
@@ -54,7 +56,7 @@ CSVアップロード（`POST /jobs`）は以下の順で動く。
 
 閉域モードでは、CSVアップロード後のStage1（製品識別）・Stage2（脆弱性調査）・Stage4（最終リサーチ）は、いずれも**ローカルDBのミラーテーブルにのみ**問い合わせます。旧バージョンにあった以下の外部ライブ呼び出しは物理的に削除されています。
 
-- Stage1のレジストリ照合（npm/PyPI/Maven Central/Go Module Proxy/NuGet等）: 各`*RegistryClient`はローカルDBのミラーテーブルのみに問い合わせる実装で、ライブHTTP照会（`lookupLive`相当）のコード自体が削除済み。`RestClient`等のフィールドも保持しません。
+- Stage1のレジストリ照合（npm/PyPI/crates.io/RubyGems/Packagist/NuGet/Hex/pub.dev/Go proxy）: 各`*RegistryClient`はローカルDBのミラーテーブルのみに問い合わせる実装で、ライブHTTP照会（`lookupLive`相当）のコード自体が削除済み。`RestClient`等のフィールドも保持しません。**Maven Centralだけは例外**で、閉域モード用ミラー自体を一度も持ったことがなく、`MavenCentralRegistryClient#lookup`は常に`Optional.empty()`を返す恒久的no-opです（外部通信は発生しませんが、Maven座標／Javaパッケージそのものが閉域モードでは一切識別されません）。
 - Stage1のCPE照合: 旧バージョンにあった「ローカル辞書が空振りの場合にNVD CPE APIへライブ照会する」フォールバックは削除済みで、`pg_trgm`によるローカルCPE辞書のあいまい検索のみで完結します。
 - Stage2の脆弱性調査（NVD CVE／OSV／GHSA／cve.org／CSAF）: いずれも対応する`*VulnerabilitySource`実装がローカルDBのリポジトリ／`JdbcTemplate`のみを保持し、ライブAPI呼び出し経路は削除済みです。
 - Stage1のTier2/3（あいまい候補のAI判定・Web検索名称解決）とStage4（最終リサーチ）: `Stage1AiArbitration`・`Stage4WebSearchResearchService`はいずれもAI呼び出し経路が物理的に削除されており、常に「AI利用不可」のフォールバック（未確定候補は破棄、またはUNIDENTIFIEDのまま）を返します。Claude API（Anthropic Messages API）を呼び出す経路自体がコードベースに存在しません。
@@ -63,11 +65,11 @@ CSVアップロード（`POST /jobs`）は以下の順で動く。
 
 ## バックグラウンド一括同期が使う外部API
 
-上記の識別・調査パイプライン本体とは別に、ローカルミラーを構築・更新するための一括同期処理（クラス名に`Sync`が付く専用クラス群、詳細は[CLOSED_MODE_DATA_HANDLING.md](./CLOSED_MODE_DATA_HANDLING.md)）が、以下の外部APIをバックグラウンドで叩きます。CSVアップロードそのものを直接のトリガーにはしません。
+上記の識別・調査パイプライン本体とは別に、ローカルミラーを構築・更新するための一括同期処理（クラス名に`Sync`が付く専用クラス群、詳細は[CLOSED_MODE_DATA_HANDLING.md](./CLOSED_MODE_DATA_HANDLING.md)）が、以下の外部APIをバックグラウンドで叩きます。CSVアップロードそのものを直接のトリガーにはしません。ただし、レジストリミラー同期を有効化した場合、そのシードリストには管理者が明示的に登録した固定名に加え、過去のアップロードから識別処理を経て解決された製品名（`identified_products`）も含まれます——CSV由来のデータと無関係とは言い切れない経路です。詳細は[CLOSED_MODE_DATA_HANDLING.md](./CLOSED_MODE_DATA_HANDLING.md)の「レジストリミラー同期が参照するパッケージ名について」を参照してください。
 
 | API | 用途 | 認証 |
 |---|---|---|
-| npm Registry / PyPI JSON API / Maven Central Solr Search API / Go Module Proxy / NuGet Flat Container API 等（9エコシステム） | 各`*MirrorSyncService`によるレジストリミラー同期（既定無効） | 不要 |
+| npm / PyPI / crates.io / RubyGems / Packagist / NuGet / Hex / pub.dev / Go proxy（9エコシステム、Maven Centralは含まない——前述の通りMaven Centralには閉域モード用ミラー自体が存在しない） | 各`*MirrorSyncService`によるレジストリミラー同期（既定無効） | 不要 |
 | NVD CPE API v2.0 | `NvdCpeSyncService`によるCPE辞書ミラー同期。管理画面（`/admin/cpe-dictionary`）からの手動キーワード同期にも使われる | 任意（ユーザー登録のNVDキー、無料） |
 | NVD CVE API v2.0 | `NvdCveSyncService`によるNVD CVEミラー同期 | 任意（同上） |
 | OSV.dev | `OsvSyncService`によるOSVミラー同期 | 不要 |
@@ -77,6 +79,6 @@ CSVアップロード（`POST /jobs`）は以下の順で動く。
 
 **GHSAはStage2の脆弱性照会対象に含まれますが、参照先はローカルミラーのみです**: `GhsaVulnerabilitySource`はStage2実行時にGitHubへライブ問い合わせすることはなく、`GhsaSyncService`が事前にミラーしたローカルテーブルのみを照会します。ミラー同期自体はbaseline投入後、管理者操作とは独立して日次で自動実行されます。詳細は[pipeline.md](./pipeline.md)のStage2節と`GhsaVulnerabilitySource`のクラスjavadoc参照。
 
-NVD系の同期処理はプロセス全体で共有する `NvdRateLimiter` でレート制限している（APIキー無し: 最小間隔6.5秒 / 同期実行ユーザーがNVDキー登録済み: 最小間隔0.7秒）。
+NVD系の同期処理はプロセス全体で共有する `NvdRateLimiter` でレート制限している（APIキー無し: 最小間隔6.5秒 / キー登録済み: 最小間隔0.7秒）。間隔はキーの有無に依存し、その鍵の出所は同期経路によって異なる——例えば、管理画面からの手動キーワード同期（`/admin/cpe-dictionary/sync`）は操作中の管理者自身の登録キー、CPE辞書のフル同期（`/admin/cpe-dictionary/sync-all`）は常に無キー、NVD CVEバックフィルのスケジュール実行（`NvdCveBackfillScheduledRunner`）は`ADMIN_EMAIL`に設定されたユーザーの登録キーを使う。
 
 Claude API（Anthropic Messages API）を呼び出す経路は、同期処理も含めコードベース全体に存在しません。
