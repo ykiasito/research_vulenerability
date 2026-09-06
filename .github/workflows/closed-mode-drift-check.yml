@@ -12,12 +12,21 @@ name: closed-mode drift check
 # closed-modeへmergeすること。「セキュリティ関連かどうか」の分類は
 # 自動化が難しい人手判断のため、このワークフローの対象外としている。
 #
-# 判定ロジック: master側にあってclosed-mode側に無いコミットのうち、
+# 判定ロジック: 以下の2条件をそれぞれ独立に評価し、どちらか一方でも
+# 満たせば失敗させる(fail-if-either、両方満たす必要はない)。
+#
+# 条件1(経過日数): master側にあってclosed-mode側に無いコミットのうち、
 # 最も古い(=最初に取り込み漏れになった)コミットの日時を基準に、
-# 現在時刻からの経過日数を計算する。コミット「数」ではなく経過「日数」で
-# 判定する(同期作業中に一時的にコミット数が増えること自体は異常ではないため)。
-# 経過日数が7日未満の場合は、まだ同期作業中である可能性があるため
-# 失敗させない。7日以上経過している場合のみワークフローを失敗させる。
+# 現在時刻からの経過日数を計算する。経過日数が7日未満の場合はこの条件では
+# 失敗させない(まだ同期作業中である可能性があるため)。7日以上経過して
+# いる場合はこの条件で失敗させる。
+#
+# 条件2(未マージコミット数、2026-09-06追加、item369): このリポジトリは
+# 3日でおよそ156コミットのペースで進むため、条件1の「経過日数」だけでは
+# 7日待つ間に未マージコミット数が既に350件を超えるような高速・大量ドリフトを
+# 検知できない(item360で実際に156コミット遅延が12回連続success扱いに
+# なっていたことが判明した根本原因)。そのため経過日数とは無関係に、
+# 未マージコミット数が50件以上になった時点でこの条件単独で失敗させる。
 
 on:
   schedule:
@@ -70,9 +79,21 @@ jobs:
           echo "Oldest un-merged commit: ${oldest_unmerged_sha} (${oldest_commit_date})"
           echo "Days elapsed since oldest un-merged commit: ${days_elapsed}"
 
+          commit_count_threshold=50
+          failed=0
+
           if [ "${days_elapsed}" -ge 7 ]; then
             echo "::error::closed-mode has been drifting for ${days_elapsed} day(s) since commit ${oldest_unmerged_sha} (>= 7-day threshold). Please merge master into closed-mode."
+            failed=1
+          fi
+
+          if [ "${behind_count}" -ge "${commit_count_threshold}" ]; then
+            echo "::error::closed-mode is ${behind_count} commit(s) behind origin/master (>= ${commit_count_threshold}-commit threshold), regardless of elapsed days. Please merge master into closed-mode."
+            failed=1
+          fi
+
+          if [ "${failed}" -eq 1 ]; then
             exit 1
           fi
 
-          echo "Drift exists (${behind_count} commit(s) behind) but within the 7-day grace period (${days_elapsed} day(s) elapsed). Not failing yet."
+          echo "Drift exists (${behind_count} commit(s) behind, ${days_elapsed} day(s) elapsed) but within both the 7-day and ${commit_count_threshold}-commit grace thresholds. Not failing yet."
