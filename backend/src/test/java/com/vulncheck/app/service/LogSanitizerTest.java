@@ -178,4 +178,36 @@ class LogSanitizerTest {
                 .doesNotContain("\n")
                 .contains("%0D%0AFAKE");
     }
+
+    @Test
+    void sanitizeUrlHandlesOpaqueUriWithoutPrintingTheLiteralStringNull() {
+        // PR#308 senior-review, REVISE round: an opaque URI (no authority component) has a null
+        // URI#getHost(), which the pre-fix implementation stringified verbatim into
+        // "mailto://nullnull". validatedUri/fetchBounded already reject anything with a null host
+        // before a fetch happens, so this is purely a diagnosability fix, not a new safety boundary.
+        String result = LogSanitizer.sanitizeUrl(URI.create("mailto:a@b.com"));
+        assertThat(result).doesNotContain("null");
+        assertThat(result).isEqualTo("(non-hierarchical URL, scheme=mailto): a@b.com");
+    }
+
+    @Test
+    void sanitizeUrlHandlesOpaqueUriWithQuerySuffixWithoutLeakingIt() {
+        // javascript: URIs are opaque too, and can carry a query-like suffix of their own -- confirms
+        // that suffix is dropped the same way a hierarchical URI's query string is.
+        String secret = "sig=SECRETVALUE123";
+        String result = LogSanitizer.sanitizeUrl(URI.create("javascript:alert(1)?" + secret));
+        assertThat(result).doesNotContain("null").doesNotContain(secret);
+        assertThat(result).isEqualTo("(non-hierarchical URL, scheme=javascript): alert(1)");
+    }
+
+    @Test
+    void sanitizeUrlHandlesRelativeUriWithoutPrintingTheLiteralStringNullAndDropsQuery() {
+        // A relative reference (no scheme, no authority) also has a null host -- the pre-fix
+        // implementation produced "null://null/relative/path?sig=SECRET" (leaking the query too, since
+        // the whole "scheme://host" + rawPath concatenation is nonsensical here in the first place).
+        String secret = "sig=SECRET";
+        String result = LogSanitizer.sanitizeUrl(URI.create("/relative/path?" + secret));
+        assertThat(result).doesNotContain("null").doesNotContain(secret);
+        assertThat(result).isEqualTo("(non-hierarchical URL, scheme=(no scheme)): /relative/path");
+    }
 }

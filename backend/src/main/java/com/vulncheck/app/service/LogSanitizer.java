@@ -88,9 +88,43 @@ public final class LogSanitizer {
      * so a maliciously crafted redirect {@code Location} can't smuggle a decoded control character into
      * the reduced value; {@link #sanitize} is still applied on top as this codebase's standard defense
      * against exactly that class of log-injection risk for any other externally-derived log value.
+     *
+     * <p><b>Non-hierarchical / relative URIs (PR#308 senior-review, REVISE round)</b>: {@link
+     * URI#getHost()} is {@code null} both for opaque URIs (e.g. {@code mailto:}, {@code javascript:} —
+     * no authority component at all) and for relative URIs with no scheme (e.g. a bare {@code
+     * /path?query}). The naive {@code scheme + "://" + host + rawPath} concatenation above silently
+     * stringifies those {@code null}s (observed: {@code mailto:a@b.com} became the near-meaningless
+     * {@code "mailto://nullnull"}, and a relative path became {@code "null://null/relative/path"}),
+     * which both looks like a real (bogus) host and throws away the diagnostic value of the log line.
+     * Every caller of this class ({@code validatedUri}/{@code fetchBounded} and friends) already
+     * rejects any URI with a null host before it's actually fetched, so this branch is reached only for
+     * logging/error-message purposes, never as part of a fetch decision — but the log line still needs
+     * to (a) never contain the raw query/fragment and (b) not read as a fabricated host. Uses {@link
+     * URI#getRawSchemeSpecificPart()} (fragment is already a separate URI component, never included in
+     * it) and additionally truncates at the first {@code '?'} so an opaque URI's query-like suffix
+     * (e.g. {@code mailto:a@b.com?subject=...}) can't leak either.
      */
     public static String sanitizeUrl(URI uri) {
-        return sanitize(uri.getScheme() + "://" + uri.getHost() + uri.getRawPath());
+        String host = uri.getHost();
+        if (host == null) {
+            String scheme = uri.getScheme();
+            String label = scheme == null ? "(no scheme)" : scheme;
+            return sanitize("(non-hierarchical URL, scheme=" + label + "): "
+                    + withoutQuery(uri.getRawSchemeSpecificPart()));
+        }
+        String rawPath = uri.getRawPath();
+        return sanitize(uri.getScheme() + "://" + host + (rawPath == null ? "" : rawPath));
+    }
+
+    /** Truncates {@code schemeSpecificPart} at its first {@code '?'}, if any — used only by the
+     *  non-hierarchical/relative branch of {@link #sanitizeUrl(URI)}, where the query component isn't
+     *  parsed out separately by {@link URI} the way it is for a hierarchical URI. */
+    private static String withoutQuery(String schemeSpecificPart) {
+        if (schemeSpecificPart == null) {
+            return "";
+        }
+        int queryStart = schemeSpecificPart.indexOf('?');
+        return queryStart < 0 ? schemeSpecificPart : schemeSpecificPart.substring(0, queryStart);
     }
 
     /** {@link #sanitizeUrl(URI)} for a raw, not-yet-parsed URL string — falls back to a fixed

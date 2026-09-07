@@ -731,16 +731,23 @@ public class GhsaSyncService {
                 // random/unexplained failure rather than the exhausted-budget signal it actually is.
                 if (status.value() == 429 || status.value() == 403) {
                     log.error("GHSA sync: rate-limited (HTTP {}) resolving {} — treating as a block signal, not a "
-                            + "transient error", status.value(), url);
+                            + "transient error", status.value(), LogSanitizer.sanitizeUrl(url));
                     return RedirectOutcome.ofHttp(RedirectResolution.RATE_LIMITED, status.value());
                 }
-                log.error("GHSA sync: unexpected HTTP {} resolving {}", status.value(), url);
+                log.error("GHSA sync: unexpected HTTP {} resolving {}", status.value(), LogSanitizer.sanitizeUrl(url));
                 return RedirectOutcome.ofHttp(RedirectResolution.HTTP_ERROR, status.value());
             });
         } catch (Exception e) {
-            // Backlog item 421: url may already be a redirect target carrying a signed query string
-            // (this method re-resolves its own redirects), so it's reduced to scheme/host/path — same
-            // as every other externally-derived URL this class logs — before reaching this line.
+            // Backlog item 421 (PR#308 senior-review, REVISE round): every one of this method's three
+            // log.error calls sanitizes `url` the same way, on purpose, even though today's only call
+            // site (doSyncBaseline, above) always passes the hardcoded TARBALL_URL constant — this
+            // method resolves exactly one redirect hop and never re-invokes itself on its own result,
+            // so `url` can never itself be a signed redirect target in the current call graph. The
+            // sanitization here is defense-in-depth against a future caller passing something other
+            // than TARBALL_URL (or TARBALL_URL itself changing to something with a query string), not
+            // a fix for a live leak today — but it costs nothing to apply uniformly, and leaving any of
+            // the three calls unsanitized would silently reintroduce the gap the moment such a caller
+            // is added.
             log.error("GHSA sync: transport error resolving {}", LogSanitizer.sanitizeUrl(url), e);
             return RedirectOutcome.of(RedirectResolution.TRANSPORT_ERROR);
         }
@@ -773,7 +780,14 @@ public class GhsaSyncService {
     private InputStream openStream(String url) throws IOException {
         URI uri = validatedUri(url);
         if (uri == null) {
-            throw new IOException("Rejected non-allowlisted URL: " + url);
+            // Backlog item 421 (PR#308 senior-review, REVISE round): this IOException's message is
+            // eventually persisted to ghsa_sync_state.last_sync_error and shown on /admin/ghsa, so an
+            // unsanitized url here has a bigger blast radius than a log-only leak. Defensive rather
+            // than live today — url is only ever a redirectOutcome.url() already validated OK by
+            // resolveRedirectTarget's own validatedUri check, so this branch isn't reachable via the
+            // current call graph — but matches item 416's reference implementation
+            // (CveOrgSyncService#download) so this doesn't regress if that invariant ever changes.
+            throw new IOException("Rejected non-allowlisted URL: " + LogSanitizer.sanitizeUrl(url));
         }
         // Plain URLConnection, not ghsaSyncRestClient — same rationale as CveOrgSyncService#download:
         // a multi-hundred-MB streaming download needs an effectively unbounded read timeout, which
@@ -856,6 +870,9 @@ public class GhsaSyncService {
             });
         } catch (Exception e) {
             // Backlog item 421: same rationale as resolveRedirectTarget's matching catch above.
+            // Backlog item 437: `e`'s own message (ResourceAccessException/RestClientResponseException)
+            // doesn't leak the query string either today, since Spring-web 6.2.19 (currently pinned)
+            // truncates the URL at '?' when building it -- but that's version-dependent, not guaranteed.
             log.warn("GHSA sync: transport error fetching {}", LogSanitizer.sanitizeUrl(url), e);
             return FetchOutcome.of(FetchStatus.TRANSPORT_ERROR);
         }

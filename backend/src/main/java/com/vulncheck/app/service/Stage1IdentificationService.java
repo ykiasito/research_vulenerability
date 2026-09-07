@@ -419,8 +419,13 @@ public class Stage1IdentificationService {
     }
 
     private String describe(IdentifiedProduct product) {
+        // Backlog item 401 (PR#308 senior-review, REVISE round): product.getCpe() can be sourced from a
+        // live NVD CPE API lookup (see the upsert around line 3102 below) just like packageName is
+        // sourced from a registry lookup -- same external-value threat model, so it needs the same
+        // LogSanitizer.sanitize call, not just packageName.
         return product.getMethod() + " ecosystem=" + product.getEcosystem()
-                + " package=" + LogSanitizer.sanitize(product.getPackageName()) + " cpe=" + product.getCpe();
+                + " package=" + LogSanitizer.sanitize(product.getPackageName())
+                + " cpe=" + LogSanitizer.sanitize(product.getCpe());
     }
 
     /**
@@ -688,10 +693,13 @@ public class Stage1IdentificationService {
         if (chosenCpe != null && trustRegistryMatch) {
             RegistryMatch trustedMatch = registryMatch.get();
             if (!cpeCorroboratesRegistryPackage(item.getVendor(), chosenCpe, trustedMatch)) {
+                // Backlog item 401 (PR#308 senior-review, REVISE round): chosenCpe.getCpeString() is
+                // just as externally-sourced (live NVD CPE API) as trustedMatch.packageName() is
+                // (registry lookup) -- both need LogSanitizer.sanitize, not just the latter.
                 log.info("Dropping CPE {} for item {} — it does not independently corroborate the trusted "
                         + "registry match's own package name (ecosystem={} package={}), so it must not "
-                        + "ride along on that match's confidence", chosenCpe.getCpeString(), item.getId(),
-                        trustedMatch.ecosystem(), LogSanitizer.sanitize(trustedMatch.packageName()));
+                        + "ride along on that match's confidence", LogSanitizer.sanitize(chosenCpe.getCpeString()),
+                        item.getId(), trustedMatch.ecosystem(), LogSanitizer.sanitize(trustedMatch.packageName()));
                 chosenCpe = null;
                 cpeCandidateCount = null;
                 cpeCandidateVariantDerived = null;
