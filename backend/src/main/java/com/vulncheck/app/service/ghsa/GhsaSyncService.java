@@ -7,6 +7,7 @@ import com.vulncheck.app.entity.GhsaSyncState;
 import com.vulncheck.app.repository.GhsaAdvisoryRepository;
 import com.vulncheck.app.repository.GhsaSyncFailureRepository;
 import com.vulncheck.app.repository.GhsaSyncStateRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.vuln.GhsaRateLimiter;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -737,7 +738,10 @@ public class GhsaSyncService {
                 return RedirectOutcome.ofHttp(RedirectResolution.HTTP_ERROR, status.value());
             });
         } catch (Exception e) {
-            log.error("GHSA sync: transport error resolving {}", url, e);
+            // Backlog item 421: url may already be a redirect target carrying a signed query string
+            // (this method re-resolves its own redirects), so it's reduced to scheme/host/path — same
+            // as every other externally-derived URL this class logs — before reaching this line.
+            log.error("GHSA sync: transport error resolving {}", LogSanitizer.sanitizeUrl(url), e);
             return RedirectOutcome.of(RedirectResolution.TRANSPORT_ERROR);
         }
     }
@@ -851,7 +855,8 @@ public class GhsaSyncService {
                 return body == null ? FetchOutcome.of(FetchStatus.TOO_LARGE) : FetchOutcome.ok(body);
             });
         } catch (Exception e) {
-            log.warn("GHSA sync: transport error fetching {}", url, e);
+            // Backlog item 421: same rationale as resolveRedirectTarget's matching catch above.
+            log.warn("GHSA sync: transport error fetching {}", LogSanitizer.sanitizeUrl(url), e);
             return FetchOutcome.of(FetchStatus.TRANSPORT_ERROR);
         }
     }
@@ -864,7 +869,10 @@ public class GhsaSyncService {
             return null;
         }
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || !ALLOWED_HOSTS.contains(uri.getHost())) {
-            log.warn("GHSA sync: rejecting fetch of {} — not https or not an allowlisted host", url);
+            // Backlog item 421: url here can be a redirect target (resolveRedirectTarget/fetchBounded
+            // both re-validate every hop through this method), so it may already carry a
+            // request-signing query string from an allowlisted host that then redirected off it.
+            log.warn("GHSA sync: rejecting fetch of {} — not https or not an allowlisted host", LogSanitizer.sanitizeUrl(url));
             return null;
         }
         return uri;
