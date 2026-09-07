@@ -731,16 +731,23 @@ public class GhsaSyncService {
                 // random/unexplained failure rather than the exhausted-budget signal it actually is.
                 if (status.value() == 429 || status.value() == 403) {
                     log.error("GHSA sync: rate-limited (HTTP {}) resolving {} — treating as a block signal, not a "
-                            + "transient error", status.value(), url);
+                            + "transient error", status.value(), LogSanitizer.sanitizeUrl(url));
                     return RedirectOutcome.ofHttp(RedirectResolution.RATE_LIMITED, status.value());
                 }
-                log.error("GHSA sync: unexpected HTTP {} resolving {}", status.value(), url);
+                log.error("GHSA sync: unexpected HTTP {} resolving {}", status.value(), LogSanitizer.sanitizeUrl(url));
                 return RedirectOutcome.ofHttp(RedirectResolution.HTTP_ERROR, status.value());
             });
         } catch (Exception e) {
-            // Backlog item 421: url may already be a redirect target carrying a signed query string
-            // (this method re-resolves its own redirects), so it's reduced to scheme/host/path — same
-            // as every other externally-derived URL this class logs — before reaching this line.
+            // Backlog item 421 (PR#308 senior-review, REVISE round): every one of this method's three
+            // log.error calls sanitizes `url` the same way, on purpose, even though today's only call
+            // site (doSyncBaseline, above) always passes the hardcoded TARBALL_URL constant — this
+            // method resolves exactly one redirect hop and never re-invokes itself on its own result,
+            // so `url` can never itself be a signed redirect target in the current call graph. The
+            // sanitization here is defense-in-depth against a future caller passing something other
+            // than TARBALL_URL (or TARBALL_URL itself changing to something with a query string), not
+            // a fix for a live leak today — but it costs nothing to apply uniformly, and leaving any of
+            // the three calls unsanitized would silently reintroduce the gap the moment such a caller
+            // is added.
             log.error("GHSA sync: transport error resolving {}", LogSanitizer.sanitizeUrl(url), e);
             return RedirectOutcome.of(RedirectResolution.TRANSPORT_ERROR);
         }
