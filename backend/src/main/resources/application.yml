@@ -221,6 +221,20 @@ app:
     cron: ${NVD_CVE_DELTA_CRON:0 30 6 * * *}
     max-requests-per-run: ${NVD_CVE_DELTA_MAX_REQUESTS_PER_RUN:60}
     max-duration-minutes: ${NVD_CVE_DELTA_MAX_DURATION_MINUTES:60}
+  # MirrorFreshnessService's staleness banner (closed-mode backlog item 382, promoted to master by
+  # item 396): CVE.org/GHSA/OSV/CSAF are checked unconditionally (mirror-only sources with no live
+  # fallback on this branch either), but NVD CVE and the package registry mirror both still have a
+  # live lookup path on master, so those two checks are gated off by default here.
+  mirror-freshness:
+    # Deliberately bound to the SAME env var as app.closed-mode.nvd-mirror-enabled above, not a
+    # separate one -- see MirrorFreshnessService's own javadoc for why: a separate variable would
+    # let an operator enable the NVD CVE mirror lookup without remembering to also enable its
+    # freshness warning, silently losing visibility into a stale/never-synced mirror.
+    nvd-cve-check-enabled: ${CLOSED_MODE_NVD_MIRROR_ENABLED:false}
+    # No single flag among app.closed-mode.*-mirror-enabled above corresponds 1:1 to "is the
+    # registry mirror in use at all" (there are 9 of them, one per ecosystem, and this check is
+    # ecosystem-agnostic) -- set this to true if ANY of those 9 flags is enabled.
+    registry-check-enabled: ${MIRROR_FRESHNESS_REGISTRY_CHECK_ENABLED:false}
 
 server:
   port: 8080
