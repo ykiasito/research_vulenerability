@@ -1,5 +1,7 @@
 # 調査パイプライン
 
+> **注記**: 本ドキュメントは`closed-mode`ブランチの実装を説明しています。閉域モードのデータ非送信設計についての詳細は[CLOSED_MODE_DATA_HANDLING.md](./CLOSED_MODE_DATA_HANDLING.md)を参照してください。
+
 CSV1行（`ResearchJobItem`）ごとに、Stage1（製品識別）→Stage2（脆弱性調査）→（条件付き）Stage4（AI最終手段、現状は常にno-op、後述）の順で処理する。Stage3（`NvdKeywordVulnerabilitySource`）は閉域モードブランチではファイルごと物理削除済みで、本番経路にはそもそも存在しない（後述）。
 
 ## Stage1: 製品識別（`Stage1IdentificationService`）
