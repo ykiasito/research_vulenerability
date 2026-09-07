@@ -213,4 +213,19 @@ class LogSanitizerTest {
         assertThat(result).doesNotContain("null").doesNotContain(secret);
         assertThat(result).isEqualTo("(non-hierarchical URL, scheme=(no scheme)): /relative/path");
     }
+
+    @Test
+    void sanitizeUrlHandlesProtocolRelativeUriWithoutPrintingTheLiteralStringNull() {
+        // PR#308 senior-review, 2nd REVISE round: a protocol-relative reference (e.g. what a
+        // feed-driven fetch like SiemensCsafSyncService's feedUrl/contentUrl/hashUrl resolution can
+        // hand to this method) has a non-null host but a null scheme -- it takes the *hierarchical*
+        // branch (unlike the relative-path case above), which the first-round fix didn't cover: the
+        // pre-fix implementation produced "null://evil.example.com/adv.json", a bogus-looking scheme
+        // in front of a real host. The query itself was never leaked (hierarchical URIs already split
+        // it out via getRawQuery()), so this pins (a) no literal "null" and (b) the query is still gone.
+        String secret = "sig=SECRETVALUE123";
+        String result = LogSanitizer.sanitizeUrl(URI.create("//evil.example.com/adv.json?" + secret));
+        assertThat(result).doesNotContain("null").doesNotContain(secret);
+        assertThat(result).isEqualTo("//evil.example.com/adv.json");
+    }
 }
