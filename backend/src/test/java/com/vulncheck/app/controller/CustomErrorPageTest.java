@@ -42,6 +42,19 @@ import org.springframework.web.bind.annotation.RestController;
  * だけで、{@code BasicErrorController}によるテンプレート解決を経由しない）。そのため既存の
  * {@code SessionCookieSecureDefaultTest}と同じ{@code @SpringBootTest(webEnvironment = RANDOM_PORT)}
  * + {@link TestRestTemplate}の実サーバー経路を使い、実際にTomcatが返すレスポンスを検証する。
+ *
+ * <p><b>注意（PR#310 senior-review REVISE指摘）:</b> このテストは{@code @SpringBootTest}であり、
+ * {@code backend/src/test/resources/application.yml}がテストクラスパス上で本番
+ * {@code backend/src/main/resources/application.yml}を完全に上書き（shadow）する
+ * （{@link com.vulncheck.app.config.SessionCookieConfigBindingTest}のjavadoc参照）。そのため
+ * {@link #serverErrorRendersCustomJapanesePageWithoutLeakingStackTrace}が検証しているのは、
+ * テスト用YAMLに{@code server.error.*}キーが一切無いことによりSpring Boot組み込みのデフォルト値
+ * （現バージョンではたまたま{@code never}/{@code false}）が効いている、という状態であって、
+ * 本番YAMLが実際に{@code server.error.include-stacktrace: never}等を明示指定している効果そのもの
+ * ではない。本番YAMLのその設定値を直接バインドして検証するのは
+ * {@link com.vulncheck.app.config.ErrorPropertiesConfigBindingTest}であり、スタックトレース等の
+ * 非露出をカバーする一次テストはそちらを参照すること。このテストは「テンプレートが正しく描画され、
+ * それ単体としてスタックトレース等の文字列を含まない」ことのend-to-end確認としては引き続き有効。
  */
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
 class CustomErrorPageTest {
@@ -68,6 +81,16 @@ class CustomErrorPageTest {
             @GetMapping("/error-page-test/boom")
             public String boom() {
                 throw new IllegalStateException("boom - CustomErrorPageTest専用の疑似障害");
+            }
+
+            /** SecurityConfigのpermitAllマッチャー("/css/**")の配下にわざと生やした、未ログイン
+             *  状態のまま500を起こすためだけのテスト専用エンドポイント。本番コードには存在しない。
+             *  実際の本番コードで最も起こりやすい形（未ログインユーザーが/registerのようなpermitAll
+             *  ページで例外に遭遇するケース）を、既存コントローラーを改変せずに再現する。 */
+            @GetMapping("/css/error-page-test-unauthenticated-boom")
+            public String unauthenticatedBoom() {
+                throw new IllegalStateException(
+                        "unauthenticated boom - CustomErrorPageTest専用の疑似障害（未ログイン状態）");
             }
         }
     }
@@ -108,11 +131,39 @@ class CustomErrorPageTest {
         assertThat(response.getBody()).contains("ホームに戻る");
         assertThat(response.getBody()).doesNotContain("Whitelabel Error Page");
         // セキュリティ観点(item411 やること4): スタックトレース・例外クラス名・例外メッセージが
-        // 一切露出しないこと。
+        // 一切露出しないこと。ただしこのアサーションが押さえているのはテスト用YAML下でのSpring Boot
+        // 組み込みデフォルトの挙動であり、本番application.ymlのserver.error.*設定そのものの検証は
+        // ErrorPropertiesConfigBindingTestが担う(クラスjavadoc参照)。
         assertThat(response.getBody()).doesNotContain("IllegalStateException");
         assertThat(response.getBody()).doesNotContain("boom - CustomErrorPageTest");
         assertThat(response.getBody()).doesNotContain("at com.vulncheck");
         assertThat(response.getBody()).doesNotContain("java.lang.");
+    }
+
+    @Test
+    void serverErrorOnPermitAllPageRendersCustomPageInsteadOfLoginRedirectWhenUnauthenticated() {
+        // 未ログイン（セッションCookie無し）のまま、SecurityConfigのpermitAllマッチャー配下
+        // ("/css/**")で500を起こす。/error へのコンテナ内部forwardもデフォルトでは認可チェック対象
+        // (spring.security.filter.dispatcher-types のデフォルトが ASYNC, ERROR, REQUEST) のため、
+        // SecurityConfigのpermitAllに"/error"自体を含めていないと、未ログインユーザーは説明なく
+        // /loginへの302で弾かれてしまう（SecurityConfig#filterChainのコメント参照）。この振る舞いを
+        // 直接検証するため、リダイレクトを追わないリクエストファクトリで302と500を区別する。
+        restTemplate.getRestTemplate().setRequestFactory(noRedirectRequestFactory());
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setAccept(List.of(MediaType.TEXT_HTML));
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/css/error-page-test-unauthenticated-boom",
+                HttpMethod.GET,
+                new HttpEntity<>(headers),
+                String.class);
+
+        assertThat(response.getStatusCode())
+                .as("未ログインでのpermitAllページの500は/loginへの302ではなくカスタムエラーページ")
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.getBody()).contains("サーバーエラーが発生しました");
+        assertThat(response.getBody()).contains("ホームに戻る");
+        assertThat(response.getBody()).doesNotContain("Whitelabel Error Page");
     }
 
     /** テスト専用ユーザーを作成し、実際のフォームログイン（CSRFトークン込み）を行って、認証済み

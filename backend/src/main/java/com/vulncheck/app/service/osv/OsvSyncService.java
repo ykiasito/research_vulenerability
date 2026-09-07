@@ -724,6 +724,9 @@ public class OsvSyncService {
         if (connection instanceof HttpURLConnection httpConnection) {
             int responseCode = httpConnection.getResponseCode();
             if (responseCode < 200 || responseCode >= 300) {
+                // Matches CveOrgSyncService#download: release the connection before throwing so a
+                // non-2xx response doesn't leave its (potentially pooled/persistent) socket open.
+                httpConnection.disconnect();
                 throw new IOException("OSV sync: unexpected HTTP " + responseCode + " opening " + sanitizedForLogging(uri));
             }
         }
