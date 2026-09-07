@@ -520,6 +520,67 @@ class GhsaSyncServiceTest {
         firstRun.join(5_000);
     }
 
+    // ------------------------------------------------------------ openStreamForUri (item436) ------
+
+    /** Backlog item 436: a non-2xx response must fail closed via a sanitized, self-built {@code
+     *  IOException} message — never {@link java.net.HttpURLConnection#getInputStream()}'s own
+     *  message, which embeds the COMPLETE request URL (including any query string). Uses a local
+     *  {@code com.sun.net.httpserver.HttpServer} (same harness technique as {@code
+     *  CveOrgSyncServiceTest}), since {@code MockRestServiceServer} can't intercept the raw {@link
+     *  java.net.URLConnection} {@link GhsaSyncService#openStreamForUri} uses.
+     *
+     *  <p>Mutation check (item436 task brief): reverting the response-code check in {@link
+     *  GhsaSyncService#openStreamForUri} back to a bare {@code connection.getInputStream()} call
+     *  makes this test fail — the resulting {@code IOException} message becomes the JDK's own
+     *  {@code "Server returned HTTP response code: 403 for URL: http://localhost:<port>/asset?sig=
+     *  GHSASTREAMSECRET456"}, which both lacks "unexpected HTTP 403" and contains the secret;
+     *  verified locally before this test was added to the suite. */
+    @Test
+    void openStreamForUriFailsClosedOnANonTwoXxResponseWithoutLeakingTheQueryString() throws Exception {
+        Harness h = harness(3, null);
+        String secret = "GHSASTREAMSECRET456";
+        com.sun.net.httpserver.HttpServer server =
+                com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("localhost", 0), 0);
+        try {
+            server.createContext("/asset", exchange -> {
+                exchange.sendResponseHeaders(403, -1);
+                exchange.close();
+            });
+            server.start();
+            java.net.URI uri = java.net.URI.create("http://localhost:" + server.getAddress().getPort() + "/asset?sig=" + secret);
+
+            Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(() -> h.service().openStreamForUri(uri));
+
+            assertThat(thrown).isInstanceOf(java.io.IOException.class);
+            assertThat(thrown.getMessage()).contains("unexpected HTTP 403").doesNotContain(secret);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void openStreamForUriReturnsTheStreamOnASuccessfulResponse() throws Exception {
+        Harness h = harness(3, null);
+        byte[] body = "ok".getBytes(StandardCharsets.UTF_8);
+        com.sun.net.httpserver.HttpServer server =
+                com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("localhost", 0), 0);
+        try {
+            server.createContext("/asset", exchange -> {
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+                exchange.close();
+            });
+            server.start();
+            java.net.URI uri = java.net.URI.create("http://localhost:" + server.getAddress().getPort() + "/asset");
+
+            try (InputStream stream = h.service().openStreamForUri(uri)) {
+                assertThat(stream.readAllBytes()).isEqualTo(body);
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
     /** Captures every log event {@link GhsaSyncService}'s own logger emits while {@code action}
      *  runs (same convention as {@code CveOrgSyncServiceTest#captureLogEvents} /
      *  {@code UserApiKeyServiceTest#captureLogEvents}), temporarily lowering the logger to DEBUG and
