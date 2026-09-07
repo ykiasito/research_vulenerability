@@ -82,6 +82,16 @@ class CustomErrorPageTest {
             public String boom() {
                 throw new IllegalStateException("boom - CustomErrorPageTest専用の疑似障害");
             }
+
+            /** SecurityConfigのpermitAllマッチャー("/css/**")の配下にわざと生やした、未ログイン
+             *  状態のまま500を起こすためだけのテスト専用エンドポイント。本番コードには存在しない。
+             *  実際の本番コードで最も起こりやすい形（未ログインユーザーが/registerのようなpermitAll
+             *  ページで例外に遭遇するケース）を、既存コントローラーを改変せずに再現する。 */
+            @GetMapping("/css/error-page-test-unauthenticated-boom")
+            public String unauthenticatedBoom() {
+                throw new IllegalStateException(
+                        "unauthenticated boom - CustomErrorPageTest専用の疑似障害（未ログイン状態）");
+            }
         }
     }
 
@@ -128,6 +138,32 @@ class CustomErrorPageTest {
         assertThat(response.getBody()).doesNotContain("boom - CustomErrorPageTest");
         assertThat(response.getBody()).doesNotContain("at com.vulncheck");
         assertThat(response.getBody()).doesNotContain("java.lang.");
+    }
+
+    @Test
+    void serverErrorOnPermitAllPageRendersCustomPageInsteadOfLoginRedirectWhenUnauthenticated() {
+        // 未ログイン（セッションCookie無し）のまま、SecurityConfigのpermitAllマッチャー配下
+        // ("/css/**")で500を起こす。/error へのコンテナ内部forwardもデフォルトでは認可チェック対象
+        // (spring.security.filter.dispatcher-types のデフォルトが ASYNC, ERROR, REQUEST) のため、
+        // SecurityConfigのpermitAllに"/error"自体を含めていないと、未ログインユーザーは説明なく
+        // /loginへの302で弾かれてしまう（SecurityConfig#filterChainのコメント参照）。この振る舞いを
+        // 直接検証するため、リダイレクトを追わないリクエストファクトリで302と500を区別する。
+        restTemplate.getRestTemplate().setRequestFactory(noRedirectRequestFactory());
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setAccept(List.of(MediaType.TEXT_HTML));
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/css/error-page-test-unauthenticated-boom",
+                HttpMethod.GET,
+                new HttpEntity<>(headers),
+                String.class);
+
+        assertThat(response.getStatusCode())
+                .as("未ログインでのpermitAllページの500は/loginへの302ではなくカスタムエラーページ")
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.getBody()).contains("サーバーエラーが発生しました");
+        assertThat(response.getBody()).contains("ホームに戻る");
+        assertThat(response.getBody()).doesNotContain("Whitelabel Error Page");
     }
 
     /** テスト専用ユーザーを作成し、実際のフォームログイン（CSRFトークン込み）を行って、認証済み

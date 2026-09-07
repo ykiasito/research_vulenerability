@@ -22,7 +22,19 @@ public class SecurityConfig {
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers("/register", "/login", "/css/**", "/js/**", "/robots.txt").permitAll()
+                        // "/error" must stay permitAll: spring.security.filter.dispatcher-types is
+                        // left at Spring Security's default (ASYNC, ERROR, REQUEST — not overridden
+                        // anywhere in application.yml), so the container's internal forward to /error
+                        // on an unhandled exception/sendError is itself subject to authorization. An
+                        // unauthenticated request that fails on a permitAll page (e.g. /register)
+                        // before establishing a session would otherwise have that forward blocked and
+                        // redirected to /login with no explanation, instead of rendering the intended
+                        // custom error page. Safe to leave open: templates/error/*.html render only
+                        // static Japanese text (no server-side data at all), and server.error.include-*
+                        // are all pinned to never/false (item411, see ErrorPropertiesConfigBindingTest),
+                        // so nothing sensitive can flow through this path regardless of auth state.
+                        .requestMatchers("/register", "/login", "/css/**", "/js/**", "/robots.txt", "/error")
+                        .permitAll()
                         .requestMatchers("/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )
