@@ -60,12 +60,14 @@ Stage1で `IdentifiedProduct` が得られたアイテムのみ対象。5つの 
 
 ## Stage4: AI最終手段調査（`Stage4WebSearchResearchService`、現在は常にno-op）
 
-**呼び出し条件自体は変わっていない**（`ResearchJobProcessingService`が判定、以下のいずれかの場合のみ`#research`を呼ぶ。それ以外＝Stage2が1件でも見つけた場合は呼ばない）:
+**呼び出し条件自体は変わっていない**（`ResearchJobProcessingService`が判定）:
 
-1. Stage1で識別済み・かつStage2が0件だった場合 → `ecosystem`/`packageName`を渡して呼び出す
+1. Stage1で識別済み・かつStage2が0件で、かつ`stage2Result.anySourceSucceeded()`が真（Stage2の少なくとも1ソースが正常に完了している——全ソース失敗ではない）の場合のみ、さらに識別confidenceが`STAGE4_MIN_IDENTIFICATION_CONFIDENCE`（0.85）を上回る場合に限り、`ecosystem`/`packageName`を渡して`#research`を呼ぶ。`anySourceSucceeded()`が偽なら`INCOMPLETE_REASON_SOURCES_FAILED`、confidenceが0.85以下なら`INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK`がそれぞれ記録され、いずれの場合もStage4自体は呼ばれない。
 2. Stage1で識別自体ができなかった（UNIDENTIFIED）場合で、`item.getHintIdentifier() != null`のとき → `hint_platform`/`hint_identifier`を渡して呼び出す（ただしTier3が常にno-opのため`hintIdentifier`は実際には設定されず、この条件は現状到達不能——上記Tier3節参照）
 
-**しかし呼び出された`#research`自体が無条件のno-op**: `Stage4WebSearchResearchService#research`は、closed-mode B2（`docs/spec/closed-mode-plan.md`§9-2でClaude+`web_search`呼び出し経路自体が物理削除済み）により、渡された引数の内容に関わらず常に`new Stage4ResearchResult(0, ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE)`を返す1行の実装。以前あった、Claudeの`web_search`ツール（max_uses=2）によるWeb検索・CVE/GHSA形式識別子のグローバルユニークキー利用・自由記述識別子の`llm:{パッケージ名}:{識別子}`スコープ方式は、いずれも呼び出されるコード自体が現在は存在しない。呼び出し条件を満たしたアイテムには`INCOMPLETE_REASON_AI_NOT_AVAILABLE`が記録されるのみで、Stage4経由で新たに脆弱性が見つかることは無い。
+**閉域モード固有の帰結**: closed modeで識別confidenceが取り得る値は、レジストリマッチの0.95/0.5とCPEマッチの0.6のみに限られる（AI判定由来だった0.95〜0.99という幅は消えている）ため、上記1の0.85ゲートを実際に超えられるのは、実質「バージョン実在確認済みのレジストリマッチ（0.95）」の場合のみになる。
+
+**呼び出された`#research`自体は無条件のno-op**: `Stage4WebSearchResearchService#research`は、closed-mode B2（`docs/spec/closed-mode-plan.md`§9-2でClaude+`web_search`呼び出し経路自体が物理削除済み）により、渡された引数の内容に関わらず常に`new Stage4ResearchResult(0, ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE)`を返す1行の実装。以前あった、Claudeの`web_search`ツール（max_uses=2）によるWeb検索・CVE/GHSA形式識別子のグローバルユニークキー利用・自由記述識別子の`llm:{パッケージ名}:{識別子}`スコープ方式は、いずれも呼び出されるコード自体が現在は存在しない。アイテムに記録される不完全理由は状況に応じて`INCOMPLETE_REASON_SOURCES_FAILED`/`INCOMPLETE_REASON_IDENTIFICATION_TOO_WEAK`/`INCOMPLETE_REASON_AI_NOT_AVAILABLE`のいずれかになり、Stage4経由で新たに脆弱性が見つかることは（呼ばれても呼ばれなくても）無い。
 
 ## Stage3（削除済み）: NVDキーワード検索
 
