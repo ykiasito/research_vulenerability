@@ -34,7 +34,7 @@ Tier1が完全に空振りだった場合のみ発火（マーケットプレー
 
 ## Stage2: 脆弱性調査（`Stage2VulnerabilityResearchService`）
 
-Stage1で `IdentifiedProduct` が得られたアイテムのみ対象。5つの `VulnerabilitySource`（NVD/OSV/GHSA/cve.org/CSAF）を**逐次（1つずつ、並行ではない）**問い合わせる。CSAFを除く4ソースの結果は**完全一致するID文字列でのみ**重複排除して統合する（CSAFの扱いは表の下で個別に説明）。並行化していないのは意図的な設計判断——全Stage2ソースはローカルDBへの問い合わせのみを行い、ライブAPI呼び出し経路・それに伴うレートリミッタは（NVD/OSV/GHSAいずれも）既に廃止されているが、`ResearchJobProcessingService`が既にジョブ内の複数アイテムを並行処理しているため、ソースループそのものまで並行化した場合の追加のスループット向上は測定・検証されていない（詳細は`Stage2VulnerabilityResearchService`のクラスjavadoc参照）。
+Stage1で `IdentifiedProduct` が得られたアイテムのみ対象。5つの `VulnerabilitySource`（NVD/OSV/GHSA/cve.org/CSAF）を**逐次（1つずつ、並行ではない）**問い合わせる。CSAFを除く4ソースの結果は**完全一致するID文字列でのみ**重複排除して統合する（CSAFの扱いは表の下で個別に説明）。並行化していないのは意図的な設計判断——全Stage2ソースはローカルDBへの問い合わせのみを行い、この毎アイテム経路にはライブAPI呼び出しもレートリミッタも存在しない（`NvdRateLimiter`/`GhsaRateLimiter`/`OsvSyncRateLimiter`のクラス自体は現存するが、いずれもミラーを埋める背景同期（`NvdCveSyncService`/`NvdCpeSyncService`/`GhsaSyncService`/`OsvSyncService`）側でのみ使われる。ライブOSV照会専用だった`OsvRateLimiter`のみ`OsvLiveQueryClient`ごと閉域モードバックログ項目264〔B4〕で物理削除済み）。加えて`ResearchJobProcessingService`が既にジョブ内の複数アイテムを並行処理しているため、ソースループそのものまで並行化した場合の追加のスループット向上は測定・検証されていない（詳細は`Stage2VulnerabilityResearchService`のクラスjavadoc参照）。
 
 | ソース | 発火条件 | 特記事項 |
 |---|---|---|
@@ -48,7 +48,7 @@ Stage1で `IdentifiedProduct` が得られたアイテムのみ対象。5つの 
 
 **CSAF（`CsafVulnerabilitySource`）は他4ソースと異なる二経路の扱いを受ける**（`Stage2VulnerabilityResearchService`のクラスjavadoc参照）: (1) 経路1（通常ケース）——同じCVEを既に他のソースが見つけていれば、通常のID重複排除には加わらず、その既存行にCSAFのvendor status（`csaf_*`列）を注釈として追加するだけ。(2) 経路2（CSAF単独ヒット）——他のどのソースもそのCVEを見つけていない場合のみ、`fixed`/`known_affected`ステータスのときに限り新規findingとして挿入する。`known_not_affected`/`under_investigation`しかなく、かつ注釈対象の既存行も無い場合は、新規findingとしては出さず何もしない（安全側の判定を新規に主張しないため）。
 
-**設計上の意図的な逸脱（現在は解消済み）**: 当初案ではエコシステムごとの専用バージョン比較ロジック（semver/PEP440/Maven/Go）を実装する想定だったが、各ソースがまだライブAPIを叩いていた頃は、各APIが持つサーバーサイドのバージョン範囲解決に委任する方式にしていた（自前の多エコシステム比較器より正確と判断したため）。その後NVD/OSV/GHSAはいずれもミラーベースの実装へ移行しており（NVDはライブAPI経由の問い合わせ経路自体が閉域モードバックログ項目264〔B4〕で物理削除済み）、現在はどのソースも外部APIへ委任せず、ローカルの`CpeUtils#versionInRange`（NVD）・`OsvVersionRange`（OSV/GHSA）でこのアプリ自身がバージョン範囲を解決している。
+**設計上の意図的な逸脱（現在は解消済み）**: 当初案ではエコシステムごとの専用バージョン比較ロジック（semver/PEP440/Maven/Go）を実装する想定だったが、各ソースがまだライブAPIを叩いていた頃は、各APIが持つサーバーサイドのバージョン範囲解決に委任する方式にしていた（自前の多エコシステム比較器より正確と判断したため）。その後NVD/OSV/GHSAはいずれもミラーベースの実装へ移行しており（NVDはライブAPI経由の問い合わせ経路自体が閉域モードバックログ項目264〔B4〕で物理削除済み）、現在はどのソースも外部APIへ委任せず、このアプリ自身がバージョン範囲を判定している——`CpeUtils#versionInRange`（NVD）・`OsvVersionRange`（OSV/GHSA）に加え、`CveOrgVulnerabilitySource`は`VersionUtils#compare`、`CsafVulnerabilitySource`は`versionMatches`（Siemens/Red Hatのベンダー別分岐）でそれぞれ自前に判定する。
 
 **既知の簡略化**: CVEとGHSAが同一の実際の脆弱性を指していても、ID文字列が異なれば別々の行として残る（エイリアス解決は未実装）。
 
