@@ -3,6 +3,7 @@ package com.vulncheck.app.service.csaf;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import com.vulncheck.app.entity.CsafAdvisoryId;
@@ -17,6 +18,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -195,6 +197,37 @@ class RedHatCsafSyncServiceTest {
         // Cursor's changes-half is the archive's own Last-Modified header — both halves identical
         // after a baseline (class javadoc).
         assertThat(state.getLastCursor()).isEqualTo("2026-08-25T11:43:13Z|2026-08-25T11:43:13Z");
+    }
+
+    /** Backlog item 418 (regression, follow-up to item 416's {@code CveOrgSyncService} fix): {@code
+     *  uri.resolve(location)} inside {@link RedHatCsafSyncService#fetchBounded} used to leave an
+     *  unparseable redirect {@code Location} header's {@link IllegalArgumentException} uncaught
+     *  within the {@code exchange} callback — it fell through to the surrounding generic {@code catch
+     *  (Exception e)}, which both mislabeled the failure as a transport error and logged the
+     *  exception's own message (i.e. the raw, unsanitized {@code Location} — any signed query
+     *  parameter included) via {@code log.warn}'s trailing-throwable overload. */
+    @Test
+    void baselineSyncRejectsAMalformedArchiveLatestRedirectLocationWithoutLeakingASignedQueryString() {
+        Harness h = harness();
+        String secret = "REDHATSECRETVALUE456";
+
+        h.server().expect(method(HttpMethod.GET)).andExpect(requestTo(ARCHIVE_LATEST_URL))
+                .andRespond(withStatus(org.springframework.http.HttpStatus.FOUND)
+                        .header(HttpHeaders.LOCATION, "/bad path?sig=" + secret));
+
+        List<ch.qos.logback.classic.spi.ILoggingEvent> events = captureLogEvents(() -> {
+            SyncResult result = h.service().syncBaseline();
+            assertThat(result.upserted()).isZero();
+            assertThat(result.failed()).isZero();
+        });
+
+        h.server().verify(); // only archive_latest.txt requested — the malformed redirect target is never followed
+        for (ch.qos.logback.classic.spi.ILoggingEvent event : events) {
+            assertThat(event.getFormattedMessage()).doesNotContain(secret);
+            if (event.getThrowableProxy() != null) {
+                assertThat(ch.qos.logback.classic.spi.ThrowableProxyUtil.asString(event.getThrowableProxy())).doesNotContain(secret);
+            }
+        }
     }
 
     @Test
@@ -546,5 +579,26 @@ class RedHatCsafSyncServiceTest {
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /** Captures every log event {@link RedHatCsafSyncService}'s own logger emits while {@code
+     *  action} runs (same convention as {@code CveOrgSyncServiceTest#captureLogEvents} /
+     *  {@code UserApiKeyServiceTest#captureLogEvents}), temporarily lowering the logger to DEBUG and
+     *  restoring both the original level and appender list afterward regardless of outcome. */
+    private List<ch.qos.logback.classic.spi.ILoggingEvent> captureLogEvents(Runnable action) {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(RedHatCsafSyncService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        ch.qos.logback.classic.Level originalLevel = logger.getLevel();
+        logger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        try {
+            action.run();
+        } finally {
+            logger.detachAppender(appender);
+            logger.setLevel(originalLevel);
+        }
+        return appender.list;
     }
 }
