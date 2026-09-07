@@ -18,6 +18,7 @@ import com.vulncheck.app.repository.ResearchJobItemRepository;
 import com.vulncheck.app.repository.ResearchJobRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.CsvParsingService;
+import com.vulncheck.app.service.MirrorFreshnessService;
 import com.vulncheck.app.service.PendingCsvUploadStore;
 import com.vulncheck.app.service.ResearchJobProcessingService;
 import com.vulncheck.app.service.ResearchJobService;
@@ -70,6 +71,8 @@ class JobControllerDetailRenderingTest {
     private CsvParsingService csvParsingService;
     @MockBean
     private PendingCsvUploadStore pendingCsvUploadStore;
+    @MockBean
+    private MirrorFreshnessService mirrorFreshnessService;
 
     /** Same interface-projection fixture-builder shape as {@link JobControllerTest#cappedView}. */
     private JobItemVulnerabilityCappedView cappedView(Long jobItemId, String cveOrGhsaId, String severity,
