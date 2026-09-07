@@ -1,5 +1,7 @@
 package com.vulncheck.app.service;
 
+import java.net.URI;
+
 /**
  * Strips every C0 control character (U+0000-U+001F, including CR/LF/TAB/ESC/BS/VT/FF/NUL) plus DEL
  * (U+007F) from a value before it's interpolated into a log line — closed-mode backlog items
@@ -73,5 +75,31 @@ public final class LogSanitizer {
      *  every one of these, not just CR/LF/ESC, needs to come out of a log line. */
     private static boolean isStrippedControlCharacter(char c) {
         return c <= 0x1F || c == 0x7F;
+    }
+
+    /**
+     * Reduces {@code uri} to {@code scheme://host<rawPath>} — dropping the query string and fragment
+     * entirely — before it's safe to put in a log line or exception message (closed-mode backlog item
+     * 421, generalizing the helper {@code CveOrgSyncService} introduced for itself in item 416).
+     * Several of this app's external sync services (GHSA, OSV, Red Hat CSAF, Siemens CSAF, cve.org)
+     * fetch through an allowlisted-host redirect chain where the final hop's query string can carry a
+     * request-signing credential (e.g. a CDN's {@code sig=}/{@code jwt=} parameter) — that must never
+     * reach a log line verbatim. Uses {@link URI#getRawPath()} (not the decoding {@link URI#getPath()})
+     * so a maliciously crafted redirect {@code Location} can't smuggle a decoded control character into
+     * the reduced value; {@link #sanitize} is still applied on top as this codebase's standard defense
+     * against exactly that class of log-injection risk for any other externally-derived log value.
+     */
+    public static String sanitizeUrl(URI uri) {
+        return sanitize(uri.getScheme() + "://" + uri.getHost() + uri.getRawPath());
+    }
+
+    /** {@link #sanitizeUrl(URI)} for a raw, not-yet-parsed URL string — falls back to a fixed
+     *  placeholder if {@code url} isn't even a parseable URI. */
+    public static String sanitizeUrl(String url) {
+        try {
+            return sanitizeUrl(URI.create(url));
+        } catch (IllegalArgumentException e) {
+            return "(unparseable URL)";
+        }
     }
 }
