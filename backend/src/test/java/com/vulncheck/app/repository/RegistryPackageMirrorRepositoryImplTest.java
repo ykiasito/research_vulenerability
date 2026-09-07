@@ -190,4 +190,38 @@ class RegistryPackageMirrorRepositoryImplTest {
                 "npm", Instant.now().minus(1, ChronoUnit.DAYS)))
                 .isEmpty();
     }
+
+    /** Closed-mode backlog item 382 (promoted to master by item 396): with no rows in the table at
+     *  all, there is nothing to have last-synced. */
+    @Test
+    void maxLastSyncedAtIsEmptyWhenTheMirrorHasNeverSyncedAnyRow() {
+        assertThat(registryPackageMirrorRepository.maxLastSyncedAt()).isEmpty();
+    }
+
+    /** The single row's own {@code last_synced_at} is reported back. */
+    @Test
+    void maxLastSyncedAtReturnsTheOnlyRowsTimestampWhenThereIsExactlyOne() {
+        registryPackageMirrorRepository.upsertBatch("crates.io", Map.of("serde", List.of("1.0.228")));
+
+        assertThat(registryPackageMirrorRepository.maxLastSyncedAt()).isPresent();
+    }
+
+    /** Across ecosystems too -- {@link RegistryPackageMirrorRepository#maxLastSyncedAt} is
+     *  deliberately not scoped to a single ecosystem (see its own javadoc). */
+    @Test
+    void maxLastSyncedAtReturnsTheMostRecentTimestampAcrossEcosystems() {
+        jdbcTemplate.update(
+                "INSERT INTO registry_package_mirror (ecosystem, package_name, versions, last_synced_at) "
+                        + "VALUES (?, ?, ARRAY['1.0.228'], ?)",
+                "crates.io", "serde", java.sql.Timestamp.from(Instant.now().minus(10, ChronoUnit.DAYS)));
+        Instant mostRecent = Instant.now().minus(1, ChronoUnit.DAYS);
+        jdbcTemplate.update(
+                "INSERT INTO registry_package_mirror (ecosystem, package_name, versions, last_synced_at) "
+                        + "VALUES (?, ?, ARRAY['1.0.0'], ?)",
+                "npm", "left-pad", java.sql.Timestamp.from(mostRecent));
+
+        assertThat(registryPackageMirrorRepository.maxLastSyncedAt())
+                .get(org.assertj.core.api.InstanceOfAssertFactories.INSTANT)
+                .isCloseTo(mostRecent, org.assertj.core.api.Assertions.within(1, ChronoUnit.SECONDS));
+    }
 }
