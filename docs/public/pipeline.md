@@ -56,14 +56,14 @@ Stage1で `IdentifiedProduct` が得られたアイテムのみ対象。5つの 
 
 **既知の簡略化**: CVEとGHSAが同一の実際の脆弱性を指していても、ID文字列が異なれば別々の行として残る（エイリアス解決は未実装）。
 
-## Stage4: AI最終手段調査（`Stage4WebSearchResearchService`）
+## Stage4: AI最終手段調査（`Stage4WebSearchResearchService`、現在は常にno-op）
 
-**中核方針に基づくゲート条件**: 以下のいずれかの場合のみ発火。それ以外（Stage2が1件でも見つけた場合）は**発火しない** — 「影響のある脆弱性が1件でも見つかれば静的調査だけで完結してよい」という方針を反映した設計であり、取りこぼしがあっても仕様（意図的な設計判断であり不具合ではない）。
+**呼び出し条件自体は変わっていない**（`ResearchJobProcessingService`が判定、以下のいずれかの場合のみ`#research`を呼ぶ。それ以外＝Stage2が1件でも見つけた場合は呼ばない）:
 
-1. Stage1で識別済み・かつStage2が0件だった場合 → `ecosystem`/`packageName` を検索スコープにする
-2. Stage1で識別自体ができなかった（UNIDENTIFIED）が、Tier3が `platform_hint` を残していた場合 → `hint_platform`/`hint_identifier` を検索スコープにする（この場合だけがUNIDENTIFIEDアイテムに脆弱性の答えを出せる唯一の経路）
+1. Stage1で識別済み・かつStage2が0件だった場合 → `ecosystem`/`packageName`を渡して呼び出す
+2. Stage1で識別自体ができなかった（UNIDENTIFIED）場合で、`item.getHintIdentifier() != null`のとき → `hint_platform`/`hint_identifier`を渡して呼び出す（ただしTier3が常にno-opのため`hintIdentifier`は実際には設定されず、この条件は現状到達不能——上記Tier3節参照）
 
-Claudeに `web_search` ツール（max_uses=2）を持たせ、構造化DBで見つからなかった脆弱性をWeb検索させる。返ってきた識別子がCVE/GHSA形式なら`vulnerabilities`テーブルのグローバルユニークキーとしてそのまま使い、それ以外の自由記述識別子は `llm:{パッケージ名}:{識別子}` の形でスコープして異なる製品同士の衝突を防ぐ。
+**しかし呼び出された`#research`自体が無条件のno-op**: `Stage4WebSearchResearchService#research`は、closed-mode B2（`docs/spec/closed-mode-plan.md`§9-2でClaude+`web_search`呼び出し経路自体が物理削除済み）により、渡された引数の内容に関わらず常に`new Stage4ResearchResult(0, ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE)`を返す1行の実装。以前あった、Claudeの`web_search`ツール（max_uses=2）によるWeb検索・CVE/GHSA形式識別子のグローバルユニークキー利用・自由記述識別子の`llm:{パッケージ名}:{識別子}`スコープ方式は、いずれも呼び出されるコード自体が現在は存在しない。呼び出し条件を満たしたアイテムには`INCOMPLETE_REASON_AI_NOT_AVAILABLE`が記録されるのみで、Stage4経由で新たに脆弱性が見つかることは無い。
 
 ## Stage3（未使用）: NVDキーワード検索
 
