@@ -559,7 +559,10 @@ class AdminControllerTest {
      * must never look like a plain green success on this page. {@link
      * CveOrgSyncService#syncDelta} itself returns a plain {@code int}, so the controller cannot
      * tell success from failure from that return value alone -- it must re-read the state {@code
-     * CveOrgSyncService} just wrote.
+     * CveOrgSyncService} just wrote. Closed-mode backlog item 417: the raw {@code last_sync_error}
+     * text used to also be repeated via a separate {@code syncFailureMessage} model attribute --
+     * removed since {@code admin/cve-org.html}'s own "同期状態" block already shows it (same as
+     * every other mirror's admin page), so it must not be set here anymore.
      */
     @Test
     void cveOrgSyncDeltaShowsTheFailureInsteadOfAMisleadingSuccessMessage() {
@@ -574,8 +577,7 @@ class AdminControllerTest {
 
         assertThat(view).isEqualTo("admin/cve-org");
         assertThat(model.getAttribute("result")).isNull();
-        assertThat(model.getAttribute("syncFailureMessage")).asString()
-                .contains("失敗").contains("delta sync failed after upserting 0 records");
+        assertThat(model.getAttribute("syncFailureMessage")).isNull();
         assertThat(model.getAttribute("syncState")).isSameAs(failedState);
     }
 
