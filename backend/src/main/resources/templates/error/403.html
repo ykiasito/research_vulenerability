@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>アクセス権限がありません - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>アクセス権限がありません</h1>
+<p class="error">このページを表示する権限がありません。管理者専用の機能である可能性があります。</p>
+<p>心当たりが無い場合は、URLの入力ミスやブックマークが古くなっていないかご確認ください。</p>
+<p><a th:href="@{/}">ホームに戻る</a> | <a th:href="@{/jobs}">調査ジョブ一覧へ</a></p>
+</body>
+</html>
