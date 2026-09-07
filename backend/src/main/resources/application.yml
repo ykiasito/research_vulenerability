@@ -238,6 +238,16 @@ server:
         # this block documents the full, intentional cookie-hardening posture (Secure + HttpOnly)
         # in one place instead of leaving HttpOnly's protection implicit.
         http-only: true
+  error:
+    # Already Spring Boot's own default ("never") in this version — pinned explicitly here
+    # (closed-mode backlog item 411) so it's on record that a non-engineer-facing 403/404/500 page
+    # (templates/error/*.html) can never accidentally leak a stack trace, exception class name, or
+    # request-binding validation detail to the browser, even if a future Spring Boot upgrade were
+    # to change the framework default.
+    include-stacktrace: never
+    include-exception: false
+    include-message: never
+    include-binding-errors: never
 
 logging:
   level:
