@@ -755,7 +755,20 @@ public class OsvSyncService {
                     if (!paceOrAbort()) {
                         return FetchOutcome.of(FetchStatus.INTERRUPTED);
                     }
-                    return fetchBounded(uri.resolve(location).toString(), maxBytes, redirectsRemaining - 1);
+                    URI target;
+                    try {
+                        // Backlog item 418: URI#resolve(String) calls URI.create internally, so a
+                        // Location header that isn't a parseable URI reference throws an unchecked
+                        // IllegalArgumentException here. Left uncaught, this would fall into the outer
+                        // catch (Exception e) below, which both mislabels the failure as
+                        // TRANSPORT_ERROR and logs the exception's own message — i.e. the raw,
+                        // unsanitized Location string (any signed query parameters included) — via
+                        // log.warn's trailing-Throwable overload.
+                        target = uri.resolve(location);
+                    } catch (IllegalArgumentException e) {
+                        return FetchOutcome.of(FetchStatus.HTTP_ERROR);
+                    }
+                    return fetchBounded(target.toString(), maxBytes, redirectsRemaining - 1);
                 }
                 if (!status.is2xxSuccessful()) {
                     return FetchOutcome.of(FetchStatus.HTTP_ERROR);
