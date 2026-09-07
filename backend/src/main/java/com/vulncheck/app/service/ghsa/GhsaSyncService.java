@@ -870,6 +870,9 @@ public class GhsaSyncService {
             });
         } catch (Exception e) {
             // Backlog item 421: same rationale as resolveRedirectTarget's matching catch above.
+            // Backlog item 437: `e`'s own message (ResourceAccessException/RestClientResponseException)
+            // doesn't leak the query string either today, since Spring-web 6.2.19 (currently pinned)
+            // truncates the URL at '?' when building it -- but that's version-dependent, not guaranteed.
             log.warn("GHSA sync: transport error fetching {}", LogSanitizer.sanitizeUrl(url), e);
             return FetchOutcome.of(FetchStatus.TRANSPORT_ERROR);
         }
