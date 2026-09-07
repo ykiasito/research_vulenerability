@@ -2,6 +2,7 @@ package com.vulncheck.app.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.net.URI;
 import org.junit.jupiter.api.Test;
 
 /** Closed-mode backlog items 223/258/276: every C0 control character (CR/LF/TAB/ESC/BS/VT/FF/NUL)
@@ -141,5 +142,90 @@ class LogSanitizerTest {
     @Test
     void handlesEmpty() {
         assertThat(LogSanitizer.sanitize("")).isEmpty();
+    }
+
+    // ---------------------------------------------------------------- sanitizeUrl (item 421) -------
+
+    @Test
+    void sanitizeUrlDropsQueryStringAndFragment() {
+        String secret = "sig=SECRETVALUE123&jwt=abc";
+        assertThat(LogSanitizer.sanitizeUrl("https://cdn.example.com/asset/download.zip?" + secret + "#frag"))
+                .isEqualTo("https://cdn.example.com/asset/download.zip")
+                .doesNotContain(secret);
+    }
+
+    @Test
+    void sanitizeUrlAcceptsAlreadyParsedUri() {
+        assertThat(LogSanitizer.sanitizeUrl(URI.create("https://api.github.com/repos/foo/bar/tarball/main?sig=x")))
+                .isEqualTo("https://api.github.com/repos/foo/bar/tarball/main");
+    }
+
+    @Test
+    void sanitizeUrlFallsBackToPlaceholderForAnUnparseableUrl() {
+        // A raw space is not a legal URI reference character (java.net.URI throws
+        // IllegalArgumentException) -- mirrors the shape of a genuinely malformed redirect Location.
+        assertThat(LogSanitizer.sanitizeUrl("not a url")).isEqualTo("(unparseable URL)");
+    }
+
+    @Test
+    void sanitizeUrlUsesRawPathSoAPercentEncodedControlCharacterIsNotDecoded() {
+        // %0D%0A is the percent-encoded form of CR/LF -- URI#getPath() would decode this back into an
+        // actual CR/LF (forging an extra log line), which is exactly what using URI#getRawPath()
+        // (instead) avoids; the literal "%0D%0A" text surviving unharmed is the expected, safe result.
+        URI uri = URI.create("https://cdn.example.com/asset%0D%0AFAKE");
+        assertThat(LogSanitizer.sanitizeUrl(uri))
+                .doesNotContain("\r")
+                .doesNotContain("\n")
+                .contains("%0D%0AFAKE");
+    }
+
+    @Test
+    void sanitizeUrlHandlesOpaqueUriWithoutPrintingTheLiteralStringNull() {
+        // PR#308 senior-review, REVISE round: an opaque URI (no authority component) has a null
+        // URI#getHost(), which the pre-fix implementation stringified verbatim into
+        // "mailto://nullnull". validatedUri/fetchBounded already reject anything with a null host
+        // before a fetch happens, so this is purely a diagnosability fix, not a new safety boundary.
+        String result = LogSanitizer.sanitizeUrl(URI.create("mailto:a@b.com"));
+        assertThat(result).doesNotContain("null");
+        assertThat(result).isEqualTo("(non-hierarchical URL, scheme=mailto): a@b.com");
+    }
+
+    @Test
+    void sanitizeUrlHandlesOpaqueUriWithQuerySuffixWithoutLeakingIt() {
+        // javascript: URIs are opaque too, and can carry a query-like suffix of their own -- confirms
+        // that suffix is dropped the same way a hierarchical URI's query string is.
+        String secret = "sig=SECRETVALUE123";
+        String result = LogSanitizer.sanitizeUrl(URI.create("javascript:alert(1)?" + secret));
+        assertThat(result).doesNotContain("null").doesNotContain(secret);
+        assertThat(result).isEqualTo("(non-hierarchical URL, scheme=javascript): alert(1)");
+    }
+
+    @Test
+    void sanitizeUrlHandlesRelativeUriWithoutPrintingTheLiteralStringNullAndDropsQuery() {
+        // A relative reference (no scheme, no authority) also has a null host -- the pre-fix
+        // implementation produced "null://null/relative/path" (the literal "null" strings and a
+        // nonsensical "scheme://host" shape, but the query itself was never leaked here: even for a
+        // relative URI, java.net.URI still parses the query out as its own component via
+        // getRawSchemeSpecificPart()/withoutQuery(), so this test's assertion below is pinning that
+        // the *literal "null"* is gone, not a query-leak fix).
+        String secret = "sig=SECRET";
+        String result = LogSanitizer.sanitizeUrl(URI.create("/relative/path?" + secret));
+        assertThat(result).doesNotContain("null").doesNotContain(secret);
+        assertThat(result).isEqualTo("(non-hierarchical URL, scheme=(no scheme)): /relative/path");
+    }
+
+    @Test
+    void sanitizeUrlHandlesProtocolRelativeUriWithoutPrintingTheLiteralStringNull() {
+        // PR#308 senior-review, 2nd REVISE round: a protocol-relative reference (e.g. what a
+        // feed-driven fetch like SiemensCsafSyncService's feedUrl/contentUrl/hashUrl resolution can
+        // hand to this method) has a non-null host but a null scheme -- it takes the *hierarchical*
+        // branch (unlike the relative-path case above), which the first-round fix didn't cover: the
+        // pre-fix implementation produced "null://evil.example.com/adv.json", a bogus-looking scheme
+        // in front of a real host. The query itself was never leaked (hierarchical URIs already split
+        // it out via getRawQuery()), so this pins (a) no literal "null" and (b) the query is still gone.
+        String secret = "sig=SECRETVALUE123";
+        String result = LogSanitizer.sanitizeUrl(URI.create("//evil.example.com/adv.json?" + secret));
+        assertThat(result).doesNotContain("null").doesNotContain(secret);
+        assertThat(result).isEqualTo("//evil.example.com/adv.json");
     }
 }

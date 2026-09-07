@@ -7,6 +7,7 @@ import com.vulncheck.app.entity.OsvSyncState;
 import com.vulncheck.app.repository.OsvAdvisoryRepository;
 import com.vulncheck.app.repository.OsvSyncFailureRepository;
 import com.vulncheck.app.repository.OsvSyncStateRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.vuln.OsvEcosystems;
 import com.vulncheck.app.service.vuln.OsvSyncRateLimiter;
 import java.io.BufferedReader;
@@ -647,7 +648,14 @@ public class OsvSyncService {
     private StreamWithHeaders openZipStream(String url) throws IOException {
         URI uri = validatedUri(url);
         if (uri == null) {
-            throw new IOException("Rejected non-allowlisted URL: " + url);
+            // Backlog item 421 (PR#308 senior-review, REVISE round): mirrors GhsaSyncService#openStream
+            // — this IOException's message can end up persisted to osv_sync_state.last_sync_error and
+            // shown on the admin sync-status view, a bigger blast radius than a log-only leak.
+            // Defensive rather than live today (url here is only ever a value this class itself already
+            // validated via validatedUri before calling into openZipStream), matching item 416's
+            // reference implementation (CveOrgSyncService#download) so this doesn't regress if that
+            // invariant ever changes.
+            throw new IOException("Rejected non-allowlisted URL: " + LogSanitizer.sanitizeUrl(url));
         }
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(10_000);
@@ -668,7 +676,9 @@ public class OsvSyncService {
     private InputStream openCsvStream(String url) throws IOException {
         URI uri = validatedUri(url);
         if (uri == null) {
-            throw new IOException("Rejected non-allowlisted URL: " + url);
+            // Same rationale as openZipStream above (backlog item 421, PR#308 senior-review REVISE
+            // round) — defensive, not a live leak today.
+            throw new IOException("Rejected non-allowlisted URL: " + LogSanitizer.sanitizeUrl(url));
         }
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(10_000);
@@ -777,7 +787,10 @@ public class OsvSyncService {
                 return body == null ? FetchOutcome.of(FetchStatus.TOO_LARGE) : FetchOutcome.ok(body);
             });
         } catch (Exception e) {
-            log.warn("OSV sync: transport error fetching {}", url, e);
+            // Backlog item 421: url may already be a redirect target carrying a signed query string
+            // (validatedUri below re-validates every hop, including redirects), so it's reduced to
+            // scheme/host/path before reaching this line.
+            log.warn("OSV sync: transport error fetching {}", LogSanitizer.sanitizeUrl(url), e);
             return FetchOutcome.of(FetchStatus.TRANSPORT_ERROR);
         }
     }
@@ -790,7 +803,9 @@ public class OsvSyncService {
             return null;
         }
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || !ALLOWED_HOSTS.contains(uri.getHost())) {
-            log.warn("OSV sync: rejecting fetch of {} — not https or not an allowlisted host", url);
+            // Backlog item 421: url here can be a redirect target that resolved to a non-allowlisted
+            // host, so it may already carry a request-signing query string from wherever it redirected.
+            log.warn("OSV sync: rejecting fetch of {} — not https or not an allowlisted host", LogSanitizer.sanitizeUrl(url));
             return null;
         }
         return uri;

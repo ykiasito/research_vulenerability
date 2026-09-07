@@ -13,6 +13,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.vulncheck.app.entity.CpeDictionaryEntry;
 import com.vulncheck.app.entity.IdentifiedProduct;
 import com.vulncheck.app.entity.ResearchJobItem;
@@ -42,6 +46,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 @ExtendWith(MockitoExtension.class)
 class Stage1IdentificationServiceTest {
@@ -3697,5 +3702,147 @@ class Stage1IdentificationServiceTest {
         assertThat(pairs).hasSizeLessThanOrEqualTo(64);
         assertThat(pairs).noneMatch(p -> "v9".equals(p.vendor()) || "v10".equals(p.vendor())
                 || "p9".equals(p.product()) || "p10".equals(p.product()));
+    }
+
+    /** Backlog item 401 (senior review, item 388/PR#278 3rd round): {@code RegistryMatch#packageName}
+     *  is an external registry response value (npm/PyPI/Maven Central etc.), not a CSV-derived one —
+     *  item 373's sanitize-CSV-derived-log-values pass therefore didn't cover it, but it's exactly as
+     *  untrusted as a CSV cell for log-injection purposes (a compromised/typosquatted registry entry
+     *  controls this string, not the operator). Exercises the top-level "Stage1 identify" summary log
+     *  {@link Stage1IdentificationService#identify} always emits, via a real formatted log line (not
+     *  just {@link LogSanitizer#sanitize} in isolation) — same {@code ListAppender} convention as
+     *  {@code CveOrgSyncServiceTest#captureLogEvents}. */
+    @Test
+    void identifySummaryLogSanitizesARegistryPackageNameContainingCrlf() {
+        String maliciousPackageName = "express\r\nFAKE INJECTED LOG LINE";
+        PackageRegistryLookup npmLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch(
+                        "npm", maliciousPackageName, "pkg:npm/express@1.0.0", new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of());
+        stubSaveReturnsArgument();
+
+        List<ILoggingEvent> events = captureLogEvents(
+                () -> service(List.of(npmLookup)).identify(item("express"), USER_ID));
+
+        List<ILoggingEvent> summaryEvents = events.stream()
+                .filter(event -> event.getFormattedMessage().contains("Stage1 identify"))
+                .toList();
+        assertThat(summaryEvents).hasSize(1);
+        String formatted = summaryEvents.get(0).getFormattedMessage();
+        assertThat(formatted).doesNotContain("\r").doesNotContain("\n");
+        assertThat(formatted).contains("expressFAKE INJECTED LOG LINE");
+
+        // The persisted entity still carries the package name verbatim -- only the log line is
+        // sanitized (same DB-vs-log distinction CveOrgSyncServiceTest's own item-416 regression
+        // draws for release tags).
+        ArgumentCaptor<IdentifiedProduct> captor = ArgumentCaptor.forClass(IdentifiedProduct.class);
+        verify(identifiedProductRepository).save(captor.capture());
+        assertThat(captor.getValue().getPackageName()).isEqualTo(maliciousPackageName);
+    }
+
+    /** Backlog item 401 (PR#308 senior-review, REVISE round): {@code describe()}'s "Stage1 identify"
+     *  summary log line sanitized {@code product.getPackageName()} (covered by the test above) but
+     *  left the adjacent {@code product.getCpe()} in the same log call unsanitized — just as
+     *  externally-sourced (CPE dictionary / live NVD lookup) as the package name. Reuses {@code
+     *  keepsACpeThatIndependentlyCorroboratesTheTrustedRegistryMatchsOwnPackageName}'s exact
+     *  registry+CPE setup so a real {@code cpe=} value reaches the summary log, just with a
+     *  CRLF-carrying dictionary CPE string. The injected suffix sits after the CPE's final segment
+     *  (no extra {@code ':'}), so {@code CpeUtils} field-splitting/vendor-product parsing is
+     *  unaffected — the corroboration check still passes on vendor=google/product=gson alone. */
+    @Test
+    void identifySummaryLogSanitizesTheChosenCpeContainingCrlf() {
+        String maliciousCpe = "cpe:2.3:a:google:gson:2.10.1:*:*:*:*:*:*:*\r\nFAKE INJECTED LOG LINE";
+        PackageRegistryLookup registryLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("npm", "gson", "pkg:npm/gson@1.0.0", new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "npm";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(cpeEntry(maliciousCpe, "gson")));
+        stubSaveReturnsArgument();
+
+        List<ILoggingEvent> events = captureLogEvents(
+                () -> service(List.of(registryLookup)).identify(item("gson"), USER_ID));
+
+        List<ILoggingEvent> summaryEvents = events.stream()
+                .filter(event -> event.getFormattedMessage().contains("Stage1 identify"))
+                .toList();
+        assertThat(summaryEvents).hasSize(1);
+        String formatted = summaryEvents.get(0).getFormattedMessage();
+        assertThat(formatted).doesNotContain("\r").doesNotContain("\n");
+        assertThat(formatted).contains("FAKE INJECTED LOG LINE");
+    }
+
+    /** Backlog item 401 (PR#308 senior-review, REVISE round): the "Dropping CPE ... does not
+     *  independently corroborate" log line sanitized {@code trustedMatch.packageName()} but left the
+     *  adjacent {@code chosenCpe.getCpeString()} in the same log call unsanitized — same
+     *  live-NVD/CPE-dictionary threat model. Reuses {@code
+     *  dropsAMismatchedCpeThatRodeAlongOnATrustedRegistryMatchsConfidence}'s exact rayon/crayon
+     *  mismatch setup, just with a CRLF-carrying dictionary CPE string, to reach this specific log
+     *  call (not the summary log the test above covers). */
+    @Test
+    void dropCpeLogSanitizesTheCpeStringContainingCrlf() {
+        String maliciousCpe = "cpe:2.3:a:crayon_project:crayon:1.0.0:*:*:*:*:*:*:*\r\nFAKE INJECTED LOG LINE";
+        PackageRegistryLookup registryLookup = new PackageRegistryLookup() {
+            @Override
+            public Optional<RegistryMatch> lookup(String name, String version) {
+                return Optional.of(new RegistryMatch("cargo", "rayon", "pkg:cargo/rayon@1.9.0", new BigDecimal("0.95"), true));
+            }
+
+            @Override
+            public String ecosystem() {
+                return "cargo";
+            }
+        };
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(cpeEntry(maliciousCpe, "crayon")));
+        stubSaveReturnsArgument();
+
+        List<ILoggingEvent> events = captureLogEvents(
+                () -> service(List.of(registryLookup)).identify(item("crayon"), USER_ID));
+
+        List<ILoggingEvent> dropEvents = events.stream()
+                .filter(event -> event.getFormattedMessage().contains("Dropping CPE"))
+                .toList();
+        assertThat(dropEvents).hasSize(1);
+        String formatted = dropEvents.get(0).getFormattedMessage();
+        assertThat(formatted).doesNotContain("\r").doesNotContain("\n");
+        assertThat(formatted).contains("FAKE INJECTED LOG LINE");
+    }
+
+    /** Captures every log event {@link Stage1IdentificationService}'s own logger emits while {@code
+     *  action} runs, temporarily lowering the logger to DEBUG and restoring both the original level
+     *  and appender list afterward regardless of outcome — same convention as {@code
+     *  CveOrgSyncServiceTest#captureLogEvents}. */
+    private List<ILoggingEvent> captureLogEvents(Runnable action) {
+        Logger logger = (Logger) LoggerFactory.getLogger(Stage1IdentificationService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        Level originalLevel = logger.getLevel();
+        logger.setLevel(Level.DEBUG);
+        try {
+            action.run();
+        } finally {
+            logger.detachAppender(appender);
+            logger.setLevel(originalLevel);
+        }
+        return appender.list;
     }
 }

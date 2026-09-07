@@ -1,5 +1,6 @@
 package com.vulncheck.app.controller;
 
+import static org.mockito.Mockito.lenient;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -24,6 +25,9 @@ import com.vulncheck.app.service.cveorg.CveOrgSyncService;
 import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.osv.OsvSyncService;
 import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
+import java.time.Instant;
+import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -89,6 +93,21 @@ class AdminControllerSecurityTest {
     private NvdCveSyncStateRepository nvdCveSyncStateRepository;
     @MockBean
     private CpeDictionarySyncStateRepository cpeDictionarySyncStateRepository;
+
+    /**
+     * Closed-mode backlog item 382 (promoted to master by item 396): every {@code
+     * /admin/registry-mirror} controller method unconditionally calls {@link
+     * RegistryMirrorSyncService#currentStatus()} to populate the sync-status display — stubbed
+     * here (leniently, since not every test below actually reaches a registry-mirror endpoint) so
+     * those calls return a real {@link RegistryMirrorSyncService.SyncStatus} instead of Mockito's
+     * default {@code null}, matching what the real service always returns. Mirrors {@code
+     * AdminControllerTest}'s equivalent stub.
+     */
+    @BeforeEach
+    void stubRegistryMirrorSyncStatus() {
+        lenient().when(registryMirrorSyncService.currentStatus())
+                .thenReturn(new RegistryMirrorSyncService.SyncStatus(false, Optional.of(Instant.now())));
+    }
 
     @Test
     void unauthenticatedRequestIsRedirectedToLogin() throws Exception {
