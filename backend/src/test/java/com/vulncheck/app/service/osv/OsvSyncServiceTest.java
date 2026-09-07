@@ -393,6 +393,103 @@ class OsvSyncServiceTest {
         assertThat(result.alreadyRunning()).isFalse();
     }
 
+    // ---------------------------------------------------- openZip/CsvStreamForUri (item436) -------
+
+    private OsvSyncService plainService() {
+        setUpCommonMocks();
+        return new OsvSyncService(RestClient.builder().build(), documentUpsertService, osvAdvisoryRepository,
+                osvSyncStateRepository, osvSyncFailureRepository, OsvSyncRateLimiter.disabledForTesting(),
+                OsvSyncService.DEFAULT_MAX_DOCUMENTS_PER_DELTA_RUN, null, null);
+    }
+
+    /** Backlog item 436: a non-2xx response must fail closed via a sanitized, self-built {@code
+     *  IOException} message — never {@link java.net.HttpURLConnection#getInputStream()}'s own
+     *  message, which embeds the COMPLETE request URL (including any query string). Uses a local
+     *  {@code com.sun.net.httpserver.HttpServer} (same harness technique as {@code
+     *  CveOrgSyncServiceTest}/{@code GhsaSyncServiceTest}), since {@code MockRestServiceServer} can't
+     *  intercept the raw {@link java.net.URLConnection} {@link OsvSyncService#openZipStreamForUri}/
+     *  {@link OsvSyncService#openCsvStreamForUri} use.
+     *
+     *  <p>Mutation check (item436 task brief): reverting {@link OsvSyncService#checkResponseCode}'s
+     *  call site back to a bare {@code connection.getInputStream()} makes this test fail — the
+     *  resulting {@code IOException} message becomes the JDK's own {@code "Server returned HTTP
+     *  response code: 500 for URL: http://localhost:<port>/all.zip?token=..."}, which both lacks
+     *  "unexpected HTTP 500" and contains the secret; verified locally before this test was added. */
+    @Test
+    void openZipStreamForUriFailsClosedOnANonTwoXxResponseWithoutLeakingTheQueryString() throws Exception {
+        OsvSyncService service = plainService();
+        String secret = "OSVZIPSTREAMSECRET789";
+        com.sun.net.httpserver.HttpServer server =
+                com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("localhost", 0), 0);
+        try {
+            server.createContext("/all.zip", exchange -> {
+                exchange.sendResponseHeaders(500, -1);
+                exchange.close();
+            });
+            server.start();
+            java.net.URI uri = java.net.URI.create("http://localhost:" + server.getAddress().getPort() + "/all.zip?token=" + secret);
+
+            Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(() -> service.openZipStreamForUri(uri));
+
+            assertThat(thrown).isInstanceOf(java.io.IOException.class);
+            assertThat(thrown.getMessage()).contains("unexpected HTTP 500").doesNotContain(secret);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void openZipStreamForUriReturnsTheStreamAndHeadersOnASuccessfulResponse() throws Exception {
+        OsvSyncService service = plainService();
+        byte[] body = "zip bytes".getBytes(StandardCharsets.UTF_8);
+        com.sun.net.httpserver.HttpServer server =
+                com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("localhost", 0), 0);
+        try {
+            server.createContext("/all.zip", exchange -> {
+                exchange.getResponseHeaders().add("last-modified", "Thu, 01 Jan 2026 00:00:00 GMT");
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+                exchange.close();
+            });
+            server.start();
+            java.net.URI uri = java.net.URI.create("http://localhost:" + server.getAddress().getPort() + "/all.zip");
+
+            StreamWithHeaders result = service.openZipStreamForUri(uri);
+            try (InputStream stream = result.stream()) {
+                assertThat(stream.readAllBytes()).isEqualTo(body);
+            }
+            assertThat(result.lastModified()).isEqualTo("Thu, 01 Jan 2026 00:00:00 GMT");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /** Same non-2xx/no-leak guarantee as {@link #openZipStreamForUriFailsClosedOnANonTwoXxResponseWithoutLeakingTheQueryString},
+     *  for {@code modified_id.csv}'s own stream opener. */
+    @Test
+    void openCsvStreamForUriFailsClosedOnANonTwoXxResponseWithoutLeakingTheQueryString() throws Exception {
+        OsvSyncService service = plainService();
+        String secret = "OSVCSVSTREAMSECRET789";
+        com.sun.net.httpserver.HttpServer server =
+                com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("localhost", 0), 0);
+        try {
+            server.createContext("/modified_id.csv", exchange -> {
+                exchange.sendResponseHeaders(404, -1);
+                exchange.close();
+            });
+            server.start();
+            java.net.URI uri = java.net.URI.create(
+                    "http://localhost:" + server.getAddress().getPort() + "/modified_id.csv?token=" + secret);
+
+            Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(() -> service.openCsvStreamForUri(uri));
+
+            assertThat(thrown).isInstanceOf(java.io.IOException.class);
+            assertThat(thrown.getMessage()).contains("unexpected HTTP 404").doesNotContain(secret);
+        } finally {
+            server.stop(0);
+        }
+    }
+
     /** Captures every log event {@link OsvSyncService}'s own logger emits while {@code action} runs
      *  (same convention as {@code CveOrgSyncServiceTest#captureLogEvents} /
      *  {@code UserApiKeyServiceTest#captureLogEvents}), temporarily lowering the logger to DEBUG and
