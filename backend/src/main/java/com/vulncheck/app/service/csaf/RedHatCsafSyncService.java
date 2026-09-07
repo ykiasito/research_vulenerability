@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vulncheck.app.entity.CsafSyncState;
 import com.vulncheck.app.repository.CsafAdvisoryRepository;
 import com.vulncheck.app.repository.CsafSyncStateRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -726,7 +727,9 @@ public class RedHatCsafSyncService {
             return FetchOutcome.of(FetchStatus.REJECTED_SCHEME_OR_HOST, null);
         }
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || !ALLOWED_HOSTS.contains(uri.getHost())) {
-            log.warn("Red Hat CSAF sync: rejecting fetch of {} — not https or not an allowlisted host", url);
+            // Backlog item 421: url here can be a redirect target that resolved to a non-allowlisted
+            // host, so it may already carry a request-signing query string from wherever it redirected.
+            log.warn("Red Hat CSAF sync: rejecting fetch of {} — not https or not an allowlisted host", LogSanitizer.sanitizeUrl(url));
             return FetchOutcome.of(FetchStatus.REJECTED_SCHEME_OR_HOST, null);
         }
 
@@ -739,7 +742,9 @@ public class RedHatCsafSyncService {
                         return FetchOutcome.of(FetchStatus.HTTP_ERROR, status.value());
                     }
                     if (redirectsRemaining <= 0) {
-                        log.warn("Red Hat CSAF sync: too many redirects fetching {}", url);
+                        // Backlog item 421: url is the current (already-validated) hop, which may
+                        // itself have been reached via a redirect carrying a signed query string.
+                        log.warn("Red Hat CSAF sync: too many redirects fetching {}", LogSanitizer.sanitizeUrl(url));
                         return FetchOutcome.of(FetchStatus.TOO_MANY_REDIRECTS, status.value());
                     }
                     URI redirectTarget;
@@ -770,7 +775,8 @@ public class RedHatCsafSyncService {
                 return FetchOutcome.ok(body, parseHttpDate(response.getHeaders().getFirst(HttpHeaders.LAST_MODIFIED)));
             });
         } catch (Exception e) {
-            log.warn("Red Hat CSAF sync: transport error fetching {}", url, e);
+            // Backlog item 421: same rationale as the "too many redirects" branch above.
+            log.warn("Red Hat CSAF sync: transport error fetching {}", LogSanitizer.sanitizeUrl(url), e);
             return FetchOutcome.of(FetchStatus.TRANSPORT_ERROR, null);
         }
     }

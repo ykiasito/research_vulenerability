@@ -7,6 +7,7 @@ import com.vulncheck.app.entity.OsvSyncState;
 import com.vulncheck.app.repository.OsvAdvisoryRepository;
 import com.vulncheck.app.repository.OsvSyncFailureRepository;
 import com.vulncheck.app.repository.OsvSyncStateRepository;
+import com.vulncheck.app.service.LogSanitizer;
 import com.vulncheck.app.service.vuln.OsvEcosystems;
 import com.vulncheck.app.service.vuln.OsvSyncRateLimiter;
 import java.io.BufferedReader;
@@ -777,7 +778,10 @@ public class OsvSyncService {
                 return body == null ? FetchOutcome.of(FetchStatus.TOO_LARGE) : FetchOutcome.ok(body);
             });
         } catch (Exception e) {
-            log.warn("OSV sync: transport error fetching {}", url, e);
+            // Backlog item 421: url may already be a redirect target carrying a signed query string
+            // (validatedUri below re-validates every hop, including redirects), so it's reduced to
+            // scheme/host/path before reaching this line.
+            log.warn("OSV sync: transport error fetching {}", LogSanitizer.sanitizeUrl(url), e);
             return FetchOutcome.of(FetchStatus.TRANSPORT_ERROR);
         }
     }
@@ -790,7 +794,9 @@ public class OsvSyncService {
             return null;
         }
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || !ALLOWED_HOSTS.contains(uri.getHost())) {
-            log.warn("OSV sync: rejecting fetch of {} — not https or not an allowlisted host", url);
+            // Backlog item 421: url here can be a redirect target that resolved to a non-allowlisted
+            // host, so it may already carry a request-signing query string from wherever it redirected.
+            log.warn("OSV sync: rejecting fetch of {} — not https or not an allowlisted host", LogSanitizer.sanitizeUrl(url));
             return null;
         }
         return uri;
