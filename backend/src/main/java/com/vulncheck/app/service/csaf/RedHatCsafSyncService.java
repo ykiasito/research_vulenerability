@@ -742,7 +742,19 @@ public class RedHatCsafSyncService {
                         log.warn("Red Hat CSAF sync: too many redirects fetching {}", url);
                         return FetchOutcome.of(FetchStatus.TOO_MANY_REDIRECTS, status.value());
                     }
-                    URI redirectTarget = uri.resolve(location);
+                    URI redirectTarget;
+                    try {
+                        // Backlog item 418: URI#resolve(String) calls URI.create internally, so a
+                        // Location header that isn't a parseable URI reference throws an unchecked
+                        // IllegalArgumentException here. Left uncaught, this would fall into the outer
+                        // catch (Exception e) below, which both mislabels the failure as
+                        // TRANSPORT_ERROR and logs the exception's own message — i.e. the raw,
+                        // unsanitized Location string (any signed query parameters included) — via
+                        // log.warn's trailing-Throwable overload.
+                        redirectTarget = uri.resolve(location);
+                    } catch (IllegalArgumentException e) {
+                        return FetchOutcome.of(FetchStatus.HTTP_ERROR, status.value());
+                    }
                     return fetchBounded(redirectTarget.toString(), maxBytes, redirectsRemaining - 1);
                 }
                 if (status.value() == 429 || status.value() == 403) {
