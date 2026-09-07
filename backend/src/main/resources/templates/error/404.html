@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>ページが見つかりません - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>ページが見つかりません</h1>
+<p class="error">お探しのページは見つかりませんでした。</p>
+<p>URLの入力ミスや、古いブックマークをお使いの可能性があります。ジョブが削除された場合も、この画面が表示されることがあります。</p>
+<p><a th:href="@{/}">ホームに戻る</a> | <a th:href="@{/jobs}">調査ジョブ一覧へ</a></p>
+</body>
+</html>

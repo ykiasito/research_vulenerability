@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <title>リクエストエラー - 脆弱性調査サーバー</title>
+</head>
+<body>
+<h1>リクエストを処理できませんでした</h1>
+<p class="error">入力内容やリクエストに問題があったため、処理を完了できませんでした。</p>
+<p>操作をやり直しても解決しない場合は、システム管理者にお問い合わせください。</p>
+<p><a th:href="@{/}">ホームに戻る</a> | <a th:href="@{/jobs}">調査ジョブ一覧へ</a></p>
+</body>
+</html>
