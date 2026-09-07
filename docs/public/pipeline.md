@@ -10,7 +10,7 @@ CSV1行（`ResearchJobItem`）ごとに、Stage1（製品識別）→Stage2（�
 
 1. **レジストリ照合**: `PackageRegistryLookup` の全実装（npm/PyPI/Maven/Go/NuGet）に対して、CSVの`product_name`をそのまま渡して照会。各実装は「パッケージ自体が存在するか」「指定バージョンが実在するか」を判定し、`RegistryMatch(ecosystem, packageName, purl, confidence, exactVersionConfirmed)` を返す。バージョン実在確認済みなら confidence 0.95、未確認なら 0.4〜0.5。
 2. **CPE辞書照合**: ローカルの `cpe_dictionary` テーブルに対して `pg_trgm` のあいまい一致（`product`/`title`列、閾値0.3、上位3件）。
-   - **ローカルに候補が1件もない場合、その場でNVD CPE APIに1回だけ生きた照会を行う**（`NvdCpeSyncService.syncKeywordSinglePage`、`NvdRateLimiter`でレート制限）。ヒットした分はローカル辞書にキャッシュされ、以降の同一クエリは無料になる。これにより「誰も事前同期していない製品は永久に見つからない」という問題を回避している。
+   - **ローカルの`cpe_dictionary`ミラーのみを参照する**。以前はローカルに候補が1件もない場合、その場でNVD CPE APIに1回だけ生きた照会を行うフォールバック（`NvdCpeSyncService.syncKeywordSinglePage`）があったが、閉域モードバックログ項目273（B4）で物理削除済み（`Stage1IdentificationService`のクラスjavadoc参照）。ローカル辞書（フルシンクのみ、差分同期ではない）が完全に空振りの場合は、名前バリアント検索（`Stage1IdentificationService#findByNameVariants`、こちらもローカル`cpe_dictionary`のみ参照）にフォールバックする。`services.nvd.nist.gov`へのライブ呼び出しはこの経路のどこにも発生しない。
    - CPE一致のバージョンフィールドはあいまい一致の対象外（テキストのみ比較）。永続化時にはvendor:productだけを取り出し、**CSVの実バージョンに差し替えて**保存する（`Stage1IdentificationService.withItemVersion`）。辞書上の古いバージョン番号をそのまま見せると人間の目には不整合に見えるための対応。
 
 レジストリ照合とCPE照合の両方が空振りの場合のみ Tier3 へ進む。どちらか一方でも候補があれば Tier2（必要なら）を経て確定する。
@@ -72,7 +72,7 @@ cve.org（CVE Services API）のキーワード検索は、匿名利用不可（
 | 工程 | コスト | 発火頻度 |
 |---|---|---|
 | Tier1（静的） | 無料 | 常時 |
-| ライブCPE照会 | 無料（NVD無料枠） | ローカル辞書が空振りの時のみ |
+| ~~ライブCPE照会~~ | （削除済み） | 閉域モードバックログ項目273〔B4〕でライブNVD CPE APIフォールバック経路自体を物理削除済み。Tier1のCPEマッチングは常にローカル`cpe_dictionary`ミラーのみで完結する |
 | Tier2 | Claude API課金（web_search無し、軽量） | CPE候補が2件以上の時のみ |
 | Tier3 | Claude API課金（web_search込み） | Tier1が完全空振りの時のみ |
 | Stage2 | 無料 | 識別済みアイテムに常時 |
