@@ -65,9 +65,9 @@ Stage1で `IdentifiedProduct` が得られたアイテムのみ対象。5つの 
 
 **しかし呼び出された`#research`自体が無条件のno-op**: `Stage4WebSearchResearchService#research`は、closed-mode B2（`docs/spec/closed-mode-plan.md`§9-2でClaude+`web_search`呼び出し経路自体が物理削除済み）により、渡された引数の内容に関わらず常に`new Stage4ResearchResult(0, ResearchJobItem.INCOMPLETE_REASON_AI_NOT_AVAILABLE)`を返す1行の実装。以前あった、Claudeの`web_search`ツール（max_uses=2）によるWeb検索・CVE/GHSA形式識別子のグローバルユニークキー利用・自由記述識別子の`llm:{パッケージ名}:{識別子}`スコープ方式は、いずれも呼び出されるコード自体が現在は存在しない。呼び出し条件を満たしたアイテムには`INCOMPLETE_REASON_AI_NOT_AVAILABLE`が記録されるのみで、Stage4経由で新たに脆弱性が見つかることは無い。
 
-## Stage3（未使用）: NVDキーワード検索
+## Stage3（削除済み）: NVDキーワード検索
 
-`NvdKeywordVulnerabilitySource` は実装・単体テスト済みだが、`@Component` を外してあり本番の `VulnerabilitySource` 一覧には含まれない。理由: NVDの `keywordSearch` にはCVEの関連度ソートがなく、一般的な製品名（例: "express"）で検索すると無関係な古いCVEが大量にヒットするノイズ問題が実測で確認された。非エンジニアユーザー向けアプリとして誤解を招くため無効化した。再有効化にはLLMによる関連度フィルタが必要（未実装）。
+`NvdKeywordVulnerabilitySource`は単に`@Component`を外して無効化されているだけではなく、**ファイル自体がclosed-modeブランチから物理削除済み**——`ClosedModeArchitectureGateTest`の`DELETED_PATHS_DENYLIST`が、このクラス（`backend/src/main/java/.../service/vuln/NvdKeywordVulnerabilitySource.java`）とそのテストクラス（`NvdKeywordVulnerabilitySourceTest.java`）が存在しないことを積極的にアサートしている。無効化されていた元々の理由（参考: mainline/masterブランチでの経緯）: NVDの`keywordSearch`にはCVEの関連度ソートがなく、一般的な製品名（例: "express"）で検索すると無関係な古いCVEが大量にヒットするノイズ問題が実測で確認され、非エンジニアユーザー向けアプリとして誤解を招くため無効化されていた。closed-modeブランチではこの実装自体がそもそも存在しないため、再有効化の議論（LLMによる関連度フィルタ等）も対象外。
 
 cve.org（CVE Services API）のキーワード検索は、匿名利用不可（CNA組織APIキーが必須）のため実装していない。
 
