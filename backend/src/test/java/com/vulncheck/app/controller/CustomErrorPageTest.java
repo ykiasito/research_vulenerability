@@ -42,6 +42,19 @@ import org.springframework.web.bind.annotation.RestController;
  * だけで、{@code BasicErrorController}によるテンプレート解決を経由しない）。そのため既存の
  * {@code SessionCookieSecureDefaultTest}と同じ{@code @SpringBootTest(webEnvironment = RANDOM_PORT)}
  * + {@link TestRestTemplate}の実サーバー経路を使い、実際にTomcatが返すレスポンスを検証する。
+ *
+ * <p><b>注意（PR#310 senior-review REVISE指摘）:</b> このテストは{@code @SpringBootTest}であり、
+ * {@code backend/src/test/resources/application.yml}がテストクラスパス上で本番
+ * {@code backend/src/main/resources/application.yml}を完全に上書き（shadow）する
+ * （{@link com.vulncheck.app.config.SessionCookieConfigBindingTest}のjavadoc参照）。そのため
+ * {@link #serverErrorRendersCustomJapanesePageWithoutLeakingStackTrace}が検証しているのは、
+ * テスト用YAMLに{@code server.error.*}キーが一切無いことによりSpring Boot組み込みのデフォルト値
+ * （現バージョンではたまたま{@code never}/{@code false}）が効いている、という状態であって、
+ * 本番YAMLが実際に{@code server.error.include-stacktrace: never}等を明示指定している効果そのもの
+ * ではない。本番YAMLのその設定値を直接バインドして検証するのは
+ * {@link com.vulncheck.app.config.ErrorPropertiesConfigBindingTest}であり、スタックトレース等の
+ * 非露出をカバーする一次テストはそちらを参照すること。このテストは「テンプレートが正しく描画され、
+ * それ単体としてスタックトレース等の文字列を含まない」ことのend-to-end確認としては引き続き有効。
  */
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
 class CustomErrorPageTest {
@@ -108,7 +121,9 @@ class CustomErrorPageTest {
         assertThat(response.getBody()).contains("ホームに戻る");
         assertThat(response.getBody()).doesNotContain("Whitelabel Error Page");
         // セキュリティ観点(item411 やること4): スタックトレース・例外クラス名・例外メッセージが
-        // 一切露出しないこと。
+        // 一切露出しないこと。ただしこのアサーションが押さえているのはテスト用YAML下でのSpring Boot
+        // 組み込みデフォルトの挙動であり、本番application.ymlのserver.error.*設定そのものの検証は
+        // ErrorPropertiesConfigBindingTestが担う(クラスjavadoc参照)。
         assertThat(response.getBody()).doesNotContain("IllegalStateException");
         assertThat(response.getBody()).doesNotContain("boom - CustomErrorPageTest");
         assertThat(response.getBody()).doesNotContain("at com.vulncheck");
