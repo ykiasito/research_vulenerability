@@ -203,8 +203,11 @@ class LogSanitizerTest {
     @Test
     void sanitizeUrlHandlesRelativeUriWithoutPrintingTheLiteralStringNullAndDropsQuery() {
         // A relative reference (no scheme, no authority) also has a null host -- the pre-fix
-        // implementation produced "null://null/relative/path?sig=SECRET" (leaking the query too, since
-        // the whole "scheme://host" + rawPath concatenation is nonsensical here in the first place).
+        // implementation produced "null://null/relative/path" (the literal "null" strings and a
+        // nonsensical "scheme://host" shape, but the query itself was never leaked here: even for a
+        // relative URI, java.net.URI still parses the query out as its own component via
+        // getRawSchemeSpecificPart()/withoutQuery(), so this test's assertion below is pinning that
+        // the *literal "null"* is gone, not a query-leak fix).
         String secret = "sig=SECRET";
         String result = LogSanitizer.sanitizeUrl(URI.create("/relative/path?" + secret));
         assertThat(result).doesNotContain("null").doesNotContain(secret);
