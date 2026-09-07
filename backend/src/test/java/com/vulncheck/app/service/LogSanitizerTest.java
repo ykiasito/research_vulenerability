@@ -203,11 +203,29 @@ class LogSanitizerTest {
     @Test
     void sanitizeUrlHandlesRelativeUriWithoutPrintingTheLiteralStringNullAndDropsQuery() {
         // A relative reference (no scheme, no authority) also has a null host -- the pre-fix
-        // implementation produced "null://null/relative/path?sig=SECRET" (leaking the query too, since
-        // the whole "scheme://host" + rawPath concatenation is nonsensical here in the first place).
+        // implementation produced "null://null/relative/path" (the literal "null" strings and a
+        // nonsensical "scheme://host" shape, but the query itself was never leaked here: even for a
+        // relative URI, java.net.URI still parses the query out as its own component via
+        // getRawSchemeSpecificPart()/withoutQuery(), so this test's assertion below is pinning that
+        // the *literal "null"* is gone, not a query-leak fix).
         String secret = "sig=SECRET";
         String result = LogSanitizer.sanitizeUrl(URI.create("/relative/path?" + secret));
         assertThat(result).doesNotContain("null").doesNotContain(secret);
         assertThat(result).isEqualTo("(non-hierarchical URL, scheme=(no scheme)): /relative/path");
+    }
+
+    @Test
+    void sanitizeUrlHandlesProtocolRelativeUriWithoutPrintingTheLiteralStringNull() {
+        // PR#308 senior-review, 2nd REVISE round: a protocol-relative reference (e.g. what a
+        // feed-driven fetch like SiemensCsafSyncService's feedUrl/contentUrl/hashUrl resolution can
+        // hand to this method) has a non-null host but a null scheme -- it takes the *hierarchical*
+        // branch (unlike the relative-path case above), which the first-round fix didn't cover: the
+        // pre-fix implementation produced "null://evil.example.com/adv.json", a bogus-looking scheme
+        // in front of a real host. The query itself was never leaked (hierarchical URIs already split
+        // it out via getRawQuery()), so this pins (a) no literal "null" and (b) the query is still gone.
+        String secret = "sig=SECRETVALUE123";
+        String result = LogSanitizer.sanitizeUrl(URI.create("//evil.example.com/adv.json?" + secret));
+        assertThat(result).doesNotContain("null").doesNotContain(secret);
+        assertThat(result).isEqualTo("//evil.example.com/adv.json");
     }
 }

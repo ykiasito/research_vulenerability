@@ -103,6 +103,17 @@ public final class LogSanitizer {
      * URI#getRawSchemeSpecificPart()} (fragment is already a separate URI component, never included in
      * it) and additionally truncates at the first {@code '?'} so an opaque URI's query-like suffix
      * (e.g. {@code mailto:a@b.com?subject=...}) can't leak either.
+     *
+     * <p><b>Protocol-relative URIs (PR#308 senior-review, 2nd REVISE round)</b>: {@link URI#getHost()}
+     * is non-null but {@link URI#getScheme()} is null for a protocol-relative reference (e.g. {@code
+     * //evil.example.com/adv.json?sig=...}), which a feed-driven fetch ({@code
+     * SiemensCsafSyncService} and friends resolving an untrusted {@code feedUrl}/{@code contentUrl}/
+     * {@code hashUrl}) can hand to this method. That case still takes the hierarchical branch below
+     * (it has a host), so the earlier null-host fix above didn't cover it: the naive {@code scheme +
+     * "://"} concatenation stringified the null scheme into {@code "null://evil.example.com/..."} --
+     * still no secret leak (the query is dropped the same as always) but a bogus-looking scheme
+     * prepended to a real host. Falls back to a bare {@code "//"} prefix (matching the protocol-relative
+     * syntax itself) when there's no scheme to print.
      */
     public static String sanitizeUrl(URI uri) {
         String host = uri.getHost();
@@ -112,8 +123,10 @@ public final class LogSanitizer {
             return sanitize("(non-hierarchical URL, scheme=" + label + "): "
                     + withoutQuery(uri.getRawSchemeSpecificPart()));
         }
+        String scheme = uri.getScheme();
+        String prefix = scheme == null ? "//" : scheme + "://";
         String rawPath = uri.getRawPath();
-        return sanitize(uri.getScheme() + "://" + host + (rawPath == null ? "" : rawPath));
+        return sanitize(prefix + host + (rawPath == null ? "" : rawPath));
     }
 
     /** Truncates {@code schemeSpecificPart} at its first {@code '?'}, if any — used only by the
