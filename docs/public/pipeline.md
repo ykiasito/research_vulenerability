@@ -8,7 +8,7 @@ CSV1行（`ResearchJobItem`）ごとに、Stage1（製品識別）→Stage2（�
 
 ### Tier1: 静的照合
 
-1. **レジストリ照合**: `PackageRegistryLookup` の全実装（npm/PyPI/Maven/Go/NuGet）に対して、CSVの`product_name`をそのまま渡して照会。各実装は「パッケージ自体が存在するか」「指定バージョンが実在するか」を判定し、`RegistryMatch(ecosystem, packageName, purl, confidence, exactVersionConfirmed)` を返す。バージョン実在確認済みなら confidence 0.95、未確認なら 0.4〜0.5。
+1. **レジストリ照合**: `PackageRegistryLookup`の全10実装（crates.io/Go proxy/Hex/Maven Central/npm/NuGet/Packagist/pub.dev/PyPI/RubyGems）に対して、CSVの`product_name`をそのまま渡して照会。Maven Centralを除く9実装は、ローカルの`registry_package_mirror`テーブルを読むだけの`lookupViaMirror`のみで完結する——ライブHTTP照会だった`lookupLive`は閉域モードバックログ項目193（B3）で物理削除済み。Maven Centralだけは閉域モード用ミラー自体が存在しないため（同項目193〔B3〕§5-4）、`MavenCentralRegistryClient#lookup`は常に空を返す恒久的なno-op。各実装は`RegistryMatch(ecosystem, packageName, purl, confidence, exactVersionConfirmed)`を返し、バージョン実在確認済みならconfidence 0.95、未確認なら0.5（Maven Centralはどちらも返さない）。
 2. **CPE辞書照合**: ローカルの `cpe_dictionary` テーブルに対して `pg_trgm` のあいまい一致（`product`/`title`列、閾値0.3、上位3件）。
    - **ローカルの`cpe_dictionary`ミラーのみを参照する**。以前はローカルに候補が1件もない場合、その場でNVD CPE APIに1回だけ生きた照会を行うフォールバック（`NvdCpeSyncService.syncKeywordSinglePage`）があったが、閉域モードバックログ項目273（B4）で物理削除済み（`Stage1IdentificationService`のクラスjavadoc参照）。ローカル辞書（フルシンクのみ、差分同期ではない）が完全に空振りの場合は、名前バリアント検索（`Stage1IdentificationService#findByNameVariants`、こちらもローカル`cpe_dictionary`のみ参照）にフォールバックする。`services.nvd.nist.gov`へのライブ呼び出しはこの経路のどこにも発生しない。
    - CPE一致のバージョンフィールドはあいまい一致の対象外（テキストのみ比較）。永続化時にはvendor:productだけを取り出し、**CSVの実バージョンに差し替えて**保存する（`Stage1IdentificationService.withItemVersion`）。辞書上の古いバージョン番号をそのまま見せると人間の目には不整合に見えるための対応。
