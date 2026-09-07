@@ -1,6 +1,7 @@
 package com.vulncheck.app.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -388,6 +389,27 @@ class MirrorFreshnessServiceTest {
         verify(osvSyncStateRepository, times(1)).findById((short) 1);
         verify(nvdCveSyncStateRepository, times(1)).findById((short) 1);
         verify(registryPackageMirrorRepository, times(1)).maxLastSyncedAt();
+    }
+
+    /** Closed-mode backlog item 397: {@link MirrorFreshnessService#staleMirrorWarnings()} must
+     *  return a defensive copy, not the cached {@code ArrayList} instance itself -- otherwise a
+     *  caller mutating its result would silently corrupt the cache for every subsequent call within
+     *  the TTL. */
+    @Test
+    void staleMirrorWarningsReturnsAnImmutableList() {
+        OffsetDateTime recent = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
+        stubHealthyCveOrg(recent);
+        stubHealthyGhsa(recent);
+        stubHealthyOsv(recent);
+        stubHealthyNvdCve(recent);
+        stubHealthyCsaf(recent);
+        when(registryPackageMirrorRepository.maxLastSyncedAt())
+                .thenReturn(Optional.of(recent.toInstant()));
+
+        List<String> warnings = service.staleMirrorWarnings();
+
+        assertThatThrownBy(() -> warnings.add("should not be allowed"))
+                .isInstanceOf(UnsupportedOperationException.class);
     }
 
     // ------------------------------------------------------------------------------ helpers -------

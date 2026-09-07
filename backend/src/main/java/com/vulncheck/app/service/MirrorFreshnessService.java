@@ -145,9 +145,10 @@ public class MirrorFreshnessService {
         checkCsaf(warnings, RedHatCsafSyncService.VENDOR, "CSAF（Red Hat）");
         checkRegistry(warnings);
 
-        cachedWarnings = warnings;
+        List<String> immutableWarnings = List.copyOf(warnings);
+        cachedWarnings = immutableWarnings;
         cacheExpiresAtMillis = now + CACHE_TTL_MILLIS;
-        return warnings;
+        return immutableWarnings;
     }
 
     private void checkCveOrg(List<String> warnings) {

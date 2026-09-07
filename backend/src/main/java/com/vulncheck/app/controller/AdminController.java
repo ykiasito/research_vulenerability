@@ -213,14 +213,14 @@ public class AdminController {
     @PostMapping("/admin/cve-org/sync-delta")
     public String cveOrgSyncDelta(Model model) {
         int count = cveOrgSyncService.syncDelta();
-        addCveOrgSyncResult(model, count + " 件のCVEレコードを差分同期しました。", "差分同期");
+        addCveOrgSyncResult(model, count + " 件のCVEレコードを差分同期しました。");
         return "admin/cve-org";
     }
 
     @PostMapping("/admin/cve-org/sync-baseline")
     public String cveOrgSyncBaseline(Model model) {
         int count = cveOrgSyncService.syncBaseline();
-        addCveOrgSyncResult(model, count + " 件のCVEレコードを全件投入しました。", "全件投入");
+        addCveOrgSyncResult(model, count + " 件のCVEレコードを全件投入しました。");
         return "admin/cve-org";
     }
 
@@ -232,16 +232,16 @@ public class AdminController {
      * run were otherwise indistinguishable from the count alone) -- item 379's own point was to
      * surface exactly that failure, which never reached this page before. Re-reads the
      * just-written {@link CveOrgSyncState} after the call: if it now carries a {@code
-     * last_sync_error}, shows that (via {@code admin/cve-org.html}'s {@code syncFailureMessage}
-     * block, styled red) instead of the misleadingly green {@code result} success message --
-     * the two are mutually exclusive in the template, never both shown for the same run.
+     * last_sync_error}, simply skips the green {@code result} success message, since {@code
+     * admin/cve-org.html}'s own "同期状態" block already shows the raw error unconditionally
+     * (same as every other mirror's admin page, e.g. {@code admin/ghsa.html}) -- item 417 removed
+     * a second, POST-only {@code syncFailureMessage} banner that used to repeat that same text a
+     * second time on the same page.
      */
-    private void addCveOrgSyncResult(Model model, String successMessage, String label) {
+    private void addCveOrgSyncResult(Model model, String successMessage) {
         CveOrgSyncState state = cveOrgSyncStateRepository.findById((short) 1).orElse(null);
         model.addAttribute("syncState", state);
-        if (state != null && state.getLastSyncError() != null) {
-            model.addAttribute("syncFailureMessage", label + "に失敗しました。詳細: " + state.getLastSyncError());
-        } else {
+        if (state == null || state.getLastSyncError() == null) {
             model.addAttribute("result", successMessage);
         }
     }
