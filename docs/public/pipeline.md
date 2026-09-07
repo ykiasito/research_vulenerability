@@ -25,14 +25,16 @@ CPE候補が2件以上ある場合のみ発火するが、`Stage1AiArbitration#d
 
 **非対称性に注意**: 名前バリアント由来のCPE候補は常に破棄される一方、弱いレジストリマッチは（vendor+未確認の組み合わせでない限り）そのまま信用される——どちらもAI判定が使えない状況で、Stage1IdentificationServiceの452行目・522行目・895行目付近が持つ、それぞれ独立に設計された静的ルールが決めている。
 
-### Tier3: Web検索による名称解決
+### Tier3: Web検索による名称解決（現在は常にno-op）
 
-Tier1が完全に空振りだった場合のみ発火（マーケットプレース表記ゆれ等）。
+Tier1が完全に空振りだった場合のみ発火するが、`Stage1AiArbitration#tryTier3`は無条件で`Optional.empty()`を返す1行メソッドで、Claude+`web_search`呼び出し経路自体がclosed-mode B2（`docs/spec/closed-mode-plan.md`§9-2）で物理削除済み。以前は以下のような多段の名称解決を行っていたが、現在はいずれも実行されない——Tier1が完全空振りのアイテムは常にそのままUNIDENTIFIEDになる（参考: マーケットプレース表記ゆれ等を正式名称に解決する目的だった）。
 
-1. Claudeに `web_search` ツール（`web_search_20250305`、max_uses=3）を持たせ、正式なベンダー名・製品名を検索させる。
-2. 併せて、**有効なエコシステム一覧**（`ecosystem_registries`テーブルから取得）をプロンプトに渡し、AIが確信を持てる場合は `ecosystem_candidates`（エコシステム名＋正確なパッケージ名の推測）も返させる。エコシステム値はJSON Schemaのenumで許可リストに制約している。
-3. バックエンドは解決された正式名称でTier1を再照会する。`ecosystem_candidates` が返っている場合は、**その特定のレジストリに実際に照会して検証してから**採用する（AIの言い分をそのまま信用しない設計、Tier2と同じ思想）。
-4. 上記いずれも空振りの場合、AIが認識した「このアプリが自動照会できない配布チャネルの識別子」（`platform_hint`: VS Code Marketplace拡張ID、Chrome Web Store ID、Docker Hubイメージ名など、固定enumではなく自由記述）があれば `research_job_items.identification_hint`（表示用）と `hint_platform`/`hint_identifier`（構造化・調査用）に保存する。この場合もアイテムのstatusは `UNIDENTIFIED` のまま。ヒントの `note` は「これで合っていますか？」という確認質問の形で日本語生成するようプロンプト指定している（断定を避けるため）。
+1. （廃止）Claudeに`web_search`ツール（`web_search_20250305`、max_uses=3）を持たせ、正式なベンダー名・製品名を検索させる。
+2. （廃止）併せて、有効なエコシステム一覧（`ecosystem_registries`テーブルから取得）をプロンプトに渡し、AIが確信を持てる場合は`ecosystem_candidates`（エコシステム名＋正確なパッケージ名の推測）も返させる。
+3. （廃止）バックエンドは解決された正式名称でTier1を再照会し、`ecosystem_candidates`が返っていれば実際にそのレジストリへ照会して検証してから採用する。
+4. （廃止）上記いずれも空振りの場合、AIが認識した配布チャネル識別子（`platform_hint`）を`research_job_items.identification_hint`/`hint_platform`/`hint_identifier`に保存する——この永続化コードパス自体は残っているが、これらの列に書き込む本番呼び出し元は現在1つも存在しない（バックログitem306: `hintPlatform`/`hintIdentifier`を実際にセットする呼び出し元が無い）。
+
+`identification_hint`/`hint_platform`/`hint_identifier`列自体はDBスキーマ上に残っているが、上記の理由で常に空のままになる。
 
 ## Stage2: 脆弱性調査（`Stage2VulnerabilityResearchService`）
 
