@@ -1,10 +1,10 @@
 # 調査パイプライン
 
-CSV1行（`ResearchJobItem`）ごとに、Stage1（製品識別）→Stage2（脆弱性調査）→（条件付き）Stage4（AI最終手段）の順で処理する。Stage3は実装済みだが本番経路には組み込まれていない（後述）。
+CSV1行（`ResearchJobItem`）ごとに、Stage1（製品識別）→Stage2（脆弱性調査）→（条件付き）Stage4（AI最終手段、現状は常にno-op、後述）の順で処理する。Stage3（`NvdKeywordVulnerabilitySource`）は閉域モードブランチではファイルごと物理削除済みで、本番経路にはそもそも存在しない（後述）。
 
 ## Stage1: 製品識別（`Stage1IdentificationService`）
 
-3段階（Tier1〜3）で構成。**共通方針**: 静的・無料の経路を優先し、LLM呼び出しは曖昧さがある時・完全に手がかりがない時だけ行う。
+3段階（Tier1〜3）で構成。**共通方針（現状）**: closed-mode B2（`docs/spec/closed-mode-plan.md`§9-2）でTier2/3のAI呼び出し経路自体が物理削除済みのため、実際に動作するのはTier1の静的照合と、元々「AI不在時の劣化動作」として用意されていた静的フォールバック規則のみ——静的・無料の経路だけで完結する（詳細はTier2/3節）。
 
 ### Tier1: 静的照合
 
@@ -13,7 +13,7 @@ CSV1行（`ResearchJobItem`）ごとに、Stage1（製品識別）→Stage2（�
    - **ローカルの`cpe_dictionary`ミラーのみを参照する**。以前はローカルに候補が1件もない場合、その場でNVD CPE APIに1回だけ生きた照会を行うフォールバック（`NvdCpeSyncService.syncKeywordSinglePage`）があったが、閉域モードバックログ項目273（B4）で物理削除済み（`Stage1IdentificationService`のクラスjavadoc参照）。ローカル辞書（フルシンクのみ、差分同期ではない）が完全に空振りの場合は、名前バリアント検索（`Stage1IdentificationService#findByNameVariants`、こちらもローカル`cpe_dictionary`のみ参照）にフォールバックする。`services.nvd.nist.gov`へのライブ呼び出しはこの経路のどこにも発生しない。
    - CPE一致のバージョンフィールドはあいまい一致の対象外（テキストのみ比較）。永続化時にはvendor:productだけを取り出し、**CSVの実バージョンに差し替えて**保存する（`Stage1IdentificationService.withItemVersion`）。辞書上の古いバージョン番号をそのまま見せると人間の目には不整合に見えるための対応。
 
-レジストリ照合とCPE照合の両方が空振りの場合のみ Tier3 へ進む。どちらか一方でも候補があれば Tier2（必要なら）を経て確定する。
+レジストリ照合とCPE照合の両方が空振りの場合、Tier3の呼び出し自体は発生するが常に空振りに終わる（後述）ため、結果としてアイテムはUNIDENTIFIEDのままになる。どちらか一方でも候補があれば、Tier2の静的フォールバック規則（CPE候補が複数の場合のみ、後述）を経て確定する。
 
 ### Tier2: あいまい候補の判定（現在は常にno-op、静的フォールバック規則が常時適用）
 
