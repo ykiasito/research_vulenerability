@@ -648,7 +648,14 @@ public class OsvSyncService {
     private StreamWithHeaders openZipStream(String url) throws IOException {
         URI uri = validatedUri(url);
         if (uri == null) {
-            throw new IOException("Rejected non-allowlisted URL: " + url);
+            // Backlog item 421 (PR#308 senior-review, REVISE round): mirrors GhsaSyncService#openStream
+            // — this IOException's message can end up persisted to osv_sync_state.last_sync_error and
+            // shown on the admin sync-status view, a bigger blast radius than a log-only leak.
+            // Defensive rather than live today (url here is only ever a value this class itself already
+            // validated via validatedUri before calling into openZipStream), matching item 416's
+            // reference implementation (CveOrgSyncService#download) so this doesn't regress if that
+            // invariant ever changes.
+            throw new IOException("Rejected non-allowlisted URL: " + LogSanitizer.sanitizeUrl(url));
         }
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(10_000);
@@ -669,7 +676,9 @@ public class OsvSyncService {
     private InputStream openCsvStream(String url) throws IOException {
         URI uri = validatedUri(url);
         if (uri == null) {
-            throw new IOException("Rejected non-allowlisted URL: " + url);
+            // Same rationale as openZipStream above (backlog item 421, PR#308 senior-review REVISE
+            // round) — defensive, not a live leak today.
+            throw new IOException("Rejected non-allowlisted URL: " + LogSanitizer.sanitizeUrl(url));
         }
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(10_000);

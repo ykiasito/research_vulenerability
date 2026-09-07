@@ -286,6 +286,98 @@ class GhsaSyncServiceTest {
         }
     }
 
+    /** Backlog item 421 (PR#308 senior-review, REVISE round): {@code openStream}'s {@code "Rejected
+     *  non-allowlisted URL: " + url} {@link java.io.IOException} message can end up persisted to
+     *  {@code ghsa_sync_state.last_sync_error} (wrapped by {@code doSyncBaseline}'s {@code "Tarball
+     *  read failed: " + e.getMessage()}) and shown on {@code /admin/ghsa} -- a bigger blast radius
+     *  than a log-only leak. {@code resolveRedirectTarget}'s own {@code validatedUri} gate means
+     *  {@code openStream} never actually receives an unvalidated URL through this class's real call
+     *  graph today (this fix is defensive, not a live leak) -- so this pins the method's own
+     *  contract directly via reflection, independent of today's callers. */
+    @Test
+    void openStreamRejectsANonAllowlistedUrlWithoutLeakingASignedQueryString() throws Exception {
+        Harness h = harness(3, null);
+        String secret = "GHSASECRETVALUE999";
+        java.lang.reflect.Method openStream = GhsaSyncService.class.getDeclaredMethod("openStream", String.class);
+        openStream.setAccessible(true);
+
+        try {
+            openStream.invoke(h.service(), "https://evil-cdn.example.com/asset?sig=" + secret);
+            org.junit.jupiter.api.Assertions.fail("expected the reflective call to throw an IOException");
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            assertThat(e.getCause()).isInstanceOf(java.io.IOException.class);
+            assertThat(e.getCause().getMessage())
+                    .contains("Rejected non-allowlisted URL")
+                    .doesNotContain(secret);
+        }
+    }
+
+    /** Backlog item 421 (PR#308 senior-review, REVISE round): {@code resolveRedirectTarget}'s
+     *  rate-limited-response {@code log.error} call (comes right before the generic unexpected-HTTP
+     *  one exercised below) used to log its own {@code url} parameter raw. {@code
+     *  resolveRedirectTarget}'s sole real call site ({@code doSyncBaseline}) always passes the
+     *  hardcoded {@code TARBALL_URL} constant (no query string), so this specific call can never
+     *  actually leak a secret through the class's own call graph today (this fix is defense-in-depth,
+     *  not a live leak) -- so this pins the method's own contract directly via reflection, with a URL
+     *  that DOES carry a query string, independent of today's callers. */
+    @Test
+    void resolveRedirectTargetSanitizesTheUrlOnARateLimitedResponse() throws Exception {
+        Harness h = harness(3, null);
+        String secret = "GHSASECRETVALUE111";
+        String url = "https://api.github.com/some/signed/path?sig=" + secret;
+        h.server().expect(method(HttpMethod.GET))
+                .andExpect(requestTo(url))
+                .andRespond(withStatus(org.springframework.http.HttpStatus.TOO_MANY_REQUESTS));
+
+        java.lang.reflect.Method resolveRedirectTarget =
+                GhsaSyncService.class.getDeclaredMethod("resolveRedirectTarget", String.class);
+        resolveRedirectTarget.setAccessible(true);
+
+        List<ch.qos.logback.classic.spi.ILoggingEvent> events = captureLogEvents(() -> {
+            try {
+                resolveRedirectTarget.invoke(h.service(), url);
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+
+        h.server().verify();
+        assertThat(events).isNotEmpty();
+        for (ch.qos.logback.classic.spi.ILoggingEvent event : events) {
+            assertThat(event.getFormattedMessage()).doesNotContain(secret);
+        }
+    }
+
+    /** Same rationale as the rate-limited case above, for the generic unexpected-HTTP {@code
+     *  log.error} call right after it. */
+    @Test
+    void resolveRedirectTargetSanitizesTheUrlOnAnUnexpectedHttpStatus() throws Exception {
+        Harness h = harness(3, null);
+        String secret = "GHSASECRETVALUE222";
+        String url = "https://api.github.com/some/signed/path?sig=" + secret;
+        h.server().expect(method(HttpMethod.GET))
+                .andExpect(requestTo(url))
+                .andRespond(withStatus(org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR));
+
+        java.lang.reflect.Method resolveRedirectTarget =
+                GhsaSyncService.class.getDeclaredMethod("resolveRedirectTarget", String.class);
+        resolveRedirectTarget.setAccessible(true);
+
+        List<ch.qos.logback.classic.spi.ILoggingEvent> events = captureLogEvents(() -> {
+            try {
+                resolveRedirectTarget.invoke(h.service(), url);
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+
+        h.server().verify();
+        assertThat(events).isNotEmpty();
+        for (ch.qos.logback.classic.spi.ILoggingEvent event : events) {
+            assertThat(event.getFormattedMessage()).doesNotContain(secret);
+        }
+    }
+
     @Test
     void baselinePrunesAdvisoriesNoLongerPresentInTheTarball() {
         // Seed a pre-existing advisory NOT part of this run's tarball, backdated so it's older than

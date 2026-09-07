@@ -393,6 +393,59 @@ class OsvSyncServiceTest {
         assertThat(result.alreadyRunning()).isFalse();
     }
 
+    // ------------------------------------------------------ unsanitized-rejection message (421) ---
+
+    /** Backlog item 421 (PR#308 senior-review, REVISE round): {@code openZipStream}/{@code
+     *  openCsvStream}'s {@code "Rejected non-allowlisted URL: " + url} {@link java.io.IOException}
+     *  message can end up persisted to {@code osv_sync_state.last_sync_error} (wrapped by {@code
+     *  doSyncBaseline}'s {@code "Failed to download " + zipUrl + ": " + e.getMessage()}) and shown on
+     *  the admin sync-status view -- a bigger blast radius than a log-only leak. Both methods are
+     *  only ever called with a {@code BASE_URL}-derived constant through this class's real call
+     *  graph today (so {@code validatedUri(url) == null} is unreachable there -- this fix is
+     *  defensive, not a live leak), so both are pinned directly via reflection to their own contract,
+     *  independent of today's callers. */
+    @Test
+    void openZipStreamRejectsANonAllowlistedUrlWithoutLeakingASignedQueryString() throws Exception {
+        setUpCommonMocks();
+        OsvSyncService service = new OsvSyncService(RestClient.builder().build(), documentUpsertService, osvAdvisoryRepository,
+                osvSyncStateRepository, osvSyncFailureRepository, OsvSyncRateLimiter.disabledForTesting(),
+                OsvSyncService.DEFAULT_MAX_DOCUMENTS_PER_DELTA_RUN, null, null);
+        String secret = "OSVSECRETVALUE999";
+        java.lang.reflect.Method openZipStream = OsvSyncService.class.getDeclaredMethod("openZipStream", String.class);
+        openZipStream.setAccessible(true);
+
+        try {
+            openZipStream.invoke(service, "https://evil-cdn.example.com/asset?sig=" + secret);
+            org.junit.jupiter.api.Assertions.fail("expected the reflective call to throw an IOException");
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            assertThat(e.getCause()).isInstanceOf(java.io.IOException.class);
+            assertThat(e.getCause().getMessage())
+                    .contains("Rejected non-allowlisted URL")
+                    .doesNotContain(secret);
+        }
+    }
+
+    @Test
+    void openCsvStreamRejectsANonAllowlistedUrlWithoutLeakingASignedQueryString() throws Exception {
+        setUpCommonMocks();
+        OsvSyncService service = new OsvSyncService(RestClient.builder().build(), documentUpsertService, osvAdvisoryRepository,
+                osvSyncStateRepository, osvSyncFailureRepository, OsvSyncRateLimiter.disabledForTesting(),
+                OsvSyncService.DEFAULT_MAX_DOCUMENTS_PER_DELTA_RUN, null, null);
+        String secret = "OSVSECRETVALUE888";
+        java.lang.reflect.Method openCsvStream = OsvSyncService.class.getDeclaredMethod("openCsvStream", String.class);
+        openCsvStream.setAccessible(true);
+
+        try {
+            openCsvStream.invoke(service, "https://evil-cdn.example.com/asset?sig=" + secret);
+            org.junit.jupiter.api.Assertions.fail("expected the reflective call to throw an IOException");
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            assertThat(e.getCause()).isInstanceOf(java.io.IOException.class);
+            assertThat(e.getCause().getMessage())
+                    .contains("Rejected non-allowlisted URL")
+                    .doesNotContain(secret);
+        }
+    }
+
     /** Captures every log event {@link OsvSyncService}'s own logger emits while {@code action} runs
      *  (same convention as {@code CveOrgSyncServiceTest#captureLogEvents} /
      *  {@code UserApiKeyServiceTest#captureLogEvents}), temporarily lowering the logger to DEBUG and
