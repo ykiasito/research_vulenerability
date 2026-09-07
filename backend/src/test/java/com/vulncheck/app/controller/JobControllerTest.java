@@ -19,6 +19,7 @@ import com.vulncheck.app.repository.ResearchJobItemRepository;
 import com.vulncheck.app.repository.ResearchJobRepository;
 import com.vulncheck.app.repository.UserRepository;
 import com.vulncheck.app.service.CsvParsingService;
+import com.vulncheck.app.service.MirrorFreshnessService;
 import com.vulncheck.app.service.PendingCsvUploadStore;
 import com.vulncheck.app.service.ResearchJobProcessingService;
 import com.vulncheck.app.service.ResearchJobService;
@@ -72,11 +73,13 @@ class JobControllerTest {
     private CsvParsingService csvParsingService;
     @Mock
     private PendingCsvUploadStore pendingCsvUploadStore;
+    @Mock
+    private MirrorFreshnessService mirrorFreshnessService;
 
     private JobController newController() {
         return new JobController(researchJobService, researchJobProcessingService, researchJobRepository,
                 researchJobItemRepository, identifiedProductRepository, jobItemVulnerabilityRepository,
-                userRepository, csvParsingService, pendingCsvUploadStore);
+                userRepository, csvParsingService, pendingCsvUploadStore, mirrorFreshnessService);
     }
 
     private User user(Long id, String email) {
