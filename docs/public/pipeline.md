@@ -11,21 +11,21 @@ CSV1行（`ResearchJobItem`）ごとに、Stage1（製品識別）→Stage2（�
 ### Tier1: 静的照合
 
 1. **レジストリ照合**: `PackageRegistryLookup`の全10実装（crates.io/Go proxy/Hex/Maven Central/npm/NuGet/Packagist/pub.dev/PyPI/RubyGems）に対して、CSVの`product_name`をそのまま渡して照会。Maven Centralを除く9実装は、ローカルの`registry_package_mirror`テーブルを読むだけの`lookupViaMirror`のみで完結する——ライブHTTP照会だった`lookupLive`は閉域モードバックログ項目193（B3）で物理削除済み。Maven Centralだけは閉域モード用ミラー自体が存在しないため（同項目193〔B3〕§5-4）、`MavenCentralRegistryClient#lookup`は常に空を返す恒久的なno-op。各実装は`RegistryMatch(ecosystem, packageName, purl, confidence, exactVersionConfirmed)`を返し、バージョン実在確認済みならconfidence 0.95、未確認なら0.5（Maven Centralはどちらも返さない）。
-2. **CPE辞書照合**: ローカルの `cpe_dictionary` テーブルに対して `pg_trgm` のあいまい一致（`product`/`title`列、閾値0.3、上位3件）。
+2. **CPE辞書照合**: ローカルの `cpe_dictionary` テーブルに対して `pg_trgm` のあいまい一致（`product`列は閾値0.3、`title`列は閾値0.6、上位3件）。
    - **ローカルの`cpe_dictionary`ミラーのみを参照する**。以前はローカルに候補が1件もない場合、その場でNVD CPE APIに1回だけ生きた照会を行うフォールバック（`NvdCpeSyncService.syncKeywordSinglePage`）があったが、閉域モードバックログ項目273（B4）で物理削除済み（`Stage1IdentificationService`のクラスjavadoc参照）。ローカル辞書（フルシンクのみ、差分同期ではない）が完全に空振りの場合は、名前バリアント検索（`Stage1IdentificationService#findByNameVariants`、こちらもローカル`cpe_dictionary`のみ参照）にフォールバックする。`services.nvd.nist.gov`へのライブ呼び出しはこの経路のどこにも発生しない。
    - CPE一致のバージョンフィールドはあいまい一致の対象外（テキストのみ比較）。永続化時にはvendor:productだけを取り出し、**CSVの実バージョンに差し替えて**保存する（`Stage1IdentificationService.withItemVersion`）。辞書上の古いバージョン番号をそのまま見せると人間の目には不整合に見えるための対応。
 
-レジストリ照合とCPE照合の両方が空振りの場合、Tier3の呼び出し自体は発生するが常に空振りに終わる（後述）ため、結果としてアイテムはUNIDENTIFIEDのままになる。どちらか一方でも候補があれば、Tier2の静的フォールバック規則（CPE候補が複数の場合のみ、後述）を経て確定する。
+レジストリ照合とCPE照合の両方が空振りの場合、Tier3の呼び出し自体は発生するが常に空振りに終わる（後述）ため、結果としてアイテムはUNIDENTIFIEDのままになる。どちらか一方でも候補があれば、Tier2の静的フォールバック規則（後述）を経て確定する。
 
 ### Tier2: あいまい候補の判定（現在は常にno-op、静的フォールバック規則が常時適用）
 
-CPE候補が2件以上ある場合のみ発火するが、`Stage1AiArbitration#disambiguateCpeCandidates`・`#verifyWeakRegistryMatchWithAi`・`#verifyVariantDerivedCpeMatchWithAi`はいずれも無条件で`Optional.empty()`を返す1行メソッドで、Claude（`claude-haiku-4-5`）呼び出し経路自体がclosed-mode B2（`docs/spec/closed-mode-plan.md`§9-2）で物理削除済み。かつてAPIキー未登録時の劣化動作としてのみ使われていた`Stage1IdentificationService`側の静的フォールバック規則が、現在は常に（キーの有無に関わらず）適用される:
+`Stage1AiArbitration#disambiguateCpeCandidates`（CPE候補が2件以上ある場合のみ発火）・`#verifyWeakRegistryMatchWithAi`（採用済みCPEが無い状態でレジストリマッチが1件ある場合に発火）・`#verifyVariantDerivedCpeMatchWithAi`（名前バリアント検索由来のCPE候補がちょうど1件の場合に発火）はいずれも無条件で`Optional.empty()`を返す1行メソッドで、Claude（`claude-haiku-4-5`）呼び出し経路自体がclosed-mode B2（`docs/spec/closed-mode-plan.md`§9-2）で物理削除済み。かつてAPIキー未登録時の劣化動作としてのみ使われていた`Stage1IdentificationService`側の静的フォールバック規則が、現在は常に（キーの有無に関わらず）適用される:
 
 - **CPE候補が2件以上**: 通常は先頭候補（ランキング1位）をそのまま採用する。ただし**relaxed-containmentパス由来の候補プールに限っては採用せず破棄する**（`degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived`、senior review PR#51 REVISE item1 — Android Studioの`google:android`/`motorola:android`/`samsung:android`のような相乗り誤検出対策）。
 - **CPE候補が1件のみ、かつ名前バリアント検索由来**（`variantDerived=true`）: この候補は常に破棄される（`resolveSingleCpeCandidate`）——「未検証の推測を信用するよりUNIDENTIFIEDのままにする」という設計判断。辞書への文字通りの一致（非バリアント由来）による単一候補は、この判定を経由せずそのまま採用される。
 - **弱いレジストリマッチ**（`exactVersionConfirmed=false`）で確定CPEによる裏付けが無い場合: 実測ベースの静的ルール（REVISE item3、実データ19件の分析——itemの`vendor`フィールドが非空かつバージョン未確認なら14/14が誤り、`vendor`が空なら5/5が正しい）が適用される。`vendor`が非空かつバージョン未確認ならこの弱いマッチを棄却してCPE再照会にフォールバックし、それ以外（バージョン確認済み、または`vendor`が空）はそのまま採用する。
 
-**非対称性に注意**: 名前バリアント由来のCPE候補は常に破棄される一方、弱いレジストリマッチは（vendor+未確認の組み合わせでない限り）そのまま信用される——どちらもAI判定が使えない状況で、Stage1IdentificationServiceの452行目・522行目・895行目付近が持つ、それぞれ独立に設計された静的ルールが決めている。
+**非対称性に注意**: 名前バリアント由来の**単一**CPE候補は常に破棄される一方（同じバリアント由来でも候補が2件以上ある場合は`degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived`が対象外とせず先頭候補をそのまま採用する——同メソッドのjavadoc「Deliberately does NOT extend to a name-variant-derived pool」の通り）、弱いレジストリマッチは（vendor+未確認の組み合わせでない限り）そのまま信用される——どちらもAI判定が使えない状況で、`degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived`/`resolveSingleCpeCandidate`/`verifyWeakRegistryMatchWithAi`それぞれが持つ、独立に設計された静的ルールが決めている。
 
 ### Tier3: Web検索による名称解決（現在は常にno-op）
 
