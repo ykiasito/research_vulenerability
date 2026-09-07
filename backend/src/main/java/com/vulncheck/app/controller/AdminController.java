@@ -342,8 +342,23 @@ public class AdminController {
     }
 
     @GetMapping("/admin/registry-mirror")
-    public String registryMirrorForm() {
+    public String registryMirrorForm(Model model) {
+        addRegistryMirrorSyncStatus(model);
         return "admin/registry-mirror";
+    }
+
+    /**
+     * Unwraps {@link RegistryMirrorSyncService.SyncStatus} into two plain model attributes rather
+     * than exposing the record (and its {@code Optional} field) directly to Thymeleaf — this
+     * codebase has no existing precedent for binding a Java record or {@code Optional} straight
+     * into a template (every other {@code /admin/*} sync-status page exposes a plain JPA entity
+     * with ordinary getters), so this keeps the template side to the same simple {@code == null}
+     * check every other sync-status page already uses.
+     */
+    private void addRegistryMirrorSyncStatus(Model model) {
+        RegistryMirrorSyncService.SyncStatus status = registryMirrorSyncService.currentStatus();
+        model.addAttribute("registryMirrorSyncInProgress", status.syncInProgress());
+        model.addAttribute("registryMirrorLastSyncedAt", status.lastSyncedAt().orElse(null));
     }
 
     /**
@@ -358,6 +373,7 @@ public class AdminController {
     public String registryMirrorFullSync(Model model) {
         if (!registryMirrorSyncService.tryBeginFullSync()) {
             model.addAttribute("result", "同期を開始できませんでした: 別の同期が既に実行中です。");
+            addRegistryMirrorSyncStatus(model);
             return "admin/registry-mirror";
         }
 
@@ -369,10 +385,12 @@ public class AdminController {
             registryMirrorSyncService.releaseFullSyncGuard();
             log.error("Registry mirror sync (admin-triggered) failed to start — sync slot released", t);
             model.addAttribute("result", "同期の開始に失敗しました。バックエンドのログを確認してください。");
+            addRegistryMirrorSyncStatus(model);
             return "admin/registry-mirror";
         }
 
         model.addAttribute("result", "同期を開始しました。完了までしばらくかかります。バックエンドのログで進捗を確認してください。");
+        addRegistryMirrorSyncStatus(model);
         return "admin/registry-mirror";
     }
 
@@ -428,6 +446,7 @@ public class AdminController {
         } catch (IllegalArgumentException e) {
             model.addAttribute("result", "エコシステムの指定が不正です: " + ecosystem);
         }
+        addRegistryMirrorSyncStatus(model);
         return "admin/registry-mirror";
     }
 
