@@ -411,7 +411,7 @@ public class Stage1IdentificationService {
 
         log.info("Stage1 identify item {} ('{}' v{}): registryMatch={}, cpeCandidates={}, result={}",
                 item.getId(), LogSanitizer.sanitize(item.getProductName()), LogSanitizer.sanitize(item.getVersion()),
-                registryResolution.match().map(RegistryMatch::packageName).orElse(null),
+                registryResolution.match().map(RegistryMatch::packageName).map(LogSanitizer::sanitize).orElse(null),
                 cpeCandidateResult.candidates().size(),
                 result.map(this::describe).orElse("UNIDENTIFIED"));
 
@@ -419,8 +419,13 @@ public class Stage1IdentificationService {
     }
 
     private String describe(IdentifiedProduct product) {
+        // Backlog item 401 (PR#308 senior-review, REVISE round): product.getCpe() can be sourced from a
+        // live NVD CPE API lookup (see the upsert around line 3102 below) just like packageName is
+        // sourced from a registry lookup -- same external-value threat model, so it needs the same
+        // LogSanitizer.sanitize call, not just packageName.
         return product.getMethod() + " ecosystem=" + product.getEcosystem()
-                + " package=" + product.getPackageName() + " cpe=" + product.getCpe();
+                + " package=" + LogSanitizer.sanitize(product.getPackageName())
+                + " cpe=" + LogSanitizer.sanitize(product.getCpe());
     }
 
     /**
@@ -537,7 +542,7 @@ public class Stage1IdentificationService {
             registryDisambiguationConfidence = registryResolution.aiConfidence();
             log.info("Registry match for item {} (ecosystem={} package={}) already AI-arbitrated among "
                     + "multiple registry candidates — skipping the single-candidate weak-match check",
-                    item.getId(), registryMatch.get().ecosystem(), registryMatch.get().packageName());
+                    item.getId(), registryMatch.get().ecosystem(), LogSanitizer.sanitize(registryMatch.get().packageName()));
         } else if (registryMatch.isPresent() && chosenCpe == null) {
             RegistryMatch weakMatch = registryMatch.get();
             Optional<DisambiguateResponse> verdict = aiArbitration.verifyWeakRegistryMatchWithAi(item, userId, weakMatch);
@@ -559,7 +564,7 @@ public class Stage1IdentificationService {
                             + "no AI verification available, version is unconfirmed, and item vendor '{}' is "
                             + "present (REVISE item 3: measured 14/14 wrong with a non-blank vendor vs 5/5 "
                             + "correct with a blank one)", item.getId(), weakMatch.ecosystem(),
-                            weakMatch.packageName(), LogSanitizer.sanitize(item.getVendor()));
+                            LogSanitizer.sanitize(weakMatch.packageName()), LogSanitizer.sanitize(item.getVendor()));
                     registryMatch = Optional.empty();
                     RescuedCpe rescued = rescueCpeAfterRegistryMatchRejected(
                             item, userId, vendorForCpeRescue, productNameForCpeRescue);
@@ -575,12 +580,13 @@ public class Stage1IdentificationService {
                     // item has no vendor field to weigh against it (the 5/5-correct case above) —
                     // degrade to trusting the weak match, same as before this fix.
                     log.info("No AI verification available for weak registry match on item {} (ecosystem={} package={}) "
-                            + "— using it as a best-effort fallback", item.getId(), weakMatch.ecosystem(), weakMatch.packageName());
+                            + "— using it as a best-effort fallback", item.getId(), weakMatch.ecosystem(),
+                            LogSanitizer.sanitize(weakMatch.packageName()));
                 }
             } else if (!verdict.get().matched()) {
                 log.info("AI rejected weak registry match for item {} (ecosystem={} package={}) as implausible "
                         + "given the usage text — likely an unrelated same-named package",
-                        item.getId(), weakMatch.ecosystem(), weakMatch.packageName());
+                        item.getId(), weakMatch.ecosystem(), LogSanitizer.sanitize(weakMatch.packageName()));
                 registryMatch = Optional.empty();
                 RescuedCpe rescued = rescueCpeAfterRegistryMatchRejected(
                         item, userId, vendorForCpeRescue, productNameForCpeRescue);
@@ -593,7 +599,7 @@ public class Stage1IdentificationService {
                 }
             } else {
                 log.info("AI confirmed weak registry match for item {} (ecosystem={} package={})",
-                        item.getId(), weakMatch.ecosystem(), weakMatch.packageName());
+                        item.getId(), weakMatch.ecosystem(), LogSanitizer.sanitize(weakMatch.packageName()));
                 registryDisambiguationConfidence = BigDecimal.valueOf(verdict.get().confidence());
             }
         }
@@ -607,7 +613,7 @@ public class Stage1IdentificationService {
         if (registryMatch.isPresent() && !trustRegistryMatch) {
             log.info("Distrusting unconfirmed-version registry match for item {} (ecosystem={} package={}) — "
                     + "a CPE match already identifies this product, likely an unrelated same-named package",
-                    item.getId(), registryMatch.get().ecosystem(), registryMatch.get().packageName());
+                    item.getId(), registryMatch.get().ecosystem(), LogSanitizer.sanitize(registryMatch.get().packageName()));
             // Round-5 fix: the CPE that got this far may only have passed passesTargetSwGate BECAUSE
             // of this registry match's own ecosystem context (e.g. crates.io "slack" admitting
             // slack_morphism_project:slack_morphism, target_sw=rust) — now that the registry match
@@ -687,10 +693,13 @@ public class Stage1IdentificationService {
         if (chosenCpe != null && trustRegistryMatch) {
             RegistryMatch trustedMatch = registryMatch.get();
             if (!cpeCorroboratesRegistryPackage(item.getVendor(), chosenCpe, trustedMatch)) {
+                // Backlog item 401 (PR#308 senior-review, REVISE round): chosenCpe.getCpeString() is
+                // just as externally-sourced (live NVD CPE API) as trustedMatch.packageName() is
+                // (registry lookup) -- both need LogSanitizer.sanitize, not just the latter.
                 log.info("Dropping CPE {} for item {} — it does not independently corroborate the trusted "
                         + "registry match's own package name (ecosystem={} package={}), so it must not "
-                        + "ride along on that match's confidence", chosenCpe.getCpeString(), item.getId(),
-                        trustedMatch.ecosystem(), trustedMatch.packageName());
+                        + "ride along on that match's confidence", LogSanitizer.sanitize(chosenCpe.getCpeString()),
+                        item.getId(), trustedMatch.ecosystem(), LogSanitizer.sanitize(trustedMatch.packageName()));
                 chosenCpe = null;
                 cpeCandidateCount = null;
                 cpeCandidateVariantDerived = null;

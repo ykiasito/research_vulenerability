@@ -92,6 +92,32 @@ class RegistryMirrorSyncServiceTest {
         assertThat(service.tryBeginFullSync()).isTrue();
     }
 
+    /** Closed-mode backlog item 382 (promoted to master by item 396): {@link
+     *  RegistryMirrorSyncService#currentStatus()} reflects {@link
+     *  RegistryMirrorSyncService#tryBeginFullSync}'s guard state and delegates the timestamp
+     *  straight through to {@link RegistryPackageMirrorRepository#maxLastSyncedAt}. */
+    @Test
+    void currentStatusReflectsSyncInProgressAndDelegatesTheTimestamp() {
+        java.time.Instant lastSyncedAt = java.time.Instant.now();
+        when(registryPackageMirrorRepository.maxLastSyncedAt()).thenReturn(java.util.Optional.of(lastSyncedAt));
+
+        assertThat(service.currentStatus())
+                .isEqualTo(new RegistryMirrorSyncService.SyncStatus(false, java.util.Optional.of(lastSyncedAt)));
+
+        service.tryBeginFullSync();
+
+        assertThat(service.currentStatus().syncInProgress()).isTrue();
+    }
+
+    /** No row synced yet at all -- {@link RegistryPackageMirrorRepository#maxLastSyncedAt}'s empty
+     *  case must reach {@link RegistryMirrorSyncService#currentStatus()} unchanged. */
+    @Test
+    void currentStatusReportsAnEmptyTimestampWhenTheMirrorHasNeverSynced() {
+        when(registryPackageMirrorRepository.maxLastSyncedAt()).thenReturn(java.util.Optional.empty());
+
+        assertThat(service.currentStatus().lastSyncedAt()).isEmpty();
+    }
+
     @Test
     void syncAllAndReleaseReleasesTheGuardEvenWhenAnEcosystemSyncThrows() {
         when(identifiedProductRepository.findDistinctPackageNamesByEcosystem("crates.io"))

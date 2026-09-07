@@ -1,5 +1,7 @@
 package com.vulncheck.app.service;
 
+import java.net.URI;
+
 /**
  * Strips every C0 control character (U+0000-U+001F, including CR/LF/TAB/ESC/BS/VT/FF/NUL) plus DEL
  * (U+007F) from a value before it's interpolated into a log line — closed-mode backlog items
@@ -73,5 +75,78 @@ public final class LogSanitizer {
      *  every one of these, not just CR/LF/ESC, needs to come out of a log line. */
     private static boolean isStrippedControlCharacter(char c) {
         return c <= 0x1F || c == 0x7F;
+    }
+
+    /**
+     * Reduces {@code uri} to {@code scheme://host<rawPath>} — dropping the query string and fragment
+     * entirely — before it's safe to put in a log line or exception message (closed-mode backlog item
+     * 421, generalizing the helper {@code CveOrgSyncService} introduced for itself in item 416).
+     * Several of this app's external sync services (GHSA, OSV, Red Hat CSAF, Siemens CSAF, cve.org)
+     * fetch through an allowlisted-host redirect chain where the final hop's query string can carry a
+     * request-signing credential (e.g. a CDN's {@code sig=}/{@code jwt=} parameter) — that must never
+     * reach a log line verbatim. Uses {@link URI#getRawPath()} (not the decoding {@link URI#getPath()})
+     * so a maliciously crafted redirect {@code Location} can't smuggle a decoded control character into
+     * the reduced value; {@link #sanitize} is still applied on top as this codebase's standard defense
+     * against exactly that class of log-injection risk for any other externally-derived log value.
+     *
+     * <p><b>Non-hierarchical / relative URIs (PR#308 senior-review, REVISE round)</b>: {@link
+     * URI#getHost()} is {@code null} both for opaque URIs (e.g. {@code mailto:}, {@code javascript:} —
+     * no authority component at all) and for relative URIs with no scheme (e.g. a bare {@code
+     * /path?query}). The naive {@code scheme + "://" + host + rawPath} concatenation above silently
+     * stringifies those {@code null}s (observed: {@code mailto:a@b.com} became the near-meaningless
+     * {@code "mailto://nullnull"}, and a relative path became {@code "null://null/relative/path"}),
+     * which both looks like a real (bogus) host and throws away the diagnostic value of the log line.
+     * Every caller of this class ({@code validatedUri}/{@code fetchBounded} and friends) already
+     * rejects any URI with a null host before it's actually fetched, so this branch is reached only for
+     * logging/error-message purposes, never as part of a fetch decision — but the log line still needs
+     * to (a) never contain the raw query/fragment and (b) not read as a fabricated host. Uses {@link
+     * URI#getRawSchemeSpecificPart()} (fragment is already a separate URI component, never included in
+     * it) and additionally truncates at the first {@code '?'} so an opaque URI's query-like suffix
+     * (e.g. {@code mailto:a@b.com?subject=...}) can't leak either.
+     *
+     * <p><b>Protocol-relative URIs (PR#308 senior-review, 2nd REVISE round)</b>: {@link URI#getHost()}
+     * is non-null but {@link URI#getScheme()} is null for a protocol-relative reference (e.g. {@code
+     * //evil.example.com/adv.json?sig=...}), which a feed-driven fetch ({@code
+     * SiemensCsafSyncService} and friends resolving an untrusted {@code feedUrl}/{@code contentUrl}/
+     * {@code hashUrl}) can hand to this method. That case still takes the hierarchical branch below
+     * (it has a host), so the earlier null-host fix above didn't cover it: the naive {@code scheme +
+     * "://"} concatenation stringified the null scheme into {@code "null://evil.example.com/..."} --
+     * still no secret leak (the query is dropped the same as always) but a bogus-looking scheme
+     * prepended to a real host. Falls back to a bare {@code "//"} prefix (matching the protocol-relative
+     * syntax itself) when there's no scheme to print.
+     */
+    public static String sanitizeUrl(URI uri) {
+        String host = uri.getHost();
+        if (host == null) {
+            String scheme = uri.getScheme();
+            String label = scheme == null ? "(no scheme)" : scheme;
+            return sanitize("(non-hierarchical URL, scheme=" + label + "): "
+                    + withoutQuery(uri.getRawSchemeSpecificPart()));
+        }
+        String scheme = uri.getScheme();
+        String prefix = scheme == null ? "//" : scheme + "://";
+        String rawPath = uri.getRawPath();
+        return sanitize(prefix + host + (rawPath == null ? "" : rawPath));
+    }
+
+    /** Truncates {@code schemeSpecificPart} at its first {@code '?'}, if any — used only by the
+     *  non-hierarchical/relative branch of {@link #sanitizeUrl(URI)}, where the query component isn't
+     *  parsed out separately by {@link URI} the way it is for a hierarchical URI. */
+    private static String withoutQuery(String schemeSpecificPart) {
+        if (schemeSpecificPart == null) {
+            return "";
+        }
+        int queryStart = schemeSpecificPart.indexOf('?');
+        return queryStart < 0 ? schemeSpecificPart : schemeSpecificPart.substring(0, queryStart);
+    }
+
+    /** {@link #sanitizeUrl(URI)} for a raw, not-yet-parsed URL string — falls back to a fixed
+     *  placeholder if {@code url} isn't even a parseable URI. */
+    public static String sanitizeUrl(String url) {
+        try {
+            return sanitizeUrl(URI.create(url));
+        } catch (IllegalArgumentException e) {
+            return "(unparseable URL)";
+        }
     }
 }

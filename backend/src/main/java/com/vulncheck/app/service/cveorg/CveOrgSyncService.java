@@ -475,23 +475,19 @@ public class CveOrgSyncService {
     /** Redacts everything except scheme/host/path before a URL reaches a log line or exception
      *  message (backlog item 416) — this service's redirect target carries request-signing
      *  credentials ({@code sig=}/{@code jwt=} query parameters on the asset-CDN hosts in {@link
-     *  #DEFAULT_ALLOWED_HOSTS}), which must never be logged verbatim. Uses {@link URI#getRawPath()}
-     *  (not the decoding {@link URI#getPath()}) so a maliciously crafted redirect {@code Location}
-     *  can't smuggle a decoded control character into the sanitized result; {@link
-     *  LogSanitizer#sanitize} is applied on top as this codebase's standard defense against exactly
-     *  that class of log-injection risk for any other externally-derived log value. */
+     *  #DEFAULT_ALLOWED_HOSTS}), which must never be logged verbatim. Delegates to {@link
+     *  LogSanitizer#sanitizeUrl(URI)} — backlog item 421 generalized this method (originally private to
+     *  this class) into a shared helper once the same need showed up in the GHSA/OSV/Red Hat
+     *  CSAF/Siemens CSAF sync services, so this wrapper is kept only to avoid touching this class's ~10
+     *  existing call sites. */
     private static String sanitizedForLogging(URI uri) {
-        return LogSanitizer.sanitize(uri.getScheme() + "://" + uri.getHost() + uri.getRawPath());
+        return LogSanitizer.sanitizeUrl(uri);
     }
 
-    /** {@link #sanitizedForLogging(URI)} for a raw, not-yet-parsed URL string — falls back to a fixed
-     *  placeholder if {@code url} isn't even a parseable URI. */
+    /** {@link #sanitizedForLogging(URI)} for a raw, not-yet-parsed URL string — delegates to {@link
+     *  LogSanitizer#sanitizeUrl(String)} (backlog item 421). */
     private static String sanitizedForLogging(String url) {
-        try {
-            return sanitizedForLogging(URI.create(url));
-        } catch (IllegalArgumentException e) {
-            return "(unparseable URL)";
-        }
+        return LogSanitizer.sanitizeUrl(url);
     }
 
     private record GitHubRelease(String tag, String baselineZipUrl, String deltaZipUrl) {

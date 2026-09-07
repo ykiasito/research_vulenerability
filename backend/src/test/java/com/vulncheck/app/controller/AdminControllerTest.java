@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -34,11 +35,13 @@ import com.vulncheck.app.service.ghsa.GhsaSyncService;
 import com.vulncheck.app.service.nvd.NvdRateLimiter;
 import com.vulncheck.app.service.osv.OsvSyncService;
 import com.vulncheck.app.service.registry.RegistryMirrorSyncService;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -100,6 +103,21 @@ class AdminControllerTest {
                 ghsaSyncService, ghsaSyncStateRepository, ghsaSyncFailureRepository, osvSyncService,
                 osvSyncStateRepository, osvSyncFailureRepository, registryMirrorSyncService, nvdCveSyncService,
                 nvdCveSyncStateRepository, cpeDictionarySyncStateRepository);
+    }
+
+    /**
+     * Closed-mode backlog item 382 (promoted to master by item 396): every {@code
+     * /admin/registry-mirror} controller method (not just the ones this class already has dedicated
+     * tests for) now unconditionally calls {@link RegistryMirrorSyncService#currentStatus()} to
+     * populate the sync-status display — stubbed here (leniently, since not every test below
+     * actually reaches a registry-mirror endpoint) so those calls return a real {@link
+     * RegistryMirrorSyncService.SyncStatus} instead of Mockito's default {@code null}, matching what
+     * the real service always returns.
+     */
+    @BeforeEach
+    void stubRegistryMirrorSyncStatus() {
+        lenient().when(registryMirrorSyncService.currentStatus())
+                .thenReturn(new RegistryMirrorSyncService.SyncStatus(false, Optional.of(Instant.now())));
     }
 
     @Test
