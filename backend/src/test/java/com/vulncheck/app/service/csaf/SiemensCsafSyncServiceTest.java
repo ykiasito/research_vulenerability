@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import com.vulncheck.app.entity.CsafAdvisoryId;
@@ -17,6 +18,7 @@ import com.vulncheck.app.service.ratelimit.ExternalRegistryRateLimiter;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.OffsetDateTime;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
@@ -228,6 +230,44 @@ class SiemensCsafSyncServiceTest {
         assertThat(state.getLastCursor()).isEqualTo("2025-06-10T00:00Z");
     }
 
+    /** Backlog item 418 (regression, follow-up to item 416's {@code CveOrgSyncService} fix): {@code
+     *  uri.resolve(location)} inside {@link SiemensCsafSyncService#fetchBounded} used to leave an
+     *  unparseable document-redirect {@code Location} header's {@link IllegalArgumentException}
+     *  uncaught within the {@code exchange} callback — it fell through to the surrounding generic
+     *  {@code catch (Exception e)}, which both mislabeled the failure as a transport error and logged
+     *  the exception's own message (i.e. the raw, unsanitized {@code Location} — any signed query
+     *  parameter included) via {@code log.warn}'s trailing-throwable overload. */
+    @Test
+    void baselineSyncRejectsAMalformedDocumentRedirectLocationWithoutLeakingASignedQueryString() {
+        Harness h = harness();
+        String secret = "SIEMENSSECRETVALUE789";
+        h.server().expect(method(HttpMethod.GET))
+                .andExpect(requestTo("https://cert-portal.siemens.com/productcert/csaf/provider-metadata.json"))
+                .andRespond(withSuccess(PROVIDER_METADATA, MediaType.APPLICATION_JSON));
+        h.server().expect(method(HttpMethod.GET))
+                .andExpect(requestTo("https://cert-portal.siemens.com/productcert/csaf/ssa-feed-tlp-white.json"))
+                .andRespond(withSuccess(feedJson("SSA-779699"), MediaType.APPLICATION_JSON));
+        h.server().expect(method(HttpMethod.GET))
+                .andExpect(requestTo("https://cert-portal.siemens.com/productcert/csaf/ssa-779699.json"))
+                .andRespond(withStatus(org.springframework.http.HttpStatus.FOUND)
+                        .header("Location", "/bad path?sig=" + secret));
+
+        List<ch.qos.logback.classic.spi.ILoggingEvent> events = captureLogEvents(() -> {
+            SyncResult result = h.service().syncBaseline();
+            assertThat(result.upserted()).isZero();
+            assertThat(result.failed()).isEqualTo(1);
+        });
+
+        h.server().verify(); // the .sha512 sidecar is never requested — the doc fetch itself failed first
+        assertThat(csafAdvisoryRepository.findById(new CsafAdvisoryId("siemens", "SSA-779699"))).isEmpty();
+        for (ch.qos.logback.classic.spi.ILoggingEvent event : events) {
+            assertThat(event.getFormattedMessage()).doesNotContain(secret);
+            if (event.getThrowableProxy() != null) {
+                assertThat(ch.qos.logback.classic.spi.ThrowableProxyUtil.asString(event.getThrowableProxy())).doesNotContain(secret);
+            }
+        }
+    }
+
     // REVISE item 2 (senior review 2026-08-27): the original 2-entry version of this test put the
     // failure on the LAST entry, so "cursor stopped at the failure" and "cursor advanced to the last
     // success" were indistinguishable — it would have passed even with the cursor-pollution bug this
@@ -422,5 +462,26 @@ class SiemensCsafSyncServiceTest {
 
         releaseFirstCall.countDown();
         firstRun.join(5_000);
+    }
+
+    /** Captures every log event {@link SiemensCsafSyncService}'s own logger emits while {@code
+     *  action} runs (same convention as {@code CveOrgSyncServiceTest#captureLogEvents} /
+     *  {@code UserApiKeyServiceTest#captureLogEvents}), temporarily lowering the logger to DEBUG and
+     *  restoring both the original level and appender list afterward regardless of outcome. */
+    private List<ch.qos.logback.classic.spi.ILoggingEvent> captureLogEvents(Runnable action) {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(SiemensCsafSyncService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        ch.qos.logback.classic.Level originalLevel = logger.getLevel();
+        logger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        try {
+            action.run();
+        } finally {
+            logger.detachAppender(appender);
+            logger.setLevel(originalLevel);
+        }
+        return appender.list;
     }
 }

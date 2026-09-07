@@ -27,6 +27,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
@@ -279,6 +280,47 @@ class OsvSyncServiceTest {
         assertThat(stateStore.get((short) 1).getLastSyncError()).contains("failed");
     }
 
+    /** Backlog item 418 (regression, follow-up to item 416's {@code CveOrgSyncService} fix): {@code
+     *  uri.resolve(location)} inside {@link OsvSyncService#fetchBounded} used to leave an unparseable
+     *  document-redirect {@code Location} header's {@link IllegalArgumentException} uncaught within
+     *  the {@code exchange} callback — it fell through to the surrounding generic {@code catch
+     *  (Exception e)}, which both mislabeled the failure as a transport error and logged the
+     *  exception's own message (i.e. the raw, unsanitized {@code Location} — any signed query
+     *  parameter included) via {@code log.warn}'s trailing-throwable overload. */
+    @Test
+    void deltaRejectsAMalformedDocumentRedirectLocationWithoutLeakingASignedQueryStringOrAdvancingTheCursor() {
+        setUpCommonMocks();
+        seedBaselineLoadedState(OffsetDateTime.parse("2026-01-01T00:00:00Z"));
+        String secret = "OSVSECRETVALUE777";
+        String csv = "2026-01-05T00:00:00Z,PyPI/PYSEC-BADREDIRECT";
+
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        server.expect(method(org.springframework.http.HttpMethod.GET))
+                .andExpect(requestTo("https://osv-vulnerabilities.storage.googleapis.com/PyPI/PYSEC-BADREDIRECT.json"))
+                .andRespond(org.springframework.test.web.client.response.MockRestResponseCreators
+                        .withStatus(org.springframework.http.HttpStatus.FOUND)
+                        .header("Location", "/bad path?sig=" + secret));
+
+        OsvSyncService service = deltaService(builder, OsvSyncService.DEFAULT_MAX_DOCUMENTS_PER_DELTA_RUN, csv);
+
+        List<ch.qos.logback.classic.spi.ILoggingEvent> events = captureLogEvents(() -> {
+            OsvSyncService.SyncResult result = service.syncDelta();
+            assertThat(result.upserted()).isZero();
+            assertThat(result.failed()).isEqualTo(1);
+        });
+
+        server.verify();
+        assertThat(stateStore.get((short) 1).getLastCursor()).isEqualTo(OffsetDateTime.parse("2026-01-01T00:00:00Z"));
+        assertThat(stateStore.get((short) 1).getLastSyncError()).doesNotContain(secret);
+        for (ch.qos.logback.classic.spi.ILoggingEvent event : events) {
+            assertThat(event.getFormattedMessage()).doesNotContain(secret);
+            if (event.getThrowableProxy() != null) {
+                assertThat(ch.qos.logback.classic.spi.ThrowableProxyUtil.asString(event.getThrowableProxy())).doesNotContain(secret);
+            }
+        }
+    }
+
     @Test
     void maxDocumentsPerDeltaRunOnlyCutsOffAtAGroupBoundaryNeverMidGroup() {
         setUpCommonMocks();
@@ -349,5 +391,25 @@ class OsvSyncServiceTest {
 
         assertThat(result.upserted()).isZero();
         assertThat(result.alreadyRunning()).isFalse();
+    }
+
+    /** Captures every log event {@link OsvSyncService}'s own logger emits while {@code action} runs
+     *  (same convention as {@code CveOrgSyncServiceTest#captureLogEvents} /
+     *  {@code UserApiKeyServiceTest#captureLogEvents}), temporarily lowering the logger to DEBUG and
+     *  restoring both the original level and appender list afterward regardless of outcome. */
+    private List<ch.qos.logback.classic.spi.ILoggingEvent> captureLogEvents(Runnable action) {
+        ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OsvSyncService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        ch.qos.logback.classic.Level originalLevel = logger.getLevel();
+        logger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        try {
+            action.run();
+        } finally {
+            logger.detachAppender(appender);
+            logger.setLevel(originalLevel);
+        }
+        return appender.list;
     }
 }

@@ -675,7 +675,7 @@ public class GhsaSyncService {
      *  "Could not resolve the baseline tarball download URL" string. This return type lets the
      *  caller ({@link #doSyncBaseline}) build an actionable message per failure mode instead. */
     private enum RedirectResolution {
-        OK, REJECTED_SCHEME_OR_HOST, MISSING_LOCATION_HEADER, REDIRECT_TARGET_REJECTED, RATE_LIMITED, HTTP_ERROR, TRANSPORT_ERROR
+        OK, REJECTED_SCHEME_OR_HOST, MISSING_LOCATION_HEADER, MALFORMED_LOCATION_HEADER, REDIRECT_TARGET_REJECTED, RATE_LIMITED, HTTP_ERROR, TRANSPORT_ERROR
     }
 
     private record RedirectOutcome(RedirectResolution status, String url, int httpStatus) {
@@ -703,7 +703,20 @@ public class GhsaSyncService {
                     if (location == null) {
                         return RedirectOutcome.of(RedirectResolution.MISSING_LOCATION_HEADER);
                     }
-                    URI target = uri.resolve(location);
+                    URI target;
+                    try {
+                        // Backlog item 418: URI#resolve(String) calls URI.create internally, so a
+                        // Location header that isn't a parseable URI reference throws an unchecked
+                        // IllegalArgumentException here rather than the checked failure this exchange
+                        // callback otherwise reports through RedirectOutcome. Left uncaught, this used
+                        // to fall into the generic try/catch (Exception e) below, which both
+                        // mislabeled the failure as TRANSPORT_ERROR and logged the exception's own
+                        // message — i.e. the raw, unsanitized Location string (any signed query
+                        // parameters included) — via log.error's trailing-Throwable overload.
+                        target = uri.resolve(location);
+                    } catch (IllegalArgumentException e) {
+                        return RedirectOutcome.of(RedirectResolution.MALFORMED_LOCATION_HEADER);
+                    }
                     return validatedUri(target.toString()) != null
                             ? RedirectOutcome.ok(target.toString())
                             : RedirectOutcome.of(RedirectResolution.REDIRECT_TARGET_REJECTED);
@@ -739,6 +752,8 @@ public class GhsaSyncService {
                     "Could not resolve the baseline tarball download URL: the request URL was not https or not an allowlisted host";
             case MISSING_LOCATION_HEADER ->
                     "Could not resolve the baseline tarball download URL: GitHub's redirect response had no Location header";
+            case MALFORMED_LOCATION_HEADER ->
+                    "Could not resolve the baseline tarball download URL: the redirect Location header was not a parseable URI";
             case REDIRECT_TARGET_REJECTED ->
                     "Could not resolve the baseline tarball download URL: the redirect target was not https or not an allowlisted host";
             case RATE_LIMITED ->
@@ -813,7 +828,18 @@ public class GhsaSyncService {
                     if (!paceOrAbort()) {
                         return FetchOutcome.of(FetchStatus.INTERRUPTED);
                     }
-                    return fetchBounded(uri.resolve(location).toString(), maxBytes, redirectsRemaining - 1);
+                    URI target;
+                    try {
+                        // Backlog item 418: see resolveRedirectTarget's matching comment — an
+                        // unparseable Location header must not reach the outer catch (Exception e)
+                        // below, which would both mislabel this as TRANSPORT_ERROR and log the raw,
+                        // unsanitized Location string (via the exception's own message) through
+                        // log.warn's trailing-Throwable overload.
+                        target = uri.resolve(location);
+                    } catch (IllegalArgumentException e) {
+                        return FetchOutcome.of(FetchStatus.HTTP_ERROR);
+                    }
+                    return fetchBounded(target.toString(), maxBytes, redirectsRemaining - 1);
                 }
                 if (status.value() == 429 || status.value() == 403) {
                     return FetchOutcome.of(FetchStatus.RATE_LIMITED);

@@ -22,6 +22,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -206,6 +207,43 @@ class GhsaSyncServiceTest {
         // marked complete — plan §0-1 principle 1 is about the *state flag*, not about discarding
         // otherwise-valid work.
         assertThat(ghsaAdvisoryRepository.findById("GHSA-wfx3-6g53-9fgc")).isPresent();
+    }
+
+    /** Backlog item 418 (regression, follow-up to item 416's {@code CveOrgSyncService} fix): {@code
+     *  uri.resolve(location)} inside {@link GhsaSyncService#resolveRedirectTarget} used to leave an
+     *  unparseable tarball-redirect {@code Location} header's {@link IllegalArgumentException}
+     *  uncaught within the {@code exchange} callback — it fell through to the surrounding generic
+     *  {@code catch (Exception e)}, which both mislabeled the failure as a transport error and logged
+     *  the exception's own message (i.e. the raw, unsanitized {@code Location} — any signed query
+     *  parameter included) via {@code log.error}'s trailing-throwable overload. */
+    @Test
+    void baselineSyncRejectsAMalformedTarballRedirectLocationWithoutLeakingASignedQueryString() {
+        Harness h = harness(3, null);
+        String secret = "GHSASECRETVALUE123";
+        h.server().expect(method(HttpMethod.GET))
+                .andExpect(requestTo(COMMITS_URL))
+                .andRespond(withSuccess("{\"sha\": \"abc1234000000000000000000000000000000\"}", MediaType.APPLICATION_JSON));
+        h.server().expect(method(HttpMethod.GET))
+                .andExpect(requestTo(TARBALL_URL))
+                .andRespond(withStatus(org.springframework.http.HttpStatus.FOUND)
+                        .header("Location", "/bad path?sig=" + secret));
+
+        List<ch.qos.logback.classic.spi.ILoggingEvent> events = captureLogEvents(() -> {
+            SyncResult result = h.service().syncBaseline();
+            assertThat(result.upserted()).isZero();
+            assertThat(result.failed()).isZero();
+        });
+
+        h.server().verify();
+        GhsaSyncState state = ghsaSyncStateRepository.findById((short) 1).orElseThrow();
+        assertThat(state.isSyncInProgress()).isFalse();
+        assertThat(state.getLastSyncError()).contains("not a parseable URI").doesNotContain(secret);
+        for (ch.qos.logback.classic.spi.ILoggingEvent event : events) {
+            assertThat(event.getFormattedMessage()).doesNotContain(secret);
+            if (event.getThrowableProxy() != null) {
+                assertThat(ch.qos.logback.classic.spi.ThrowableProxyUtil.asString(event.getThrowableProxy())).doesNotContain(secret);
+            }
+        }
     }
 
     @Test
@@ -480,5 +518,25 @@ class GhsaSyncServiceTest {
 
         releaseFirstCall.countDown();
         firstRun.join(5_000);
+    }
+
+    /** Captures every log event {@link GhsaSyncService}'s own logger emits while {@code action}
+     *  runs (same convention as {@code CveOrgSyncServiceTest#captureLogEvents} /
+     *  {@code UserApiKeyServiceTest#captureLogEvents}), temporarily lowering the logger to DEBUG and
+     *  restoring both the original level and appender list afterward regardless of outcome. */
+    private List<ch.qos.logback.classic.spi.ILoggingEvent> captureLogEvents(Runnable action) {
+        ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(GhsaSyncService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        ch.qos.logback.classic.Level originalLevel = logger.getLevel();
+        logger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        try {
+            action.run();
+        } finally {
+            logger.detachAppender(appender);
+            logger.setLevel(originalLevel);
+        }
+        return appender.list;
     }
 }
