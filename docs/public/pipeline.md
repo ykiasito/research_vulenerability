@@ -73,7 +73,7 @@ cve.org（CVE Services API）のキーワード検索は、匿名利用不可（
 |---|---|---|
 | Tier1（静的） | 無料 | 常時 |
 | ~~ライブCPE照会~~ | （削除済み） | 閉域モードバックログ項目273〔B4〕でライブNVD CPE APIフォールバック経路自体を物理削除済み。Tier1のCPEマッチングは常にローカル`cpe_dictionary`ミラーのみで完結する |
-| Tier2 | Claude API課金（web_search無し、軽量） | CPE候補が2件以上の時のみ |
-| Tier3 | Claude API課金（web_search込み） | Tier1が完全空振りの時のみ |
+| ~~Tier2~~ | （削除済み） | closed-mode B2（`docs/spec/closed-mode-plan.md`§9-2）でAI呼び出し経路自体を物理削除済み。CPE候補が2件以上でも、静的フォールバック規則（後述）が常に無料で適用される |
+| ~~Tier3~~ | （削除済み） | closed-mode B2で同上。Tier1が完全空振りのアイテムは呼び出し自体は発生するが常に空振りに終わり、UNIDENTIFIEDのままになる |
 | Stage2 | 無料 | 識別済みアイテムに常時 |
-| Stage4 | Claude API課金（web_search込み、最も高価） | Stage2が0件、またはヒントのみ存在する時のみ |
+| ~~Stage4~~ | （削除済み） | closed-mode B2で同上。呼び出し条件を満たしても常に0件+`INCOMPLETE_REASON_AI_NOT_AVAILABLE`を返すno-op |
