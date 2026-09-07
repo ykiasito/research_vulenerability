@@ -15,13 +15,15 @@ CSV1行（`ResearchJobItem`）ごとに、Stage1（製品識別）→Stage2（�
 
 レジストリ照合とCPE照合の両方が空振りの場合のみ Tier3 へ進む。どちらか一方でも候補があれば Tier2（必要なら）を経て確定する。
 
-### Tier2: あいまい候補のLLM判定
+### Tier2: あいまい候補の判定（現在は常にno-op、静的フォールバック規則が常時適用）
 
-CPE候補が2件以上ある場合のみ発火（1件ならLLM抜きでそのまま採用、0件ならTier1のレジストリ結果のみで確定）。
+CPE候補が2件以上ある場合のみ発火するが、`Stage1AiArbitration#disambiguateCpeCandidates`・`#verifyWeakRegistryMatchWithAi`・`#verifyVariantDerivedCpeMatchWithAi`はいずれも無条件で`Optional.empty()`を返す1行メソッドで、Claude（`claude-haiku-4-5`）呼び出し経路自体がclosed-mode B2（`docs/spec/closed-mode-plan.md`§9-2）で物理削除済み。かつてAPIキー未登録時の劣化動作としてのみ使われていた`Stage1IdentificationService`側の静的フォールバック規則が、現在は常に（キーの有無に関わらず）適用される:
 
-- Claude（`claude-haiku-4-5`）に候補リストのインデックスを選ばせる方式。**新しい候補を生成させない**（ハルシネーション対策）。
-- 候補のCPE文字列は**バージョンをマスクして**（`*`に置換）渡す。理由: 辞書上の古いバージョン番号を見せると、LLMが「バージョンが違うから不一致」と誤判定するバグが実際に発生した（NuGet CLI・Wireshark検証時に発覚、修正済み）。バージョンの妥当性判断は本来この工程の役割ではない。
-- APIキー未登録・LLM呼び出し失敗時は、先頭候補を機械的に採用する劣化動作にフォールバックする。
+- **CPE候補が2件以上**: 通常は先頭候補（ランキング1位）をそのまま採用する。ただし**relaxed-containmentパス由来の候補プールに限っては採用せず破棄する**（`degradeToFirstCpeCandidateUnlessRelaxedContainmentDerived`、senior review PR#51 REVISE item1 — Android Studioの`google:android`/`motorola:android`/`samsung:android`のような相乗り誤検出対策）。
+- **CPE候補が1件のみ、かつ名前バリアント検索由来**（`variantDerived=true`）: この候補は常に破棄される（`resolveSingleCpeCandidate`）——「未検証の推測を信用するよりUNIDENTIFIEDのままにする」という設計判断。辞書への文字通りの一致（非バリアント由来）による単一候補は、この判定を経由せずそのまま採用される。
+- **弱いレジストリマッチ**（`exactVersionConfirmed=false`）で確定CPEによる裏付けが無い場合: 実測ベースの静的ルール（REVISE item3、実データ19件の分析——itemの`vendor`フィールドが非空かつバージョン未確認なら14/14が誤り、`vendor`が空なら5/5が正しい）が適用される。`vendor`が非空かつバージョン未確認ならこの弱いマッチを棄却してCPE再照会にフォールバックし、それ以外（バージョン確認済み、または`vendor`が空）はそのまま採用する。
+
+**非対称性に注意**: 名前バリアント由来のCPE候補は常に破棄される一方、弱いレジストリマッチは（vendor+未確認の組み合わせでない限り）そのまま信用される——どちらもAI判定が使えない状況で、Stage1IdentificationServiceの452行目・522行目・895行目付近が持つ、それぞれ独立に設計された静的ルールが決めている。
 
 ### Tier3: Web検索による名称解決
 
