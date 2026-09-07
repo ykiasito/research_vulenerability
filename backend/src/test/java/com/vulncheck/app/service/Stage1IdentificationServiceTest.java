@@ -3415,6 +3415,113 @@ class Stage1IdentificationServiceTest {
     }
 
     @Test
+    void multiSegmentGroupIdWithAnUnexplainedIntermediateSegmentRecoversJacksonDatabind() {
+        // Backlog item 412 (real-devDB re-measurement, 2026-09-07): item 367's original bypass only
+        // ever consulted REVERSE_DNS_PACKAGE_PREFIXES for the single leading token immediately ahead
+        // of the Direction 2 match, so "com.fasterxml.jackson.core:jackson-databind" was still
+        // rejected — "fasterxml" (index 1) passes ordinary vendorExplains against the CPE vendor, but
+        // "jackson"/"core" (indices 2/3, between the confirmed vendor and the matched artifactId) do
+        // not, and the old loop rejected the whole candidate the moment either of those failed. This
+        // is one of the 4 rows item367 originally (and wrongly) claimed as already rescued.
+        CpeDictionaryEntry fasterxmlJacksonDatabind =
+                cpeEntry("cpe:2.3:a:fasterxml:jackson-databind:2.15.2:*:*:*:*:*:*:*", "jackson-databind");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(fasterxmlJacksonDatabind));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("com.fasterxml.jackson.core:jackson-databind"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:fasterxml:jackson-databind:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void multiSegmentGroupIdWithAnUnexplainedIntermediateSegmentRecoversRetrofit() {
+        // Backlog item 412: "com.squareup.retrofit2:retrofit" — "squareup" (index 1) passes ordinary
+        // vendorExplains, but "retrofit2" (index 2, the groupId's own trailing namespace segment) does
+        // not relate to the CPE vendor "squareup" at all and was rejected by item 367's original
+        // single-token-only bypass.
+        CpeDictionaryEntry squareupRetrofit =
+                cpeEntry("cpe:2.3:a:squareup:retrofit:2.9.0:*:*:*:*:*:*:*", "retrofit");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(squareupRetrofit));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("com.squareup.retrofit2:retrofit"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:squareup:retrofit:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void multiSegmentGroupIdWithAnUnexplainedIntermediateSegmentRecoversHttpclient() {
+        // Backlog item 412: "org.apache.httpcomponents:httpclient" — "apache" (index 1) passes
+        // ordinary vendorExplains, but "httpcomponents" (index 2) does not relate to the CPE vendor
+        // "apache" at all and was rejected by item 367's original single-token-only bypass.
+        CpeDictionaryEntry apacheHttpclient =
+                cpeEntry("cpe:2.3:a:apache:httpclient:4.5.13:*:*:*:*:*:*:*", "httpclient");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(apacheHttpclient));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.apache.httpcomponents:httpclient"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:apache:httpclient:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void multiSegmentGroupIdWithNoLexicallyRelatedSegmentAtAllRecoversSpringBootStarterWeb() {
+        // Backlog item 412: "org.springframework.boot:spring-boot-starter-web" is the hardest of the
+        // 4 originally-unrescued rows — unlike the 3 tests above, NEITHER intermediate segment
+        // ("springframework" nor "boot") is lexically related to the CPE vendor ("vmware") at all, so
+        // there is no vendorExplains-confirmed token anywhere in the leading run. The only remaining
+        // guards are the Maven-coordinate shape check, the artifact-tail-relatedness check (the
+        // "spring"/"boot" prefix of "spring-boot-starter-web" relates back to the matched candidate
+        // product "spring_boot"), and the item-vendor-non-contradiction check (blank item vendor here,
+        // same as every Maven row in this project's own fixtures).
+        CpeDictionaryEntry vmwareSpringBoot =
+                cpeEntry("cpe:2.3:a:vmware:spring_boot:3.1.0:*:*:*:*:*:*:*", "spring_boot");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(vmwareSpringBoot));
+        stubSaveReturnsArgument();
+
+        Optional<IdentifiedProduct> result =
+                service(List.of()).identify(item("org.springframework.boot:spring-boot-starter-web"), USER_ID);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getCpe()).isEqualTo("cpe:2.3:a:vmware:spring_boot:1.0.0:*:*:*:*:*:*:*");
+    }
+
+    @Test
+    void bypassNeverFiresWhenTheLeadingSegmentIsNotARecognizedReverseDnsPrefix() {
+        // Backlog item 412 REVISE (senior review round 1, 2026-09-07): before this test, the
+        // REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(0)) condition inside
+        // bypassLeadingRunAsMavenCoordinate had zero regression coverage — every other case in this
+        // file exercising the widened bypass happens to lead with "com"/"org"/"net", so deleting that
+        // condition entirely still left every existing test green. This query leads with "acmecorp",
+        // which is not on the allowlist, while every other guard the bypass depends on is otherwise
+        // satisfied: the query has the genuine dot-then-colon Maven shape
+        // (queryLooksLikeReverseDnsCoordinate), the artifact tail "widget-core" relates back to the
+        // matched candidate product "widget" (matchedArtifactTailRelatesToCandidate), and the item
+        // vendor is blank so it can't contradict the candidate's CPE vendor
+        // (!itemVendorContradicts). The REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(0))
+        // check is therefore the ONLY thing standing between this query and a wrong-vendor admission —
+        // "unrelatedvendor" has no lexical relation whatsoever to "acmecorp"/"tooling". No
+        // stubSaveReturnsArgument() here — the rejected candidate never reaches save().
+        CpeDictionaryEntry unrelatedVendorWidget =
+                cpeEntry("cpe:2.3:a:unrelatedvendor:widget:1.0:*:*:*:*:*:*:*", "widget");
+        when(cpeDictionaryRepository.findFuzzyMatches(anyString(), anyDouble(), anyDouble(), anyInt()))
+                .thenReturn(List.of(unrelatedVendorWidget));
+
+        assertThat(service(List.of()).identify(item("acmecorp.tooling:widget-core"), USER_ID)).isEmpty();
+        verify(identifiedProductRepository, never()).save(any());
+    }
+
+    @Test
     void queryLooksLikeReverseDnsCoordinateOnlyMatchesAGenuineMultiSegmentGroupIdArtifactShape() {
         // Backlog item 367 REVISE: direct unit coverage of the structural gate itself (same
         // convention as normalizeForContainmentStripsCpeBackslashEscapes... below, which also calls a

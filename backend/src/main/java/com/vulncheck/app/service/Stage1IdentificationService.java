@@ -278,8 +278,26 @@ public class Stage1IdentificationService {
      * two segments further in ({@code google}, {@code slf4j}, {@code netty}, {@code qos}), which
      * {@link #vendorExplains} already confirms just fine once it's reached. Before this fix, the
      * *first* segment alone (the bare TLD-like prefix) failed {@code vendorExplains} and the whole
-     * candidate was rejected regardless of how well everything after it lined up — 9 of the 14
-     * candidate-pool-reachable-but-rejected Maven golden-300 rows shared exactly this root cause.
+     * candidate was rejected regardless of how well everything after it lined up.
+     *
+     * <p><b>Backlog item 412 correction (real-devDB re-measurement, 2026-09-07):</b> this fix
+     * originally claimed "9 of the 14 candidate-pool-reachable-but-rejected Maven golden-300 rows
+     * shared exactly this root cause" — that number was never actually re-verified against a live
+     * re-run and turned out to be wrong. The real-devDB re-measurement found only 5 of those 14 rows
+     * were actually rescued by the version of this fix that shipped ({@code guava}, {@code
+     * slf4j-api}, {@code okhttp}, {@code netty-all}, {@code logback-classic}) — the other 4 ({@code
+     * jackson-databind}, {@code retrofit}, {@code httpclient}, {@code spring-boot-starter-web}) all
+     * have a groupId with 3+ segments where an *intermediate* segment (e.g. {@code jackson}, {@code
+     * retrofit2}, {@code httpcomponents}, {@code springframework}) is neither the TLD nor lexically
+     * related to the CPE vendor, which the original single-token bypass below didn't cover. Item 412
+     * widens the bypass to the entire leading run (see the Direction 2 loop in {@link #explainsQuery}
+     * for the updated logic and reasoning) to remove the structural rejection cause for these 4 rows.
+     * <b>Not independently re-verified against a live re-run</b> — this fix's own verification is
+     * limited to mocked-candidate-pool unit tests and the mocked golden benchmark (a single mocked
+     * candidate each, no ranking against the rest of the real dictionary), the same measurement gap
+     * that made the original "9 of 14" claim wrong in the first place. Whether all 9 of the 14 rows
+     * actually resolve correctly against the real candidate pool (where an unrelated candidate could
+     * still outrank the intended one) remains unmeasured; tracked as backlog item 415.
      *
      * <p>Deliberately just the small set of generic TLDs plus the country-code TLDs conventionally
      * used the same way as a Maven groupId's leading segment, not a general "any short token is
@@ -2691,19 +2709,45 @@ public class Stage1IdentificationService {
         // query token *ahead of* that run is explained by the candidate's own CPE vendor — see this
         // method's own class-level javadoc above for the full Docker/GitHub Desktop reasoning.
         //
-        // Backlog item 367: a leading token is also accepted, without needing vendorExplains at all,
-        // if it's a recognized reverse-DNS package-name prefix (see REVERSE_DNS_PACKAGE_PREFIXES's own
-        // javadoc) AND the query itself actually has a genuine Maven-coordinate shape AND its
-        // colon-suffixed tail actually relates back to the matched candidate itself (see
-        // queryLooksLikeReverseDnsCoordinate/matchedArtifactTailRelatesToCandidate's own javadoc —
-        // peer review REVISE round 2, 2026-09-06) — a Maven groupId's leading TLD-like segment is
-        // real structure, not noise, but it's essentially never itself a CPE vendor slug, so requiring
-        // vendorExplains on it alone structurally rejected every Maven coordinate whose match didn't
-        // happen to start at token 0. Gating on the query's own shape alone is not enough (round 2:
-        // "net.framework:x64" has the identical two-dot-segment-then-colon shape as the genuine
-        // "io.netty:netty-all"), so the tail-relatedness check is what tells them apart — a real Maven
-        // artifactId is conventionally derived from (or equal to) the matched product identity itself,
-        // an arbitrary colon-suffixed qualifier like "x64" is not.
+        // Backlog item 367: the *entire* leading run is also accepted, without needing vendorExplains
+        // on every individual token, if the run starts with a recognized reverse-DNS package-name
+        // prefix (see REVERSE_DNS_PACKAGE_PREFIXES's own javadoc) AND the query itself actually has a
+        // genuine Maven-coordinate shape AND its colon-suffixed tail actually relates back to the
+        // matched candidate itself (see queryLooksLikeReverseDnsCoordinate/
+        // matchedArtifactTailRelatesToCandidate's own javadoc — peer review REVISE round 2,
+        // 2026-09-06) — a Maven groupId's leading TLD-like segment is real structure, not noise, but
+        // it's essentially never itself a CPE vendor slug, so requiring vendorExplains on it alone
+        // structurally rejected every Maven coordinate whose match didn't happen to start at token 0.
+        // Gating on the query's own shape alone is not enough (round 2: "net.framework:x64" has the
+        // identical two-dot-segment-then-colon shape as the genuine "io.netty:netty-all"), so the
+        // tail-relatedness check is what tells them apart — a real Maven artifactId is conventionally
+        // derived from (or equal to) the matched product identity itself, an arbitrary colon-suffixed
+        // qualifier like "x64" is not.
+        //
+        // Backlog item 412 (real-devDB re-measurement, 2026-09-07): item 367's original bypass only
+        // ever consulted REVERSE_DNS_PACKAGE_PREFIXES for the single token immediately ahead of
+        // `start`, so it only ever rescued a groupId whose non-TLD segment(s) all happened to pass
+        // plain vendorExplains too (e.g. "com.google.guava" -> "google" whole-token-matches the CPE
+        // vendor "google"). A groupId with 3+ segments routinely has one or more *intermediate*
+        // segments that are neither the TLD nor lexically related to the CPE vendor at all — e.g.
+        // "com.fasterxml.jackson.core" (CPE vendor "fasterxml", intermediate segments "jackson"/
+        // "core"), "com.squareup.retrofit2" (CPE vendor "squareup", intermediate segment "retrofit2"),
+        // "org.apache.httpcomponents" (CPE vendor "apache", intermediate segment "httpcomponents"),
+        // and "org.springframework.boot" (CPE vendor "pivotal_software"/"vmware", neither of which
+        // appears anywhere in the groupId at all — "springframework"/"boot" have no lexical relation
+        // to either). Measured live: 4 of item 367's originally-claimed-but-never-actually-rescued
+        // golden-300 rows share exactly this shape. Once the query is already confirmed to be a
+        // genuine Maven coordinate whose artifact tail relates back to the match (the same two
+        // structural guards item 367 already required), the intermediate groupId segments carry no
+        // additional vendor signal one way or the other — they're conventionally an organizational/
+        // package namespace, not evidence of vendor identity — so treating the *whole* leading run as
+        // explained (rather than only the single first token) is the natural extension, not a new
+        // heuristic. See item 406 (recorded as a residual limitation, not fixed by this change): this
+        // does widen the surface where a Maven coordinate is admitted without any leading segment
+        // actually vendor-confirming the CPE entry when the item's own vendor field is blank (the
+        // common case for every Maven row in this project's fixtures) — the itemVendorContradicts and
+        // matchedArtifactTailRelatesToCandidate guards below are what's left to catch a wrong-vendor
+        // candidate in that case, same residual gap item 406 already flagged, not a new one.
         //
         // Peer review REVISE round 3 (2026-09-07): the bypass above must also require
         // !itemVendorContradicts(...) — without it, whenever the Direction 2 match itself starts at
@@ -2727,19 +2771,34 @@ public class Stage1IdentificationService {
         // (no leading tokens at all) is the common case across the candidate pool scan, and neither
         // queryLooksLikeReverseDnsCoordinate's regex nor matchedArtifactTailRelatesToCandidate's
         // token walk is ever consulted by the loop below when there's no leading token to bypass.
-        boolean queryLooksLikeMavenCoordinate = start > 0
+        // Backlog item 412: also requires the *first* leading token specifically (not just some
+        // token before `start`) to be a recognized reverse-DNS prefix — this is what keeps the
+        // bypass narrowly scoped to an actual groupId-shaped leading run (TLD followed by however
+        // many intermediate namespace segments) rather than firing for any dot-and-colon-shaped
+        // string whose tail happens to relate to the match.
+        //
+        // Backlog item 412 REVISE round 1 (senior review, 2026-09-07): renamed from
+        // queryLooksLikeMavenCoordinate to bypassLeadingRunAsMavenCoordinate — this boolean already
+        // folds in !itemVendorContradicts, so it's the bypass decision itself, not just a shape
+        // judgment about the query string. Conditions are ordered cheapest-first (all are
+        // side-effect-free predicates, so reordering doesn't change behavior): a plain int
+        // comparison, a hash-set lookup, itemVendorContradicts (trivially false for the common
+        // blank-item-vendor case per its own javadoc), then the two string-walking checks
+        // (queryLooksLikeReverseDnsCoordinate's regex match, matchedArtifactTailRelatesToCandidate's
+        // token-by-token walk). The loop below now skips entirely when this is true, rather than
+        // re-checking it on every iteration — vendorExplains has nothing left to add once the bypass
+        // has already vouched for the whole leading run.
+        boolean bypassLeadingRunAsMavenCoordinate = start > 0
+                && REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(0))
+                && !itemVendorContradicts(normalizedItemVendor, cpeVendor)
                 && queryLooksLikeReverseDnsCoordinate(normalizedQuery)
                 && matchedArtifactTailRelatesToCandidate(normalizedQuery, candidateTokens);
-        for (int i = 0; i < start; i++) {
-            if (vendorExplains(cpeVendor, queryTokens.get(i))) {
-                continue;
+        if (!bypassLeadingRunAsMavenCoordinate) {
+            for (int i = 0; i < start; i++) {
+                if (!vendorExplains(cpeVendor, queryTokens.get(i))) {
+                    return false;
+                }
             }
-            if (queryLooksLikeMavenCoordinate
-                    && REVERSE_DNS_PACKAGE_PREFIXES.contains(queryTokens.get(i))
-                    && !itemVendorContradicts(normalizedItemVendor, cpeVendor)) {
-                continue;
-            }
-            return false;
         }
         // REVISE item 5: a single-token candidate that matched with nothing ahead of it (start == 0)
         // has no leading anchor at all vouching for the tie — the trailing leftovers must be
@@ -2802,12 +2861,25 @@ public class Stage1IdentificationService {
      * coordinate from an adversarially-constructed lookalike (a reverse-DNS-dotted identifier, e.g. a
      * Flatpak/Snap app ID like {@code org.videolan.VLC}, with an arbitrary colon-suffixed qualifier
      * tacked on). What genuinely distinguishes them: a real Maven {@code artifactId} is conventionally
-     * derived from, or equal to, the very product identity the candidate itself matched on (95% of
-     * this fix's own recovered rows: {@code guava:guava}, {@code slf4j-api}/{@code slf4j}, {@code
-     * netty-all}/{@code netty}, {@code jackson-databind}/{@code jackson}, {@code okhttp}/{@code
-     * okhttp3}, {@code logback-classic}/{@code logback}) — an arbitrary qualifier like {@code x64} or
-     * {@code stable} bears no such relationship to whatever the candidate matched. Checks the part of
-     * {@code normalizedQuery} after its first colon (the artifactId/tail) against {@code
+     * derived from, or equal to, the very product identity the candidate itself matched on ({@code
+     * guava:guava}, {@code slf4j-api}/{@code slf4j}, {@code netty-all}/{@code netty}, {@code
+     * jackson-databind}/{@code jackson}, {@code okhttp}/{@code okhttp3}, {@code logback-classic}/
+     * {@code logback} are all real examples of this shape) — an arbitrary qualifier like {@code x64}
+     * or {@code stable} bears no such relationship to whatever the candidate matched.
+     *
+     * <p><b>Backlog item 412 correction (real-devDB re-measurement, 2026-09-07):</b> the list above
+     * was originally captioned "95% of this fix's own recovered rows" — that was wrong on two counts.
+     * First, this check only ever gates whether a leading token is *allowed through*; it never by
+     * itself decides whether a row is ultimately recovered (the leading-token loop in {@link
+     * #explainsQuery} does). Second, and more importantly, of the examples listed, only {@code
+     * guava}/{@code slf4j-api}/{@code okhttp}/{@code netty-all}/{@code logback-classic} were actually
+     * recovered by the version of item 367 that shipped — {@code jackson-databind} was not (its
+     * groupId's intermediate segments "jackson"/"core" defeated the single-token-only bypass that
+     * existed at the time). Item 412 removes that structural rejection cause; see {@link
+     * #explainsQuery}'s Direction 2 loop for the corrected bypass and its own javadoc on why the
+     * actual recovered-row count remains unmeasured against a live re-run.
+     *
+     * <p>Checks the part of {@code normalizedQuery} after its first colon (the artifactId/tail) against {@code
      * candidateTokens} (the very tokens {@link #explainsQuery} just matched) — not the same test as
      * {@link #vendorExplains} (which is one-directional: a whole-token match, or a &gt;=4-character
      * token contained in the *vendor's own* joined tokens), but the same equal-or-&gt;=4-character
