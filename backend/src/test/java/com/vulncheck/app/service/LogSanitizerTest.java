@@ -2,6 +2,7 @@ package com.vulncheck.app.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.net.URI;
 import org.junit.jupiter.api.Test;
 
 /** Closed-mode backlog items 223/258/276: every C0 control character (CR/LF/TAB/ESC/BS/VT/FF/NUL)
@@ -141,5 +142,40 @@ class LogSanitizerTest {
     @Test
     void handlesEmpty() {
         assertThat(LogSanitizer.sanitize("")).isEmpty();
+    }
+
+    // ---------------------------------------------------------------- sanitizeUrl (item 421) -------
+
+    @Test
+    void sanitizeUrlDropsQueryStringAndFragment() {
+        String secret = "sig=SECRETVALUE123&jwt=abc";
+        assertThat(LogSanitizer.sanitizeUrl("https://cdn.example.com/asset/download.zip?" + secret + "#frag"))
+                .isEqualTo("https://cdn.example.com/asset/download.zip")
+                .doesNotContain(secret);
+    }
+
+    @Test
+    void sanitizeUrlAcceptsAlreadyParsedUri() {
+        assertThat(LogSanitizer.sanitizeUrl(URI.create("https://api.github.com/repos/foo/bar/tarball/main?sig=x")))
+                .isEqualTo("https://api.github.com/repos/foo/bar/tarball/main");
+    }
+
+    @Test
+    void sanitizeUrlFallsBackToPlaceholderForAnUnparseableUrl() {
+        // A raw space is not a legal URI reference character (java.net.URI throws
+        // IllegalArgumentException) -- mirrors the shape of a genuinely malformed redirect Location.
+        assertThat(LogSanitizer.sanitizeUrl("not a url")).isEqualTo("(unparseable URL)");
+    }
+
+    @Test
+    void sanitizeUrlUsesRawPathSoAPercentEncodedControlCharacterIsNotDecoded() {
+        // %0D%0A is the percent-encoded form of CR/LF -- URI#getPath() would decode this back into an
+        // actual CR/LF (forging an extra log line), which is exactly what using URI#getRawPath()
+        // (instead) avoids; the literal "%0D%0A" text surviving unharmed is the expected, safe result.
+        URI uri = URI.create("https://cdn.example.com/asset%0D%0AFAKE");
+        assertThat(LogSanitizer.sanitizeUrl(uri))
+                .doesNotContain("\r")
+                .doesNotContain("\n")
+                .contains("%0D%0AFAKE");
     }
 }

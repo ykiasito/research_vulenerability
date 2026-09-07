@@ -246,6 +246,46 @@ class GhsaSyncServiceTest {
         }
     }
 
+    /** Backlog item 421: a redirect {@code Location} that parses fine but points at a host outside
+     *  {@code ALLOWED_HOSTS} used to reach {@code validatedUri}'s {@code "rejecting fetch of {}"}
+     *  {@code log.warn} with the full, unsanitized target URL — including any request-signing query
+     *  string a legitimate GitHub-controlled redirect hop had already attached before landing on the
+     *  disallowed host. Unlike item 418's malformed-{@code Location} case, this path never throws (it
+     *  cleanly reports {@code REDIRECT_TARGET_REJECTED}), so only the log line itself was ever at
+     *  risk — {@code last_sync_error} (built by {@code redirectFailureMessage}) was already safe. */
+    @Test
+    void baselineSyncRejectsANonAllowlistedTarballRedirectTargetWithoutLeakingASignedQueryString() {
+        Harness h = harness(3, null);
+        String secret = "GHSASECRETVALUE777";
+        h.server().expect(method(HttpMethod.GET))
+                .andExpect(requestTo(COMMITS_URL))
+                .andRespond(withSuccess("{\"sha\": \"abc1234000000000000000000000000000000\"}", MediaType.APPLICATION_JSON));
+        h.server().expect(method(HttpMethod.GET))
+                .andExpect(requestTo(TARBALL_URL))
+                .andRespond(withStatus(org.springframework.http.HttpStatus.FOUND)
+                        .header("Location", "https://evil-cdn.example.com/asset?sig=" + secret));
+
+        List<ch.qos.logback.classic.spi.ILoggingEvent> events = captureLogEvents(() -> {
+            SyncResult result = h.service().syncBaseline();
+            assertThat(result.upserted()).isZero();
+            assertThat(result.failed()).isZero();
+        });
+
+        h.server().verify();
+        GhsaSyncState state = ghsaSyncStateRepository.findById((short) 1).orElseThrow();
+        assertThat(state.isSyncInProgress()).isFalse();
+        assertThat(state.getLastSyncError())
+                .contains("not https or not an allowlisted host")
+                .doesNotContain(secret);
+        assertThat(events).isNotEmpty();
+        for (ch.qos.logback.classic.spi.ILoggingEvent event : events) {
+            assertThat(event.getFormattedMessage()).doesNotContain(secret);
+            if (event.getThrowableProxy() != null) {
+                assertThat(ch.qos.logback.classic.spi.ThrowableProxyUtil.asString(event.getThrowableProxy())).doesNotContain(secret);
+            }
+        }
+    }
+
     @Test
     void baselinePrunesAdvisoriesNoLongerPresentInTheTarball() {
         // Seed a pre-existing advisory NOT part of this run's tarball, backdated so it's older than
