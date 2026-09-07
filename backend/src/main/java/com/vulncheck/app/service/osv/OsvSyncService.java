@@ -16,6 +16,7 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
@@ -657,10 +658,23 @@ public class OsvSyncService {
             // invariant ever changes.
             throw new IOException("Rejected non-allowlisted URL: " + LogSanitizer.sanitizeUrl(url));
         }
+        return openZipStreamForUri(uri);
+    }
+
+    /** Backlog item 436: see {@code GhsaSyncService#openStreamForUri}'s javadoc for why the response
+     *  code must be checked before ever calling {@link URLConnection#getInputStream()} — its own
+     *  {@code IOException} embeds the complete request URL (including any query string), which would
+     *  otherwise flow verbatim into {@code osv_sync_state.last_sync_error} (persisted, admin-visible).
+     *
+     *  <p>Package-private (not private) so the item436 regression test can exercise this against a
+     *  local HTTP server without needing to relax the fixed {@link #ALLOWED_HOSTS} check — that check
+     *  itself is exercised separately, via {@link #openZipStream}/{@link #validatedUri}. */
+    StreamWithHeaders openZipStreamForUri(URI uri) throws IOException {
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(10_000);
         connection.setReadTimeout(0); // multi-hundred-MB body, same rationale as GhsaSyncService#openStream
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (osv sync)");
+        checkResponseCode(connection, uri);
         InputStream stream = connection.getInputStream();
         return new StreamWithHeaders(stream, connection.getHeaderField("last-modified"), connection.getHeaderField("x-goog-generation"));
     }
@@ -680,10 +694,17 @@ public class OsvSyncService {
             // round) — defensive, not a live leak today.
             throw new IOException("Rejected non-allowlisted URL: " + LogSanitizer.sanitizeUrl(url));
         }
+        return openCsvStreamForUri(uri);
+    }
+
+    /** Backlog item 436 — same rationale/test seam as {@link #openZipStreamForUri}, for the {@code
+     *  modified_id.csv} download. */
+    InputStream openCsvStreamForUri(URI uri) throws IOException {
         URLConnection connection = uri.toURL().openConnection();
         connection.setConnectTimeout(10_000);
         connection.setReadTimeout(0);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (osv sync)");
+        checkResponseCode(connection, uri);
         return connection.getInputStream();
     }
 
@@ -693,6 +714,27 @@ public class OsvSyncService {
         } catch (IOException e) {
             throw new java.io.UncheckedIOException(e);
         }
+    }
+
+    /** Shared by {@link #openZipStreamForUri}/{@link #openCsvStreamForUri} (item436): throws before
+     *  the caller ever gets a chance to call {@link URLConnection#getInputStream()} on a non-2xx
+     *  response, with an exception message built from only the sanitized URL (never the JDK's own
+     *  full-URL-with-query-string message). */
+    private static void checkResponseCode(URLConnection connection, URI uri) throws IOException {
+        if (connection instanceof HttpURLConnection httpConnection) {
+            int responseCode = httpConnection.getResponseCode();
+            if (responseCode < 200 || responseCode >= 300) {
+                throw new IOException("OSV sync: unexpected HTTP " + responseCode + " opening " + sanitizedForLogging(uri));
+            }
+        }
+    }
+
+    /** Redacts everything except scheme/host/path before a URL reaches an exception message (item436,
+     *  same discipline as {@code CveOrgSyncService#sanitizedForLogging}) — {@code uri} here is a fixed
+     *  GCS URL for THIS class's own known-safe {@link #BASE_URL} paths, but the sanitization is kept
+     *  regardless for consistency with the other sync services' identical fix. */
+    private static String sanitizedForLogging(URI uri) {
+        return LogSanitizer.sanitize(uri.getScheme() + "://" + uri.getHost() + uri.getRawPath());
     }
 
     /** Plan §8-3(c): a hard byte cap on top of line-by-line streaming — {@code modified_id.csv} is

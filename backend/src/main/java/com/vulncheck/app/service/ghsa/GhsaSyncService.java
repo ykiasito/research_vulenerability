@@ -12,6 +12,7 @@ import com.vulncheck.app.service.vuln.GhsaRateLimiter;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URLConnection;
 import java.time.OffsetDateTime;
@@ -789,6 +790,22 @@ public class GhsaSyncService {
             // (CveOrgSyncService#download) so this doesn't regress if that invariant ever changes.
             throw new IOException("Rejected non-allowlisted URL: " + LogSanitizer.sanitizeUrl(url));
         }
+        return openStreamForUri(uri);
+    }
+
+    /** Backlog item 436: checks the response code BEFORE ever calling {@link
+     *  URLConnection#getInputStream()} — the JDK's own {@code getInputStream()} throws an {@code
+     *  IOException} embedding the COMPLETE request URL (including any query string) on a non-2xx
+     *  response, which used to flow verbatim into {@code ghsa_sync_state.last_sync_error} (persisted,
+     *  admin-visible) via {@link #doSyncBaseline}'s catch block. {@code TARBALL_URL} itself never
+     *  carries a query string, but {@link #resolveRedirectTarget} can resolve it to a {@code
+     *  codeload.github.com} URL that, in principle, could — checking here rather than trusting that
+     *  never happens matches {@code CveOrgSyncService#download}'s equivalent guard (item416).
+     *
+     *  <p>Package-private (not private) so the item436 regression test can exercise this against a
+     *  local HTTP server without needing to relax the fixed, github-only {@link #ALLOWED_HOSTS} check
+     *  — that check itself is exercised separately, via {@link #openStream}/{@link #validatedUri}. */
+    InputStream openStreamForUri(URI uri) throws IOException {
         // Plain URLConnection, not ghsaSyncRestClient — same rationale as CveOrgSyncService#download:
         // a multi-hundred-MB streaming download needs an effectively unbounded read timeout, which
         // this app's bounded-JSON-response clients deliberately don't provide.
@@ -796,7 +813,21 @@ public class GhsaSyncService {
         connection.setConnectTimeout(10_000);
         connection.setReadTimeout(0);
         connection.setRequestProperty("User-Agent", "vulncheck-server/0.1 (ghsa sync)");
+        if (connection instanceof HttpURLConnection httpConnection) {
+            int responseCode = httpConnection.getResponseCode();
+            if (responseCode < 200 || responseCode >= 300) {
+                throw new IOException("GHSA sync: unexpected HTTP " + responseCode + " opening " + sanitizedForLogging(uri));
+            }
+        }
         return connection.getInputStream();
+    }
+
+    /** Redacts everything except scheme/host/path before a URL reaches an exception message (item436,
+     *  same discipline as {@code CveOrgSyncService#sanitizedForLogging}) — {@code uri} here can carry
+     *  a query string once resolved through a redirect (see {@link #openStreamForUri}'s own javadoc),
+     *  which must never reach {@code ghsa_sync_state.last_sync_error}. */
+    private static String sanitizedForLogging(URI uri) {
+        return LogSanitizer.sanitize(uri.getScheme() + "://" + uri.getHost() + uri.getRawPath());
     }
 
     /** {@link #openStream} adapted to {@link java.util.function.Function}'s unchecked signature —
