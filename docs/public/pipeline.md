@@ -34,17 +34,18 @@ Tier1が完全に空振りだった場合のみ発火（マーケットプレー
 
 ## Stage2: 脆弱性調査（`Stage2VulnerabilityResearchService`）
 
-Stage1で `IdentifiedProduct` が得られたアイテムのみ対象。3つの `VulnerabilitySource` を**逐次（1つずつ、並行ではない）**問い合わせ、結果を **完全一致するID文字列でのみ**重複排除して統合する。並行化していないのは意図的な設計判断——`ResearchJobProcessingService`が既にジョブ内の複数アイテムを並行処理しているため、ソースループまで並行化してもNVD/GHSAの共有レートリミッタへの同時負荷が増えるだけで明確なスループット向上は見込めない（詳細は`Stage2VulnerabilityResearchService`のクラスjavadoc参照）。
+Stage1で `IdentifiedProduct` が得られたアイテムのみ対象。4つの `VulnerabilitySource`（NVD/OSV/GHSA/cve.org）を**逐次（1つずつ、並行ではない）**問い合わせ、結果を **完全一致するID文字列でのみ**重複排除して統合する。並行化していないのは意図的な設計判断——`ResearchJobProcessingService`が既にジョブ内の複数アイテムを並行処理しているため、ソースループまで並行化してもNVD/GHSAの共有レートリミッタへの同時負荷が増えるだけで明確なスループット向上は見込めない（詳細は`Stage2VulnerabilityResearchService`のクラスjavadoc参照）。
 
 | ソース | 発火条件 | 特記事項 |
 |---|---|---|
 | `NvdVulnerabilitySource` | CPEが確定している場合のみ | `cpeName`（vendor:product + 実バージョン）でNVDのバージョン範囲解決に委任。専用のバージョン比較ロジックは実装していない（設計上の意図的な逸脱、後述） |
-| `OsvVulnerabilitySource` | ecosystem/packageNameが確定している場合のみ | OSV.devの`version`フィールドでバージョン範囲解決に委任 |
+| `OsvVulnerabilitySource` | ecosystem/packageNameが確定している場合のみ | ローカルの`osv_advisories`/`osv_affected_packages`/`osv_affected_ranges`/`osv_affected_versions`ミラー（`OsvSyncService`）に対する照会のみ、ライブAPI呼び出しなし。バージョン範囲判定は`OsvVersionRange`がこのアプリ側で行う（以前のOSV.devへの委任方式は廃止済み） |
+| `GhsaVulnerabilitySource` | ecosystem/packageNameが確定している場合のみ | ローカルの`ghsa_advisories`/`ghsa_affected_packages`/`ghsa_affected_ranges`/`ghsa_affected_versions`ミラー（`GhsaSyncService`）に対する照会のみ、ライブAPI呼び出しなし。`cve_id`が付いているアドバイザリは常にそちらをfindingのIDとして採用し、GHSA単独（CVE未割当）のもののみ`ghsa_id`にフォールバックする |
 | `CveOrgVulnerabilitySource` | 常時（識別済みアイテム全般） | ローカルの`cve_org_records`/`cve_org_affected_products`ミラー（`CveOrgSyncService`）に対する照会のみ、ライブAPI呼び出しなし。CSVの生の`product_name`/`vendor`テキストで照会し、Stage1と同じ`pg_trgm`あいまい一致方式を使う（レジストリ/CPEのエコシステムには乗らないため） |
 
-**GHSA（`GhsaVulnerabilitySource`）は`@Component`を外してあり、上記には含まれない（2026-08-25時点）**: GitHub未認証REST advisoriesは60req/hourしか許されず、Stage2のper-item fan-out（アイテム1件につき1呼び出し）に組み込むと1,000件ジョブで約18時間のスリープだけで「1,000件/3時間」目標を単独で突破してしまうと判明したため、無効化した。OSV.devがGHSAアドバイザリーの大半を既に取り込んでいるため、per-item経路からの脱落は許容される冗長性の喪失として扱っている。クラス自体と`GhsaRateLimiter`は削除せず残してあり、将来の**リポジトリ単位（アイテム単位ではない）**利用を想定している——65秒間隔のレートリミットはリポジトリ単位の呼び出し回数となら両立する。再有効化する場合は、単に`@Component`を付け戻すのではなく、per-item fan-outに戻さない設計にすること（詳細な経緯は`GhsaVulnerabilitySource`のクラスjavadoc参照）。
+**GHSA（`GhsaVulnerabilitySource`）は`@Component`登録済みで、上記の4ソースに含まれる**: 以前はGitHub未認証REST advisories（60req/hourしか許されない）へのper-item fan-outライブ問い合わせだったため、1,000件ジョブで約18時間のスリープが発生し「1,000件/3時間」目標を単独で突破してしまう問題があり、一時的に`@Component`を外して無効化していた。現在はその per-item ライブ問い合わせ実装自体を、`GhsaSyncService`が事前にバックグラウンド同期するローカルミラー参照方式に置き換えており、ライブAPI呼び出しが無くなったためレート制限の制約自体が解消し、通常のStage2フローに再度組み込まれている。`GhsaRateLimiter`は削除されていないが、現在は`GhsaSyncService`側の同期処理が使う別インスタンスであり、この`find()`呼び出し経路では使われない。詳細は`GhsaVulnerabilitySource`のクラスjavadoc参照。
 
-**設計上の意図的な逸脱**: 当初案ではエコシステムごとの専用バージョン比較ロジック（semver/PEP440/Maven/Go）を実装する想定だったが、各APIが持つサーバーサイドのバージョン範囲解決に委任する方式にした。自前の多エコシステム比較器より正確と判断したため。
+**設計上の意図的な逸脱**: 当初案ではエコシステムごとの専用バージョン比較ロジック（semver/PEP440/Maven/Go）を実装する想定だったが、各APIが持つサーバーサイドのバージョン範囲解決に委任する方式にした。自前の多エコシステム比較器より正確と判断したため。ただしOSV/GHSAについては、その後のミラー方式への移行（上記）でサーバーサイド委任ができなくなり、`OsvVersionRange`によるこのアプリ側でのバージョン範囲判定に切り替わっている（詳細は`OsvVersionRange`のクラスjavadoc参照）。
 
 **既知の簡略化**: CVEとGHSAが同一の実際の脆弱性を指していても、ID文字列が異なれば別々の行として残る（エイリアス解決は未実装）。
 
